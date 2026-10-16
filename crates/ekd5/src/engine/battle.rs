@@ -73,6 +73,8 @@ pub struct Unit {
     pub sprite_idx: usize,
     pub pose: Option<u8>,
     pub fade: u8,
+    /// 떠나는 연출 (종류 0 퇴각 / 1 퇴장 / 2 사망, 진행 틱) — 원작 FUN_00443b0b
+    pub leave: Option<(u8, u32)>,
 }
 
 /// 전투 단계
@@ -471,6 +473,7 @@ impl Battle {
             sprite_idx: sprite_index(person, off.job, side),
             pose: None,
             fade: 16,
+            leave: None,
             off,
         }
     }
@@ -1520,6 +1523,26 @@ impl Battle {
     }
 
     /// 걷기 진행. 모두 섰으면 true
+    /// 떠나는 연출 시작 (원작 FUN_004438a5 → FUN_00443b0b). 반환: 걸리는 틱
+    /// 0 퇴각: SE16, 두 번 깜빡이고 사라짐 / 1 퇴장: SE06, SE17 과 함께 가라앉음 / 2 사망: 무릎 꿇고 점점 빨리 깜빡인 뒤 SE22 와 함께 흩어짐
+    pub fn start_leave(&mut self, u: usize, kind: u8) -> u32 {
+        if !self.units[u].visible {
+            return 0;
+        }
+        self.units[u].leave = Some((kind, 0));
+        match kind {
+            0 => {
+                self.sounds.push("SE16.WAV".into());
+                14
+            }
+            1 => {
+                self.sounds.push("SE06.WAV".into());
+                20
+            }
+            _ => 46,
+        }
+    }
+
     /// 걷는 소리 (원작 FUN_004414fb): 도착 칸 지형 2 → 27, 7 → 26, 9·13 → 29, 10 → 28,
     /// 그 외 병종 그룹 0·3·4·11·13 → 24, 5·21·22 → 25, 20 → 없음, 나머지 23
     fn step_sound(&self, u: usize) -> Option<u8> {
@@ -1565,6 +1588,31 @@ impl Battle {
         }
         if let Some(w) = self.dmg_win.as_mut() {
             w.t += 1;
+        }
+        let mut se = Vec::new();
+        for un in &mut self.units {
+            if let Some((k, t)) = un.leave {
+                let end = match k {
+                    0 => 14,
+                    1 => 20,
+                    _ => 46,
+                };
+                if k == 1 && t == 6 {
+                    se.push("SE17.WAV");
+                }
+                if k == 2 && t == 28 {
+                    se.push("SE22.WAV");
+                }
+                if t >= end {
+                    un.leave = None;
+                    un.visible = false;
+                } else {
+                    un.leave = Some((k, t + 1));
+                }
+            }
+        }
+        for x in se {
+            self.sounds.push(x.into());
         }
         for i in stepped {
             if let Some(n) = self.step_sound(i) {
@@ -2303,6 +2351,24 @@ impl Battle {
             if u.fade < 16 && (tick / 2) % 2 == 0 {
                 continue;
             }
+            // 떠나는 연출
+            let mut sink = 0;
+            let mut dissolve = 0;
+            if let Some((k, t)) = u.leave {
+                match k {
+                    0 if (t / 3) % 2 == 1 => continue,
+                    1 if t >= 6 => sink = ((t - 6) * 4).min(48) as i32,
+                    2 if t < 28 => {
+                        // 점점 빨리 깜빡임
+                        let p = if t < 10 { 5 } else if t < 20 { 3 } else { 1 };
+                        if (t / p) % 2 == 1 {
+                            continue;
+                        }
+                    }
+                    2 => dissolve = (t - 28) as i32,
+                    _ => {}
+                }
+            }
             let walking = !u.path.is_empty();
             let step = if walking { (tick / 4) % 2 } else { (tick / 16) % 2 } as i32;
             let (frame, flip) = match u.pose {
@@ -2316,6 +2382,8 @@ impl Battle {
                 },
             };
             let frame = if u.hp > 0 && u.hp * 4 < u.max_hp && u.pose.is_none() && !walking { 9 + step } else { frame };
+            // 사망: 무릎 꿇은 그림 (원작 UNIT_MOV +0x5100)
+            let frame = if matches!(u.leave, Some((2, _))) { 9 } else { frame };
             let (sx, sy) = (u.px as i32 - self.cam.0, u.py as i32 - self.cam.1);
             // 공격 동작 (UNIT_ATK) · 맞음 (UNIT_SPC 3)
             let striking = self.strikes.front().is_some_and(|s| s.0 == i);
@@ -2340,8 +2408,15 @@ impl Battle {
                 };
                 let mask = mo.and_then(|o| self.mark.get(o..o + 2304));
                 for yy in 0..48 {
+                    if yy >= 48 - sink {
+                        continue;
+                    }
                     for xx in 0..48 {
                         if mask.is_some_and(|m| m[(yy * 48 + xx) as usize] != 0) {
+                            continue;
+                        }
+                        // 흩어짐: 점점 많은 점을 빼기
+                        if dissolve > 0 && ((xx * 7 + yy * 13) % 18) < dissolve {
                             continue;
                         }
                         let sxp = if flip { 47 - xx } else { xx };

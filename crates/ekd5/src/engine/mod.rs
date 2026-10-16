@@ -181,6 +181,8 @@ pub struct Engine<A: Assets> {
     pub minimap_on: bool,
     /// 직업 이름 (JOBS.TXT, 원작 표 0x496200)
     pub job_names: Rc<Vec<String>>,
+    /// 불러 둔 MCALL 번호 (op6b)
+    mcall_loaded: Option<u8>,
     icons_loaded: bool,
     /// 동영상을 보여줄 수 있는 환경 (웹)
     pub movies: bool,
@@ -254,6 +256,7 @@ impl<A: Assets> Engine<A> {
             icons: Rc::new(icons::Icons::default()),
             minimap_on: false,
             job_names: Rc::new(Vec::new()),
+            mcall_loaded: None,
             icons_loaded: false,
             movies: false,
             logo_shown: false,
@@ -1325,16 +1328,28 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x6B => {
-                // 맵 연출 (원작 FUN_0041645a): x, y, 연출 번호 (100 미만 MEFF, 이상 MCALL), 조용히
+                // 맵 연출 (원작 FUN_0041645a): x, y, 번호, 화면 이동(0 이 아니면 이동).
+                // 번호 100 미만 = MEFF 바로 재생, 109 = 불러 둔 MCALL 재생 (FUN_00423f11), 그 외 100 이상 = MCALL 불러 두기만 (FUN_00423e97)
                 let (x, y, id) = (a(0), a(1), a(2));
+                let preload = self.mcall_loaded;
                 if let Some(b) = self.battle() {
-                    if a(3) == 0 || a(3) == 0xFFFF {
+                    if a(3) != 0 {
                         b.focus(x, y);
                     }
-                    if id < 200 {
-                        b.fx_req = Some((id as u8, vec![(x * battle::CELL + battle::CELL / 2, y * battle::CELL + battle::CELL / 2)]));
+                    let on_screen = x * battle::CELL >= b.cam.0 && x * battle::CELL < b.cam.0 + 640 && y * battle::CELL >= b.cam.1 && y * battle::CELL < b.cam.1 + 480;
+                    let center = vec![(x * battle::CELL + battle::CELL / 2, y * battle::CELL + battle::CELL / 2)];
+                    let play = match id {
+                        0..=99 => Some(id as u8),
+                        109 => preload.map(|m| m + 100),
+                        _ => None,
+                    };
+                    if let Some(fid) = play.filter(|_| on_screen) {
+                        b.fx_req = Some((fid, center));
                         self.wait = Wait::Fx;
                     }
+                }
+                if (100..200).contains(&id) && id != 109 {
+                    self.mcall_loaded = Some((id - 100) as u8);
                 }
             }
             0x5A => {
@@ -1878,12 +1893,42 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x31 | 0x53 => {
-                // 퇴장/퇴각
-                if let Some(u) = b.unit_of(a(1) as usize) {
+                // 퇴장 op31 / 퇴각·사망 op53 (원작 FUN_004154ec·FUN_00417992 → FUN_004438a5):
+                // 방식 0 = 인물 하나, 그 외 = 영역 (x1,y1)-(x2,y2) 의 진영. op53 마지막 인자 1 = 사망
+                let (mode, pid, x1, y1, x2, y2, side) = (a(0), a(1), a(2), a(3), a(4), a(5), a(6));
+                let pick: Vec<usize> = (0..b.units.len())
+                    .filter(|&i| {
+                        let u = &b.units[i];
+                        if !u.visible || u.leave.is_some() {
+                            return false;
+                        }
+                        if mode == 0 || mode == 0xFFFF {
+                            return u.person == pid as usize;
+                        }
+                        let in_side = match side {
+                            0 => u.side == battle::Side::Player,
+                            1 => u.side == battle::Side::Ally,
+                            2 | 3 | 5 => u.side == battle::Side::Enemy,
+                            4 => u.side != battle::Side::Enemy,
+                            _ => true,
+                        };
+                        in_side && (x1..=x2).contains(&u.x) && (y1..=y2).contains(&u.y)
+                    })
+                    .collect();
+                let kind = if op == 0x31 { 1 } else if a(7) == 1 { 2 } else { 0 };
+                let mut wait = 0;
+                for u in pick {
                     if op == 0x53 {
                         b.units[u].hp = 0;
                     }
-                    b.units[u].visible = false;
+                    let (x, y) = (b.units[u].x, b.units[u].y);
+                    if mode == 0 || mode == 0xFFFF {
+                        b.focus(x, y);
+                    }
+                    wait = wait.max(b.start_leave(u, kind));
+                }
+                if wait > 0 {
+                    self.wait = Wait::Ticks(wait);
                 }
             }
             0x4F => {
