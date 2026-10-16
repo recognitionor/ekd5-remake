@@ -56,13 +56,18 @@
     const r = canvas.getBoundingClientRect();
     return [Math.round((e.clientX - r.left) * 640 / r.width), Math.round((e.clientY - r.top) * 480 / r.height)];
   }
+  // 누르고 있는 동안 결정 키를 계속 누른 것으로 보냄 (전장 끌어서 스크롤)
+  let ptrDown = 0;
   canvas.addEventListener("pointermove", (e) => { mouse = toGame(e); });
   canvas.addEventListener("pointerdown", (e) => {
     e.preventDefault(); unlockAudio(); started = true;
     mouse = toGame(e);
-    if (e.button === 2) { pulse = KEY.CANCEL; } else { pulse = KEY.DECIDE; click = 1; }
-    pulseTicks = 3;
+    try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+    if (e.button === 2) { pulse = KEY.CANCEL; pulseTicks = 3; } else { ptrDown = KEY.DECIDE; click = 1; }
   });
+  const ptrUp = (e) => { if (e) mouse = toGame(e); ptrDown = 0; };
+  canvas.addEventListener("pointerup", ptrUp);
+  canvas.addEventListener("pointercancel", () => ptrUp());
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   function holdBtn(id, bit) {
     const b = document.getElementById(id);
@@ -89,6 +94,22 @@
     if (ok) withStr(save, (p, n) => w.restore(p, n));
   }
 
+  // ---------- 명성 게이지 (원작 FUN_00478905 / FUN_0040d717: 바뀔 때 다섯 번에 나눠 깜빡이며 움직임) ----------
+  const fameEl = document.getElementById("fame"), fameFill = document.getElementById("fameFill"),
+        fameBar = document.getElementById("fameBar"), fameNum = document.getElementById("fameNum");
+  let fameShown = -1, fameStep = 0;
+  function updateFame(v) {
+    if (fameShown < 0) fameShown = v;
+    if (fameShown !== v) {
+      if (++fameStep >= 3) { fameStep = 0; fameShown += Math.sign(v - fameShown) * Math.max(1, Math.ceil(Math.abs(v - fameShown) / 5)); }
+      fameEl.classList.toggle("blink", Math.floor(performance.now() / 120) % 2 === 0);
+    } else fameEl.classList.remove("blink");
+    fameFill.style.height = fameShown + "%";
+    fameFill.classList.toggle("low", fameShown < 16);
+    fameBar.classList.toggle("high", fameShown >= 85);
+    fameNum.textContent = fameShown;
+  }
+
   // ---------- 루프 ----------
   setStatus("화면을 탭하면 시작합니다");
   let last = performance.now(), acc = 0;
@@ -96,8 +117,9 @@
     const pulseBits = pulseTicks > 0 ? pulse : 0;
     if (pulseTicks > 0) pulseTicks--;
     const m = mouse || [0, 0];
-    w.tick(held | pulseBits, m[0], m[1], mouse ? 1 : 0, click);
+    w.tick(held | pulseBits | ptrDown, m[0], m[1], mouse ? 1 : 0, click);
     click = 0;
+    updateFame(w.fame());
     const req = readOut(w.take_requests());
     if (req) req.split("\n").forEach(fetchFile);
     const ev = readOut(w.take_events());

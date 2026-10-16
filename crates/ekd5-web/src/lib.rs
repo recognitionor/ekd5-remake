@@ -124,6 +124,12 @@ pub extern "C" fn frame() -> *const u8 {
     with(|app| app.engine.render().as_ptr())
 }
 
+/// 명성 (0..100, 원작 상태줄 게이지)
+#[no_mangle]
+pub extern "C" fn fame() -> i32 {
+    with(|app| app.engine.fame)
+}
+
 /// 이벤트(JSON 한 줄씩): {"effect":"x"} {"log":"..."}
 #[no_mangle]
 pub extern "C" fn take_events() -> *const u8 {

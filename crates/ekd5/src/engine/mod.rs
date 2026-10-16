@@ -146,6 +146,8 @@ pub struct Engine<A: Assets> {
     pub gold: i32,
     pub inventory: Vec<(u8, u8)>,
     pub fame: i32,
+    /// op11 로 단계 이동 대기
+    jump_stage: Option<usize>,
     /// 본진
     pub camp: Option<camp::Camp>,
     pub camp_rule: Option<camp::SortieRule>,
@@ -203,6 +205,7 @@ impl<A: Assets> Engine<A> {
             gold: 0,
             inventory: Vec::new(),
             fame: 0,
+            jump_stage: None,
             camp: None,
             camp_rule: None,
             camp_pending: false,
@@ -543,6 +546,22 @@ impl<A: Assets> Engine<A> {
             }
             0x13 => self.choice == args[0].i(),
             3 => !self.last_if,
+            // 값 비교 (원작 FUN_00413ca4): 0 돈 / 2 명성, 값, 0 이상 / 1 미만 / 그 외 같음. 명성 85 이상 → 가상 모드 분기
+            0x37 => {
+                let a = |i: usize| args.get(i).map_or(0, |a| a.i());
+                let v = match a(0) {
+                    0 => self.gold,
+                    2 => self.fame,
+                    _ => 0,
+                };
+                let r = match a(2) {
+                    0 => v >= a(1),
+                    1 => v < a(1),
+                    _ => v == a(1),
+                };
+                self.log.push(format!("비교 {} = {v} {} {} → {r}", ["돈", "?", "명성"].get(a(0) as usize).unwrap_or(&"?"), ["≥", "<", "="].get(a(2) as usize).unwrap_or(&"="), a(1)));
+                r
+            }
             _ if self.battle().is_some() => self.battle_cond(op, args),
             _ => {
                 self.note(op);
@@ -635,6 +654,17 @@ impl<A: Assets> Engine<A> {
                     break;
                 }
             }
+        }
+        if let Some(n) = self.jump_stage.take() {
+            if matches!(self.scene, Scene::Battle(_)) {
+                self.commit_battle();
+            }
+            self.camp = None;
+            self.camp_pending = false;
+            self.stage = n as u32;
+            self.saved = None;
+            self.vm = None;
+            return;
         }
         if !vm.running && self.error.is_none() && self.stage % 2 == 1 && self.wait == Wait::None {
             // 전투: 절 0(배치·도입) 끝 → 턴 시작. 절 1 사건 본문 끝 → 하던 단계로. 절 2(끝) → 다음 단계
@@ -1218,6 +1248,13 @@ impl<A: Assets> Engine<A> {
                     }
                 }
             }
+            0x11 => {
+                // 단계 이동 (원작 FUN_00418077: 진행 단계 = 값, 새 스크립트 읽기). 갈림길·가상 모드·엔딩
+                self.log.push(format!("단계 이동 → {}", a(0)));
+                self.jump_stage = Some(a(0) as usize);
+                vm.running = false;
+                return Ok(false);
+            }
             0x5B => {
                 // 목표 구역 표시 (원작 FUN_004190c1): x1, y1, x2, y2, 끄기
                 let show = matches!(a(4), 0 | 0xFFFF);
@@ -1637,7 +1674,7 @@ impl<A: Assets> Engine<A> {
                     _ => cnt == n,
                 }
             }
-            0x37 | 0x38 | 0x48 => false,
+            0x38 | 0x48 => false,
             _ => {
                 self.note(op);
                 false
