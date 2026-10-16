@@ -179,6 +179,8 @@ pub struct Engine<A: Assets> {
     pub icons: Rc<icons::Icons>,
     /// 전체 지도 켜기 (웹 버튼)
     pub minimap_on: bool,
+    /// 직업 이름 (JOBS.TXT, 원작 표 0x496200)
+    pub job_names: Rc<Vec<String>>,
     icons_loaded: bool,
     /// 동영상을 보여줄 수 있는 환경 (웹)
     pub movies: bool,
@@ -251,6 +253,7 @@ impl<A: Assets> Engine<A> {
             tutor: None,
             icons: Rc::new(icons::Icons::default()),
             minimap_on: false,
+            job_names: Rc::new(Vec::new()),
             icons_loaded: false,
             movies: false,
             logo_shown: false,
@@ -313,10 +316,16 @@ impl<A: Assets> Engine<A> {
             }
         }
         if !self.icons_loaded {
-            match self.assets.get("ICONS.BIN") {
-                Asset::Pending => return false,
-                Asset::Ready(d) => self.icons = Rc::new(icons::Icons::parse(&d)),
-                Asset::Missing => {}
+            match (self.assets.get("ICONS.BIN"), self.assets.get("JOBS.TXT")) {
+                (Asset::Pending, _) | (_, Asset::Pending) => return false,
+                (i, j) => {
+                    if let Asset::Ready(d) = i {
+                        self.icons = Rc::new(icons::Icons::parse(&d));
+                    }
+                    if let Asset::Ready(d) = j {
+                        self.job_names = Rc::new(String::from_utf8_lossy(&d).lines().map(|l| l.to_string()).collect());
+                    }
+                }
             }
             self.icons_loaded = true;
         }
@@ -573,6 +582,7 @@ impl<A: Assets> Engine<A> {
                         b.cheat = self.cheat;
                         b.icons = self.icons.clone();
                         b.names = Rc::new(self.persons.iter().map(|p| p.name.clone()).collect());
+                        b.job_names = self.job_names.clone();
                         b.items = self.items.clone();
                         b.strategies = self.strategies.clone();
                         b.inventory = self.inventory.clone();

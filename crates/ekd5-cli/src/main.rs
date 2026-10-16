@@ -42,6 +42,28 @@ const TUTOR: &[(&str, &[(u32, u16)])] = &[
     ("bye", &[(0x496c90, 0x9d)]),
 ];
 
+/// 직업 이름 (원작 표 0x496200: u32 주소 × 53)
+fn job_names(exe: &[u8]) -> String {
+    let u16at = |o: usize| u16::from_le_bytes([exe[o], exe[o + 1]]) as usize;
+    let u32at = |o: usize| u32::from_le_bytes([exe[o], exe[o + 1], exe[o + 2], exe[o + 3]]) as usize;
+    let pe = u32at(0x3c);
+    let (n, opt) = (u16at(pe + 6), u16at(pe + 20));
+    let base = u32at(pe + 52);
+    let secs: Vec<(usize, usize, usize)> = (0..n).map(|i| {
+        let o = pe + 24 + opt + i * 40;
+        (u32at(o + 12) + base, u32at(o + 8).max(u32at(o + 16)), u32at(o + 20))
+    }).collect();
+    let off = |va: usize| secs.iter().find(|&&(v, sz, _)| va >= v && va < v + sz).map(|&(v, _, ro)| ro + va - v);
+    let Some(t) = off(0x496200) else { return String::new() };
+    (0..53).map(|k| {
+        let p = u32at(t + k * 4);
+        off(p).map(|o| {
+            let e = exe[o..].iter().position(|&b| b == 0).unwrap_or(0);
+            encoding_rs::EUC_KR.decode(&exe[o..o + e]).0.to_string()
+        }).unwrap_or_default()
+    }).collect::<Vec<_>>().join("\n")
+}
+
 /// PE 가상 주소의 C 문자열 (EUC-KR → UTF-8, 줄바꿈은 \n 두 글자)
 fn tutor_text(exe: &[u8]) -> String {
     let u16at = |o: usize| u16::from_le_bytes([exe[o], exe[o + 1]]) as usize;
@@ -148,6 +170,9 @@ fn extract(src: &Path, dst: &Path) {
     if let Ok(exe) = fs::read(src.join("EKD5.EXE")) {
         fs::write(dst.join("TUTOR.TXT"), tutor_text(&exe)).unwrap();
         names.push("TUTOR.TXT".into());
+        // 직업 이름 표 (원작 0x496200 의 문자열 주소 53개) → JOBS.TXT
+        fs::write(dst.join("JOBS.TXT"), job_names(&exe)).unwrap();
+        names.push("JOBS.TXT".into());
     }
     names.sort();
     fs::write(dst.join("index.txt"), names.join("\n")).unwrap();
