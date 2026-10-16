@@ -46,7 +46,24 @@
     if (!audioOk) return;
     const a = new Audio(DATA + name); a.volume = vol; a.play().catch(() => {});
   }
-  const unlockAudio = () => { audioOk = true; };
+  // 반복 효과음 (원작 op23 방식 0) 과 배경음악 (원작 CD 트랙 → data/BGMnn.m4a, 반복)
+  let loopFx = null, bgm = null, bgmTrack = -1, bgmWant = -1;
+  function setLoop(name) {
+    if (loopFx) { loopFx.pause(); loopFx = null; }
+    if (name && audioOk) { loopFx = new Audio(DATA + name); loopFx.loop = true; loopFx.volume = 0.6; loopFx.play().catch(() => {}); }
+  }
+  function setMusic(n) {
+    bgmWant = n;
+    if (!audioOk || n === bgmTrack) return;
+    if (bgm) { bgm.pause(); bgm = null; }
+    bgmTrack = n;
+    if (n >= 0) {
+      bgm = new Audio(DATA + "BGM" + String(n).padStart(2, "0") + ".m4a");
+      bgm.loop = true; bgm.volume = 0.8; bgm.play().catch(() => {});
+    }
+  }
+  // 브라우저는 첫 터치 전에는 소리를 못 냄 → 터치하면 그때 원하던 음악 시작
+  const unlockAudio = () => { if (!audioOk) { audioOk = true; if (bgmWant >= 0) setMusic(bgmWant); } };
 
   // ---------- 입력 ----------
   let held = 0, mouse = null, click = 0, pulse = 0, pulseTicks = 0, started = false;
@@ -94,6 +111,24 @@
     if (ok) withStr(save, (p, n) => w.restore(p, n));
   }
 
+  // ---------- 동영상 (원작 LOGO/OPEN/END.AVI → mp4). 탭하면 건너뜀 ----------
+  const movie = document.getElementById("movie");
+  function endMovie() {
+    if (!movie.classList.contains("on")) return;
+    movie.pause(); movie.removeAttribute("src"); movie.load(); movie.classList.remove("on");
+    if (bgm && bgmTrack >= 0) bgm.play().catch(() => {});
+    w.movie_done();
+  }
+  function playMovie(name) {
+    if (bgm) bgm.pause();
+    movie.src = DATA + name; movie.muted = !audioOk; movie.classList.add("on");
+    movie.play().catch(() => { movie.muted = true; movie.play().catch(endMovie); });
+  }
+  movie.addEventListener("ended", endMovie);
+  movie.addEventListener("error", endMovie);
+  movie.addEventListener("pointerdown", (e) => { e.preventDefault(); unlockAudio(); endMovie(); });
+  w.enable_movies();
+
   // ---------- 명성 게이지 (원작 FUN_00478905 / FUN_0040d717: 바뀔 때 다섯 번에 나눠 깜빡이며 움직임) ----------
   const fameEl = document.getElementById("fame"), fameFill = document.getElementById("fameFill"),
         fameBar = document.getElementById("fameBar"), fameNum = document.getElementById("fameNum");
@@ -126,6 +161,10 @@
     if (ev) for (const line of ev.split("\n")) {
       const e = JSON.parse(line);
       if ("effect" in e) playWav(e.effect, 0.7);
+      else if ("loop" in e) setLoop(e.loop);
+      else if ("music" in e) setMusic(e.music);
+      else if ("movie" in e) playMovie(e.movie);
+      else if ("ending" in e) { try { const k = "ekd5-endings", v = new Set((localStorage.getItem(k) || "").split(",").filter(Boolean)); v.add(String(e.ending)); localStorage.setItem(k, [...v].join(",")); } catch (_) {} }
       else if ("save" in e) { try { if (e.save) localStorage.setItem("ekd5-save", e.save); else localStorage.removeItem("ekd5-save"); } catch (_) {} }
       else if ("log" in e) console.log("[ekd5]", e.log);
     }

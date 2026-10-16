@@ -151,6 +151,14 @@ impl<A: Assets> Engine<A> {
         let Some(mut camp) = self.camp.take() else { return false };
         let inp = self.input.clone();
         let tapped = inp.pressed & key::DECIDE != 0;
+        // 메뉴 결정 SE02 / 취소 SE01 (원작 FUN_0043f648)
+        if !matches!(camp.view, CampView::Running) {
+            if tapped {
+                self.sounds.push(super::Sound::Effect("SE02.WAV".into()));
+            } else if inp.pressed & key::CANCEL != 0 {
+                self.sounds.push(super::Sound::Effect("SE01.WAV".into()));
+            }
+        }
         // 대화 블록이 끝나면 메뉴로
         if matches!(camp.view, CampView::Running) {
             if self.vm.as_ref().is_some_and(|v| v.running) || self.wait != super::Wait::None {
@@ -261,7 +269,8 @@ impl<A: Assets> Engine<A> {
                     if self.gold >= price && self.inventory.len() < 99 {
                         self.gold -= price;
                         self.inventory.push((it, 1));
-                        self.sounds.push(super::Sound::Effect("SE03.WAV".into()));
+                        // 사기 (원작 FUN_0046fd73: SE10)
+                        self.sounds.push(super::Sound::Effect("SE10.WAV".into()));
                     }
                     let (b, ids) = self.shop_box(tools);
                     let sel = l.sel;

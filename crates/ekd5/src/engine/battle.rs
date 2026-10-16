@@ -154,6 +154,16 @@ pub struct Battle {
     /// 일기토 화면
     pub duel: Option<super::duel::Duel>,
     duel_tick: u32,
+    /// 전투 시작 연출 진행 틱 (원작 op5a FUN_0044db19: 가장자리부터 열고 "작전개시")
+    pub intro: Option<u32>,
+    /// 책략 연출 (원작 MEFF/MCALL)
+    pub fx: Option<super::fx::Fx>,
+    /// 연출 읽기 요청 (연출 번호, 중심들) — 엔진이 읽어 fx 로
+    pub fx_req: Option<(u8, Vec<(i32, i32)>)>,
+    cast_applied: bool,
+    cast_end: Option<u32>,
+    /// 낼 효과음 (엔진이 가져감)
+    pub sounds: Vec<String>,
     ai_plan: Option<AiPlan>,
     cast_t: u32,
     /// 시험 기록용
@@ -288,6 +298,12 @@ impl Battle {
             list47: Vec::new(),
             duel: None,
             duel_tick: 0,
+            intro: None,
+            fx: None,
+            fx_req: None,
+            cast_applied: false,
+            cast_end: None,
+            sounds: Vec::new(),
             ai_plan: None,
             cast_t: 0,
             cast_log: Vec::new(),
@@ -784,6 +800,7 @@ impl Battle {
             let m = format!("{} 레벨 업! Lv{lv}", if slot == 0 { "무기" } else { "방어구" });
             self.cast_log.push(format!("@{m}"));
             self.message = Some((m, 60));
+            self.sounds.push("SE13.WAV".into());
         }
     }
 
@@ -896,11 +913,12 @@ impl Battle {
             un.hp += un.max_hp - old;
             un.level = un.off.level as i32;
             self.message = Some((format!("레벨 업! Lv{}", un.level), 60));
+            self.sounds.push("SE11.WAV".into());
         }
         out
     }
 
-    /// 책략 연출. 끝나면 true
+    /// 책략 연출. 끝나면 true (원작 FUN_004021bc: 연출을 단계마다 그리고, 표지 1 단계에서 효과)
     pub fn cast_step(&mut self, u: usize, sid: u8, cell: (i32, i32), t: u32) -> bool {
         if t == 0 {
             self.units[u].pose = Some(6);
@@ -908,31 +926,77 @@ impl Battle {
             let name = self.strat(sid).map(|s| s.name.clone()).unwrap_or_default();
             self.cast_log.push(name.clone());
             self.message = Some((name, 40));
-        }
-        if t == 14 {
-            let res = self.apply_strategy(u, sid, cell);
-            if let Some(((x, y), txt)) = res.first() {
-                self.popup = Some((x * CELL + 4 - self.cam.0, y * CELL - 8 - self.cam.1, txt.clone(), 30));
+            self.cast_applied = false;
+            self.cast_end = None;
+            if cell.0 * CELL < self.cam.0 + 48 || cell.0 * CELL > self.cam.0 + 544 || cell.1 * CELL < self.cam.1 + 48 || cell.1 * CELL > self.cam.1 + 384 {
+                self.focus(cell.0, cell.1);
+            }
+            let id = super::fx::STRATEGY_FX.get(sid as usize).copied().unwrap_or(255);
+            if id != 255 {
+                let mid = |(x, y): (i32, i32)| (x * CELL + CELL / 2, y * CELL + CELL / 2);
+                let centers: Vec<(i32, i32)> = if id >= 100 {
+                    vec![mid(cell)]
+                } else {
+                    let v = self.strat_victims(u, sid, cell);
+                    if v.is_empty() { vec![mid(cell)] } else { v.iter().map(|&i| mid((self.units[i].x, self.units[i].y))).collect() }
+                };
+                self.fx_req = Some((id, centers));
             }
         }
-        if t == 30 {
-            self.units[u].pose = None;
-            self.cast_fx.clear();
+        if self.fx_req.is_some() {
+            return false;
         }
-        if t >= 30 {
-            let mut fading = false;
-            for un in &mut self.units {
-                if un.visible && un.hp <= 0 {
-                    fading = true;
-                    un.fade = un.fade.saturating_sub(1);
-                    if un.fade == 0 {
-                        un.visible = false;
+        if self.cast_end.is_none() {
+            if let Some(mut f) = self.fx.take() {
+                if f.sound_now() {
+                    self.sounds.push(format!("SE_M_{:02}.WAV", f.sound));
+                }
+                let hit = f.hit_now() || !f.has_hit() && f.step * 2 >= 1 && f.step == 1;
+                let done = f.advance();
+                if hit && !self.cast_applied {
+                    self.cast_apply(u, sid, cell);
+                }
+                if done {
+                    if !self.cast_applied {
+                        self.cast_apply(u, sid, cell);
                     }
+                    self.cast_end = Some(t);
+                } else {
+                    self.fx = Some(f);
+                    return false;
+                }
+            } else {
+                // 연출 없음: 예전 시간표
+                if t >= 14 && !self.cast_applied {
+                    self.cast_apply(u, sid, cell);
+                }
+                if t < 30 {
+                    return false;
+                }
+                self.cast_end = Some(t);
+            }
+        }
+        self.units[u].pose = None;
+        self.cast_fx.clear();
+        let mut fading = false;
+        for un in &mut self.units {
+            if un.visible && un.hp <= 0 {
+                fading = true;
+                un.fade = un.fade.saturating_sub(1);
+                if un.fade == 0 {
+                    un.visible = false;
                 }
             }
-            return !fading;
         }
-        false
+        !fading
+    }
+
+    fn cast_apply(&mut self, u: usize, sid: u8, cell: (i32, i32)) {
+        self.cast_applied = true;
+        let res = self.apply_strategy(u, sid, cell);
+        if let Some(((x, y), txt)) = res.first() {
+            self.popup = Some((x * CELL + 4 - self.cam.0, y * CELL - 8 - self.cam.1, txt.clone(), 30));
+        }
     }
 
     /// 예상 물리 피해 (난수·명중 빼고)
@@ -1551,6 +1615,10 @@ impl Battle {
                 self.units[x].pose = Some(6);
                 let m = format!("@공격 {}→{}", self.units[x].person, self.units[y].person);
                 self.cast_log.push(m);
+                // 휘두르는 소리 (원작 FUN_00404849: 그룹 0,1,7,9,10,14,15,18 → 34, 2·4 → 37, 그 외 32)
+                let g = self.group(x);
+                let se = if matches!(g, 0 | 1 | 7 | 9 | 10 | 14 | 15 | 18) { 0x22 } else if matches!(g, 2 | 4) { 0x25 } else { 0x20 };
+                self.sounds.push(format!("SE{se:02}.WAV"));
             }
             if st == 8 {
                 let (vx, vy) = (self.units[y].x, self.units[y].y);
@@ -1560,6 +1628,8 @@ impl Battle {
                     self.gear_exp(x, 0, if dmg.is_none() { 1 } else if ly < lx { 2 } else { 3 });
                 }
                 self.gear_exp(y, 1, if dmg.is_none() { 1 } else if lx < ly { 3 } else { 4 });
+                // 맞는 소리 (원작 FUN_004044e6: 피해 없음 30, 맞음 35, 치명이면 +1)
+                self.sounds.push(format!("SE{:02}.WAV", if dmg.is_some() { 35 } else { 30 } + crit as u32));
                 let text = match dmg {
                     None => "빗나감".to_string(),
                     Some(v) => {
@@ -1567,6 +1637,8 @@ impl Battle {
                         self.units[y].pose = Some(9);
                         if self.units[y].hp <= 0 {
                             self.killed_by = Some(x);
+                            // 퇴각 소리 (원작 FUN_004438a5)
+                            self.sounds.push("SE16.WAV".into());
                         }
                         // 경험치
                         let killed = self.units[y].hp <= 0;
@@ -1579,6 +1651,7 @@ impl Battle {
                             un.hp += un.max_hp - old_max;
                             un.level = un.off.level as i32;
                             self.message = Some((format!("레벨 업! Lv{}", un.level), 60));
+            self.sounds.push("SE11.WAV".into());
                         }
                         if crit { format!("치명타 {v}") } else { format!("{v}") }
                     }
@@ -1808,7 +1881,7 @@ impl Battle {
             Phase::Selected { cells, .. } => (cells.clone(), self.col[0]),
             Phase::Targeting { cells, .. } | Phase::StratTarget { cells, .. } => (cells.clone(), self.col[1]),
             Phase::ToolTarget { cells, .. } => (cells.clone(), self.col[0]),
-            Phase::Cast { .. } => (self.cast_fx.clone(), self.col[5]),
+            Phase::Cast { .. } if self.fx.is_none() => (self.cast_fx.clone(), self.col[5]),
             _ => (Vec::new(), 0),
         };
         for (x, y) in cells {
@@ -1965,6 +2038,20 @@ impl Battle {
                 draw_text(scr, f, 296, 222, s, story::NAME);
             }
             _ => {}
+        }
+        if let Some(f) = &self.fx {
+            f.render(scr, self.cam);
+        }
+        if let Some(t) = self.intro {
+            // 가장자리에서 가운데로 열림 (16틱), 그 뒤 "작전개시" (원작 문자열 0x498a04)
+            let open = (t as i32 * 20).min(320);
+            scr.fill(open, 0, 640 - open * 2, 480, self.col[6]);
+            if t >= 14 {
+                let txt = "작전개시";
+                let k = 3;
+                let w = txt.chars().count() as i32 * 16 * k;
+                story::draw_text_big(scr, f, 320 - w / 2, 240 - 8 * k, txt, k, self.col[4], self.col[6]);
+            }
         }
         if let Some(d) = self.duel.as_mut() {
             if tick != self.duel_tick {

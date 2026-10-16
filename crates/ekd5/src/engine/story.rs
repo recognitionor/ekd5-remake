@@ -410,6 +410,28 @@ pub const TEXT: u8 = 0x1F;
 pub const NAME: u8 = 62;
 
 /// 글자 그리기 (EUC-KR). col = 팔레트 번호 (창 글자색이 아니면 그림자)
+/// k 배 크게 쓴 글 (테두리 col_edge)
+pub fn draw_text_big(scr: &mut Screen, f: &Font, x: i32, y: i32, s: &str, k: i32, col: u8, col_edge: u8) {
+    let (b, _, _) = encoding_rs::EUC_KR.encode(s);
+    for (dx, dy, c) in [(-2, 0, col_edge), (2, 0, col_edge), (0, -2, col_edge), (0, 2, col_edge), (0, 0, col)] {
+        let mut cx = x;
+        for code in font::codes(&b) {
+            if let Some((w, rows)) = f.glyph(code) {
+                for (r, bits) in rows.iter().enumerate() {
+                    for bx in 0..w {
+                        if bits & (0x8000 >> bx) != 0 {
+                            scr.fill(cx + bx * k + dx, y + r as i32 * k + dy, k, k, c);
+                        }
+                    }
+                }
+                cx += w * k;
+            } else {
+                cx += if code >= 0x100 { 16 * k } else { 8 * k };
+            }
+        }
+    }
+}
+
 pub fn draw_text(scr: &mut Screen, f: &Font, x: i32, y: i32, s: &str, col: u8) {
     let (b, _, _) = encoding_rs::EUC_KR.encode(s);
     let mut cx = x;

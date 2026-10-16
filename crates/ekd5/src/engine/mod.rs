@@ -5,6 +5,7 @@ pub mod assets;
 pub mod battle;
 pub mod camp;
 pub mod duel;
+pub mod fx;
 pub mod screen;
 pub mod story;
 pub mod ui;
@@ -42,6 +43,13 @@ pub struct Input {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Sound {
     Effect(String),
+    /// 효과음 반복 (원작 op23 방식 0: SND_LOOP) / 정지
+    EffectLoop(String),
+    EffectStop,
+    /// 동영상 (원작 op22: 0 LOGO, 1 OPEN, 2 END)
+    Movie(String),
+    /// 엔딩 본 기록 (원작 op0f → SVCMN.E5S)
+    Ending(i32),
     /// CD 음악 트랙 번호 (원작 op24: 인자+2), None = 정지
     Music(Option<i32>),
 }
@@ -107,6 +115,8 @@ pub enum Wait {
     Fade(u8),
     /// 자막 넘기기
     Key,
+    /// 동영상 (웹이 다 보여주면 movie_done)
+    Movie,
 }
 
 pub struct Engine<A: Assets> {
@@ -148,6 +158,16 @@ pub struct Engine<A: Assets> {
     pub fame: i32,
     /// op11 로 단계 이동 대기
     jump_stage: Option<usize>,
+    vm_drop: bool,
+    /// 얼굴 상태 (원작 DAT_004baee8+0x11, op20): 아래 4비트 조조 차림, 0x10 35번, 0x20 8번, 0x40 4번, 0x80 하후돈 두 눈
+    pub face_state: u8,
+    /// 장 번호 −1 (원작 +6, op67): 2 이상이면 조조 나이 든 얼굴
+    pub chapter: u8,
+    /// 인물 그림 바꾸기 (원작 op35, 장수 기록 +2)
+    pub sprite_over: std::collections::BTreeMap<usize, u16>,
+    /// 동영상을 보여줄 수 있는 환경 (웹)
+    pub movies: bool,
+    logo_shown: bool,
     /// 본진
     pub camp: Option<camp::Camp>,
     pub camp_rule: Option<camp::SortieRule>,
@@ -206,6 +226,12 @@ impl<A: Assets> Engine<A> {
             inventory: Vec::new(),
             fame: 0,
             jump_stage: None,
+            vm_drop: false,
+            face_state: 0,
+            chapter: 0,
+            sprite_over: Default::default(),
+            movies: false,
+            logo_shown: false,
             camp: None,
             camp_rule: None,
             camp_pending: false,
@@ -386,6 +412,17 @@ impl<A: Assets> Engine<A> {
                 }
             }
             Scene::Title { t, .. } => {
+                if !self.logo_shown {
+                    // 원작: 켜면 LOGO.AVI
+                    self.logo_shown = true;
+                    if self.movies {
+                        self.sounds.push(Sound::Movie("LOGO.mp4".into()));
+                        self.wait = Wait::Movie;
+                    }
+                }
+                if self.wait == Wait::Movie {
+                    return;
+                }
                 *t += 1;
                 if *t > 10 && self.input.pressed & key::DECIDE != 0 {
                     self.scene = Scene::Story(Box::default());
@@ -394,7 +431,21 @@ impl<A: Assets> Engine<A> {
                 }
             }
             Scene::End { t } => {
+                if self.wait == Wait::Movie {
+                    return;
+                }
                 *t += 1;
+                // 원작: 엔딩 뒤 제목으로 (FUN_0042ded0)
+                if *t > 90 && self.input.pressed & key::DECIDE != 0 {
+                    self.scene = Scene::Boot;
+                    self.stage = 0;
+                    self.flags.fill(false);
+                    self.roster.clear();
+                    self.officers.clear();
+                    self.inventory.clear();
+                    self.gold = 0;
+                    self.fame = 0;
+                }
             }
             Scene::Story(_) | Scene::Battle(_) => {
                 if !self.load_base() {
@@ -405,6 +456,11 @@ impl<A: Assets> Engine<A> {
                 }
                 if !self.load_battle_map() {
                     return;
+                }
+                if let Scene::Battle(b) = &mut self.scene {
+                    if let Some(t) = b.intro {
+                        b.intro = if t >= 44 { None } else { Some(t + 1) };
+                    }
                 }
                 if self.autoplay {
                     // 시험: 출진은 기본 선택, 본진은 바로 출진
@@ -596,6 +652,7 @@ impl<A: Assets> Engine<A> {
         };
         st.update();
         match self.wait.clone() {
+            Wait::Movie => {}
             Wait::Ticks(n) => {
                 self.wait = if n <= 1 { Wait::None } else { Wait::Ticks(n - 1) };
             }
@@ -654,6 +711,11 @@ impl<A: Assets> Engine<A> {
                     break;
                 }
             }
+        }
+        if self.vm_drop {
+            self.vm_drop = false;
+            self.vm = None;
+            return;
         }
         if let Some(n) = self.jump_stage.take() {
             if matches!(self.scene, Scene::Battle(_)) {
@@ -819,7 +881,25 @@ impl<A: Assets> Engine<A> {
                 let n = a(0);
                 self.sounds.push(Sound::Music(if n == 0xFF { None } else { Some(n + 2) }));
             }
-            0x23 => self.sounds.push(Sound::Effect(format!("SE{:02}.WAV", a(0)))),
+            0x23 => {
+                // 효과음 (원작 FUN_00476c2d / FUN_0047699d): 번호 <100 SEnn, 100.. SE_M_nn, 200.. SE_E_nn.
+                // 방식 0 반복, 0xFF 정지, 1 한 번, 그 외 n 번
+                let n = a(0);
+                let name = match n {
+                    0..=99 => format!("SE{n:02}.WAV"),
+                    100..=199 => format!("SE_M_{:02}.WAV", n - 100),
+                    _ => format!("SE_E_{:02}.WAV", n - 200),
+                };
+                match a(1) {
+                    0 => self.sounds.push(Sound::EffectLoop(name)),
+                    0xFF => self.sounds.push(Sound::EffectStop),
+                    k => {
+                        for _ in 0..k.clamp(1, 4) {
+                            self.sounds.push(Sound::Effect(name.clone()));
+                        }
+                    }
+                }
+            }
             0x27 => {
                 // 장면 전환: 0 = 정지 그림 MMAP[b], 1 = MMAP[c+0x72], 2 = 이야기 맵 d (원작 FUN_00416112 → FUN_0040c017)
                 let mode = a(0);
@@ -842,7 +922,7 @@ impl<A: Assets> Engine<A> {
             0x30 => {
                 // 인물 놓기 (인물, x, y, 방향, 자세)
                 let pid = a(0) as usize;
-                let sprite = self.persons.get(pid).map_or(0, |p| p.sprite);
+                let sprite = self.sprite_over.get(&pid).copied().unwrap_or_else(|| self.persons.get(pid).map_or(0, |p| p.sprite));
                 if let Scene::Story(st) = &mut self.scene {
                     if st.place(&mut self.packs, &mut self.assets, pid, sprite, a(1), a(2), a(3), a(4)).is_err() {
                         vm.pc = at;
@@ -977,6 +1057,7 @@ impl<A: Assets> Engine<A> {
             0x67 => {
                 // 장 제목 카드
                 let (t, _, _) = encoding_rs::EUC_KR.decode(args[1].bytes());
+                self.chapter = (a(0) - 1).max(0) as u8;
                 if let Scene::Story(st) = &mut self.scene {
                     st.card = Some(format!("제{}장  {}", a(0), t));
                     self.wait = Wait::Ticks(75);
@@ -1145,6 +1226,139 @@ impl<A: Assets> Engine<A> {
                     }
                     self.wait = Wait::Dialog;
                 }
+            }
+            // 표지 (블록 머리 이름) · 모드 값 (원작 FUN_0042ee18: 저장 화면 구분용) — 화면 동작 없음
+            0x02 | 0x08 => {}
+            0x20 => {
+                // 얼굴 상태 (원작 FUN_004193de): 0xFF = 아래 5비트 지움, 그 외 = 아래 4비트 바꾸고 값의 위 비트 더함
+                let v = a(0) as u8;
+                self.face_state = if v == 0xFF { self.face_state & 0xE0 } else { (self.face_state & 0xF0) | v };
+            }
+            0x35 => {
+                // 인물 그림 바꾸기 (원작 FUN_004159dd)
+                self.sprite_over.insert(a(0) as usize, a(1) as u16);
+            }
+            0x69 => {
+                // 시간 경과 자막 ("잠시 후…….", 원작 FUN_00415e04)
+                let (t, _, _) = encoding_rs::EUC_KR.decode(args[0].bytes());
+                if let Scene::Story(st) = &mut self.scene {
+                    st.card = Some(t.to_string());
+                    self.wait = Wait::Ticks(45);
+                }
+            }
+            0x31 if self.battle().is_none() => {
+                // 이야기 장면 퇴장 (원작 FUN_004154ec → FUN_0042b1f2)
+                if let Scene::Story(st) = &mut self.scene {
+                    let pid = a(1) as usize;
+                    st.actors.retain(|x| x.id != pid);
+                }
+            }
+            0x5A => {
+                // 전투 시작 연출 (원작 FUN_0044db19)
+                if let Some(b) = self.battle() {
+                    b.intro = Some(0);
+                    self.wait = Wait::Ticks(45);
+                }
+            }
+            0x62 => {
+                // 일기토 진 쪽 쓰러짐 (원작 FUN_0044b25a)
+                let t = self.battle().and_then(|b| b.duel.as_mut()).map(|d| {
+                    let s = if d.f[0].pose == duel::Pose::Tired || d.f[0].pose == duel::Pose::Hurt { 0 } else { 1 };
+                    d.motion(s, 12)
+                });
+                if let Some(t) = t {
+                    self.wait = Wait::Ticks(t + 8);
+                }
+            }
+            0x5D => {
+                // 턴 제한 바꾸기 (원작 FUN_0041946e): 0 = 정하기, 그 외 = 늘리기
+                if let Some(b) = self.battle() {
+                    let v = a(1);
+                    let lim = if a(0) == 0 { v } else { b.turn_limit + v };
+                    if lim > b.turn {
+                        b.turn_limit = lim;
+                        b.message = Some((format!("제한 턴 {lim}"), 60));
+                    }
+                }
+            }
+            0x6A => {
+                // 목표 구역 끄기 (원작 DAT_004be488 = 0)
+                if let Some(b) = self.battle() {
+                    b.goal_zone = None;
+                }
+            }
+            0x51 => {
+                // 전원 회복·상태 풀기 (원작 FUN_0041867a)
+                if let Some(b) = self.battle() {
+                    for u in b.units.iter_mut().filter(|u| u.visible && u.hp > 0) {
+                        u.hp = u.max_hp;
+                        u.mp = u.off.max_mp as i32;
+                        u.status = 0;
+                        u.state = [3; 5];
+                    }
+                }
+            }
+            0x54 => {
+                // 쓰러진 부대 치우기 (원작 FUN_0044ec5a)
+                if let Some(b) = self.battle() {
+                    for u in b.units.iter_mut().filter(|u| u.visible && u.hp <= 0) {
+                        u.visible = false;
+                    }
+                }
+            }
+            // 전투 끝 상태 (원작 FUN_00457fdd: 2 승리, 3 패배). 승패 처리는 스크립트 플래그(0·1)로 함
+            0x49 | 0x0E => {}
+            0x3E => {
+                // 장수 장비 지정 (원작 FUN_0041871f): 인물, 무기, 레벨, 방어구, 레벨, 보조 (0 = 그대로, 1 = 빼기)
+                let mut i = 0;
+                while i + 5 < args.len() {
+                    let v = |k: usize| args[i + k].i();
+                    let pid = v(0) as usize;
+                    if pid < self.persons.len() {
+                        let mut o = self.officer(pid);
+                        for (slot, id, lv) in [(0usize, v(1), v(2)), (1, v(3), v(4))] {
+                            let g = match id {
+                                0 | 0xFFFF => continue,
+                                1 => None,
+                                id => Some((id as u8, if lv == 0xFFFF { 1 } else { lv.max(1) as u8 })),
+                            };
+                            if slot == 0 { o.weapon = g } else { o.armor = g }
+                            o.gear_exp[slot] = 0;
+                        }
+                        match v(5) {
+                            0 | 0xFFFF => {}
+                            1 => o.acc = None,
+                            id => o.acc = Some(id as u8),
+                        }
+                        self.officers.insert(pid, o);
+                    }
+                    i += 6;
+                }
+            }
+            0x22 => {
+                // 동영상 (원작 FUN_00431d07: 0 LOGO 1 OPEN 2 END)
+                if self.movies {
+                    let name = ["LOGO", "OPEN", "END"].get(a(0) as usize).copied().unwrap_or("OPEN");
+                    self.sounds.push(Sound::Movie(format!("{name}.mp4")));
+                    self.wait = Wait::Movie;
+                    return Ok(false);
+                }
+            }
+            0x0F => {
+                // 엔딩 (원작 FUN_00417cc6: 엔딩 번호를 SVCMN.E5S 에 기록 → END.AVI → 제목)
+                self.log.push(format!("엔딩 {}", a(0)));
+                self.sounds.push(Sound::Ending(a(0)));
+                self.sounds.push(Sound::Music(None));
+                self.sounds.push(Sound::EffectStop);
+                if self.movies {
+                    self.sounds.push(Sound::Movie("END.mp4".into()));
+                    self.wait = Wait::Movie;
+                }
+                self.scene = Scene::End { t: 0 };
+                self.save_out = Some(String::new());
+                vm.running = false;
+                self.vm_drop = true;
+                return Ok(false);
             }
             0x2F => {
                 // 인물 모두 치우기 (원작 FUN_004292a5)
@@ -1329,6 +1543,26 @@ impl<A: Assets> Engine<A> {
                     b.gate_queue.remove(0);
                 }
             }
+        }
+        // 책략 연출 (MEFF.E5 항목 / MCALLnn.E5)
+        if let Some((id, centers)) = b.fx_req.clone() {
+            let data: Option<Rc<Vec<u8>>> = if id < 100 {
+                match self.packs.get(&mut self.assets, "MEFF.E5", id as usize) {
+                    Err(Pending) => return false,
+                    Ok(d) => d.map(Rc::new),
+                }
+            } else {
+                match self.assets.get(&format!("MCALL{:02}.E5", id - 100)) {
+                    Asset::Pending => return false,
+                    Asset::Ready(d) => Some(d),
+                    Asset::Missing => None,
+                }
+            };
+            b.fx_req = None;
+            b.fx = data.and_then(|d| fx::Fx::parse(d, &self.screen.pal, centers));
+        }
+        for s in std::mem::take(&mut b.sounds) {
+            self.sounds.push(Sound::Effect(s));
         }
         // 일기토 그림
         if let Some(d) = b.duel.as_mut() {
@@ -1749,6 +1983,16 @@ impl<A: Assets> Engine<A> {
         }
         let inp = self.input.clone();
         let autoplay = self.autoplay;
+        // 명령 메뉴 결정 SE02 / 취소 SE01 (원작 FUN_0043f648, FUN_0045731d)
+        if let Some(b) = self.battle() {
+            use battle::Phase as P;
+            if matches!(b.phase, P::Selected { .. } | P::Menu { .. } | P::Targeting { .. } | P::StratList { .. } | P::StratTarget { .. } | P::ToolList { .. } | P::ToolTarget { .. }) {
+                let se = if inp.pressed & key::DECIDE != 0 { Some("SE02.WAV") } else if inp.pressed & key::CANCEL != 0 { Some("SE01.WAV") } else { None };
+                if let Some(se) = se {
+                    self.sounds.push(Sound::Effect(se.into()));
+                }
+            }
+        }
         let casts: Vec<String> = match self.battle() {
             Some(b) => b.cast_log.drain(..).collect(),
             None => return,
@@ -1909,10 +2153,23 @@ impl<A: Assets> Engine<A> {
 
     /// 대화 얼굴 번호 (원작 FUN_00407997: 대개 얼굴+7, 조조는 0..7 상태별, 일부 인물은 진행 상태에 따라 고정 얼굴)
     fn face_of(&self, pid: usize) -> u16 {
+        // 원작 FUN_00407997
+        let st = self.face_state;
+        let normal = self.persons.get(pid).map_or(7, |p| p.face + 7);
         match pid {
-            0 => 0,
-            1 => 0xDF,
-            _ => self.persons[pid].face + 7,
+            0 => {
+                let k = match st & 0xF {
+                    v @ 1..=3 => v as u16,
+                    _ => 0,
+                };
+                if self.chapter < 2 { k } else { k + 4 }
+            }
+            1 if st & 0xF == 4 => 0xE0,
+            1 if st & 0x80 == 0 => 0xDF,
+            0x23 if st & 0x10 != 0 => 0xD6,
+            8 if st & 0x20 != 0 => 0xE2,
+            4 if st & 0x40 != 0 => 0xE3,
+            _ => normal,
         }
     }
 
@@ -1960,7 +2217,8 @@ impl<A: Assets> Engine<A> {
             })
             .collect();
         let inv: Vec<String> = self.inventory.iter().map(|(i, l)| format!("{i}.{l}")).collect();
-        format!("3;{};{};{};{};{};{};{}", self.stage, flags.join(","), roster.join(","), offs.join(","), self.gold, inv.join(","), self.fame)
+        let spr: Vec<String> = self.sprite_over.iter().map(|(p, v)| format!("{p}.{v}")).collect();
+        format!("3;{};{};{};{};{};{};{};{};{};{}", self.stage, flags.join(","), roster.join(","), offs.join(","), self.gold, inv.join(","), self.fame, self.face_state, self.chapter, spr.join(","))
     }
 
     /// 불러오기 (제목 화면에서 시작하면 그 단계부터)
@@ -1998,7 +2256,22 @@ impl<A: Assets> Engine<A> {
             }).collect()
         });
         self.fame = f.get(7).and_then(|g| g.parse().ok()).unwrap_or(0);
+        self.face_state = f.get(8).and_then(|g| g.parse().ok()).unwrap_or(0);
+        self.chapter = f.get(9).and_then(|g| g.parse().ok()).unwrap_or(0);
+        self.sprite_over = f.get(10).map_or(Default::default(), |s| {
+            s.split(',').filter_map(|e| {
+                let (a, b) = e.split_once('.')?;
+                Some((a.parse().ok()?, b.parse().ok()?))
+            }).collect()
+        });
         true
+    }
+
+    /// 웹: 동영상 끝
+    pub fn movie_done(&mut self) {
+        if self.wait == Wait::Movie {
+            self.wait = Wait::None;
+        }
     }
 
     pub fn take_sounds(&mut self) -> Vec<Sound> {

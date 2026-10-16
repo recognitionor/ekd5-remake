@@ -68,6 +68,14 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
             Some(&(tt, x, y)) => eng.set_input(if tt == t { held | 0x20 } else { held & !0x20 }, Some((x, y)), tt == t),
             None => eng.set_input(held, None, false),
         }
+        // 시험: EKD5_FX="틱:연출번호" — 그 틱에 화면 가운데에 연출
+        if let Some((ft, id)) = std::env::var("EKD5_FX").ok().and_then(|v| { let (a, b) = v.split_once(':')?; Some((a.parse::<u32>().ok()?, b.parse::<u8>().ok()?)) }) {
+            if ft == t {
+                if let ekd5::engine::Scene::Battle(b) = &mut eng.scene {
+                    b.fx_req = Some((id, vec![(b.cam.0 + 320, b.cam.1 + 240)]));
+                }
+            }
+        }
         eng.tick();
         if let Some(sv) = eng.save_out.take() {
             if snap && !sv.is_empty() {

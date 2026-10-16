@@ -124,6 +124,17 @@ pub extern "C" fn frame() -> *const u8 {
     with(|app| app.engine.render().as_ptr())
 }
 
+/// 동영상 재생 가능 알림 / 끝남
+#[no_mangle]
+pub extern "C" fn enable_movies() {
+    with(|app| app.engine.movies = true)
+}
+
+#[no_mangle]
+pub extern "C" fn movie_done() {
+    with(|app| app.engine.movie_done())
+}
+
 /// 명성 (0..100, 원작 상태줄 게이지)
 #[no_mangle]
 pub extern "C" fn fame() -> i32 {
@@ -138,6 +149,10 @@ pub extern "C" fn take_events() -> *const u8 {
         for s in app.engine.take_sounds() {
             match s {
                 Sound::Effect(f) => lines.push(format!("{{\"effect\":{f:?}}}")),
+                Sound::EffectLoop(f) => lines.push(format!("{{\"loop\":{f:?}}}")),
+                Sound::EffectStop => lines.push("{\"loop\":\"\"}".to_string()),
+                Sound::Movie(f) => lines.push(format!("{{\"movie\":{f:?}}}")),
+                Sound::Ending(n) => lines.push(format!("{{\"ending\":{n}}}")),
                 Sound::Music(n) => lines.push(format!("{{\"music\":{}}}", n.unwrap_or(-1))),
             }
         }
