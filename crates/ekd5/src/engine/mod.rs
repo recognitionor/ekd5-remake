@@ -131,6 +131,13 @@ pub struct Engine<A: Assets> {
     pub terrain_tab: Rc<Vec<u8>>,
     /// 조조군 장수 (op3b 로 합류한 순서)
     pub roster: Vec<usize>,
+    /// 조조군 장수 능력 (전투 사이 유지)
+    pub officers: HashMap<usize, crate::officer::Officer>,
+    /// DATA.E5[0] 원자료, 아이템 표
+    pub person_data: Rc<Vec<u8>>,
+    /// 불러온 장수 레벨 (자료 적재 뒤 적용)
+    pending_offs: Vec<(usize, u8, u8)>,
+    pub items: Rc<Vec<u8>>,
     /// 사건 처리 뒤 돌아갈 전투 단계
     resume: Option<battle::Phase>,
     /// 실행할 사건 본문들 (뒤에서부터)
@@ -139,8 +146,10 @@ pub struct Engine<A: Assets> {
     end_checked: bool,
     /// 시험용: 아군도 컴퓨터가 둠
     pub autoplay: bool,
+    /// 시험용: 아군 강화
+    pub cheat: bool,
     /// 전투 시작 시점 저장 (패배 후 다시 하기용)
-    saved: Option<(Vec<bool>, Vec<usize>)>,
+    saved: Option<(Vec<bool>, Vec<usize>, HashMap<usize, crate::officer::Officer>)>,
     /// 단계 시작마다 만든 저장 문자열 (웹이 가져감)
     pub save_out: Option<String>,
     unknown: std::collections::BTreeSet<u16>,
@@ -170,10 +179,15 @@ impl<A: Assets> Engine<A> {
             jobs: Rc::new(Vec::new()),
             terrain_tab: Rc::new(Vec::new()),
             roster: Vec::new(),
+            officers: HashMap::new(),
+            person_data: Rc::new(Vec::new()),
+            pending_offs: Vec::new(),
+            items: Rc::new(Vec::new()),
             resume: None,
             event_queue: Vec::new(),
             end_checked: false,
             autoplay: false,
+            cheat: false,
             saved: None,
             save_out: None,
             unknown: Default::default(),
@@ -202,6 +216,7 @@ impl<A: Assets> Engine<A> {
                 Err(Pending) => return false,
                 Ok(d) => {
                     let d = d.unwrap_or_default();
+                    self.person_data = Rc::new(d.clone());
                     self.persons = d
                         .chunks(32)
                         .filter(|r| r.len() == 32)
@@ -228,15 +243,59 @@ impl<A: Assets> Engine<A> {
             }
         }
         if self.jobs.is_empty() {
-            match (self.packs.get(&mut self.assets, "DATA.E5", 3), self.packs.get(&mut self.assets, "DATA.E5", 4)) {
-                (Ok(j), Ok(t)) => {
+            match (self.packs.get(&mut self.assets, "DATA.E5", 3), self.packs.get(&mut self.assets, "DATA.E5", 4), self.packs.get(&mut self.assets, "DATA.E5", 1)) {
+                (Ok(j), Ok(t), Ok(i)) => {
                     self.jobs = Rc::new(j.unwrap_or_default());
                     self.terrain_tab = Rc::new(t.unwrap_or_default());
+                    self.items = Rc::new(i.unwrap_or_default());
                 }
                 _ => return false,
             }
         }
+        for (p, lv, ex) in std::mem::take(&mut self.pending_offs) {
+            if let Some(r) = self.person_data.get(p * 32..p * 32 + 32) {
+                let mut o = crate::officer::Officer::from_data(p, r);
+                o.set_level(&self.jobs, lv);
+                o.exp = ex;
+                self.officers.insert(p, o);
+            }
+        }
         true
+    }
+
+    /// 전투에서 자란 조조군 장수 능력을 반영
+    fn commit_battle(&mut self) {
+        let roster = self.roster.clone();
+        if let Scene::Battle(b) = &self.scene {
+            for u in &b.units {
+                if u.side == battle::Side::Player && roster.contains(&u.person) {
+                    self.officers.insert(u.person, u.off.clone());
+                }
+            }
+        }
+    }
+
+    /// 인물 능력: 조조군 장수는 저장된 것, 아니면 원자료
+    pub fn officer(&mut self, pid: usize) -> crate::officer::Officer {
+        if let Some(o) = self.officers.get(&pid) {
+            return o.clone();
+        }
+        let r = self.person_data.get(pid * 32..pid * 32 + 32).map(|r| r.to_vec()).unwrap_or_else(|| vec![0; 32]);
+        let o = crate::officer::Officer::from_data(pid, &r);
+        if self.roster.contains(&pid) {
+            self.officers.insert(pid, o.clone());
+        }
+        o
+    }
+
+    /// 조조군 평균 레벨 (원작 FUN_0041adb4: 위아래 1/4 빼고 평균)
+    fn army_level(&mut self) -> u8 {
+        let roster = if self.roster.is_empty() { vec![0] } else { self.roster.clone() };
+        let mut lv: Vec<u8> = roster.iter().map(|&p| self.officer(p).level).collect();
+        lv.sort_unstable_by(|a, b| b.cmp(a));
+        let q = lv.len() / 4;
+        let mid = &lv[q..lv.len() - q];
+        (mid.iter().map(|&v| v as u32).sum::<u32>() / mid.len().max(1) as u32).max(1) as u8
     }
 
     /// 대화/해설 창을 그리는 곳 (이야기 장면 또는 전투 겹침)
@@ -328,14 +387,16 @@ impl<A: Assets> Engine<A> {
                     let mut vm = Vm::new(Rc::new(s));
                     if n % 2 == 1 {
                         match &self.saved {
-                            Some((f, r)) => {
+                            Some((f, r, o)) => {
                                 self.flags = f.clone();
                                 self.roster = r.clone();
+                                self.officers = o.clone();
                             }
-                            None => self.saved = Some((self.flags.clone(), self.roster.clone())),
+                            None => self.saved = Some((self.flags.clone(), self.roster.clone(), self.officers.clone())),
                         }
                         let mut b = battle::Battle::new((n / 2) as usize, self.jobs.clone(), self.terrain_tab.clone());
-                        b.cheat = self.autoplay;
+                        b.cheat = self.cheat;
+                        b.items = self.items.clone();
                         self.scene = Scene::Battle(Box::new(b));
                     } else if !matches!(self.scene, Scene::Story(_)) {
                         self.scene = Scene::Story(Box::default());
@@ -492,7 +553,7 @@ impl<A: Assets> Engine<A> {
             // 전투: 절 0(배치·도입) 끝 → 턴 시작. 절 1 사건 본문 끝 → 하던 단계로. 절 2(끝) → 다음 단계
             if vm.section == 0 {
                 let roster = if self.roster.is_empty() { vec![0] } else { self.roster.clone() };
-                let persons = self.persons.clone();
+                let offs: Vec<crate::officer::Officer> = roster.iter().map(|&p| self.officer(p)).collect();
                 if let Some(b) = self.battle() {
                     if !b.started {
                         // 출진 (원작은 출진 화면에서 고름): 출진 칸이 둘 이상 정해져 있으면 합류 순서대로 자동 배치
@@ -502,8 +563,8 @@ impl<A: Assets> Engine<A> {
                                 if k > 0 && (x, y) == (0, 0) {
                                     break;
                                 }
-                                if b.unit_of(pid).is_none() && pid < persons.len() {
-                                    let u = b.make_unit(pid, &persons[pid], battle::Side::Player, x, y, 1);
+                                if b.unit_of(pid).is_none() {
+                                    let u = b.make_unit(offs[k].clone(), battle::Side::Player, x, y);
                                     b.units.push(u);
                                 }
                             }
@@ -543,6 +604,7 @@ impl<A: Assets> Engine<A> {
                 // 패배 처리 스크립트(플래그 1) → 같은 전투 다시
                 self.log.push("전투 패배 — 다시".into());
             } else {
+                self.commit_battle();
                 self.stage += 1;
                 self.saved = None;
             }
@@ -849,9 +911,37 @@ impl<A: Assets> Engine<A> {
     fn battle_op(&mut self, op: u16, args: &[Arg]) {
         let a = |i: usize| args.get(i).map_or(0, |a| a.i());
         let persons = self.persons.clone();
-        let roster = self.roster.clone();
+        let roster = if self.roster.is_empty() { vec![0] } else { self.roster.clone() };
+        let avg = self.army_level() as i32;
+        let jobs = self.jobs.clone();
+        // 필요한 인물 능력 미리
+        let mut offs: HashMap<usize, crate::officer::Officer> = HashMap::new();
+        let want: Vec<usize> = match op {
+            0x46 | 0x47 => {
+                let n = if op == 0x46 { 11 } else { 12 };
+                args.chunks(n).map(|r| r[0].i() as usize).filter(|&p| p < persons.len()).collect()
+            }
+            0x4C => roster.clone(),
+            0x4E => vec![a(1) as usize],
+            _ => vec![],
+        };
+        for p in want {
+            if p < persons.len() {
+                let o = self.officer(p);
+                offs.insert(p, o);
+            }
+        }
         let Some(b) = self.battle() else { return };
-        let level_of = |adj: i32| if adj == 0xFFFF { 1 } else if adj <= 50 { adj.max(1) } else { (adj - 50).max(1) };
+        // 레벨 조정치 (원작: 50 이하 = 평균 + 값, 그 위 = 평균 − (값−50))
+        let level_of = |adj: i32| -> u8 {
+            if adj == 0xFFFF {
+                avg.max(1) as u8
+            } else if adj <= 50 {
+                (avg + adj).clamp(1, 50) as u8
+            } else {
+                (avg - (adj - 50)).clamp(1, 50) as u8
+            }
+        };
         match op {
             0x44 => b.units.clear(),
             0x45 => b.turn_limit = a(2),
@@ -868,7 +958,11 @@ impl<A: Assets> Engine<A> {
                     } else {
                         (battle::Side::Enemy, r[1].i() == 1, r[3].i(), r[4].i(), r[6].i(), r[8].i(), r[10].i(), r[11].i())
                     };
-                    let mut u = b.make_unit(pid as usize, &persons[pid as usize], side, x, y, level_of(lv));
+                    let mut o = offs.get(&(pid as usize)).cloned().unwrap();
+                    if !roster.contains(&(pid as usize)) {
+                        o.set_level(&jobs, level_of(lv));
+                    }
+                    let mut u = b.make_unit(o, side, x, y);
                     u.visible = !hidden;
                     u.ai = if ai == 0xFFFF { 0 } else { ai as u8 };
                     if matches!(u.ai, 4 | 6) {
@@ -904,8 +998,10 @@ impl<A: Assets> Engine<A> {
                                 un.py = (y * battle::CELL) as f32;
                             }
                             None => {
-                                let u = b.make_unit(pid, &persons[pid], battle::Side::Player, x, y, 1);
-                                b.units.push(u);
+                                if let Some(o) = offs.get(&pid) {
+                                    let u = b.make_unit(o.clone(), battle::Side::Player, x, y);
+                                    b.units.push(u);
+                                }
                             }
                         }
                     }
@@ -938,8 +1034,11 @@ impl<A: Assets> Engine<A> {
                             }
                         }
                         None => {
-                            let u = b.make_unit(pid, &persons[pid], battle::Side::Enemy, a(2), a(3), 1);
-                            b.units.push(u);
+                            if let Some(mut o) = offs.get(&pid).cloned() {
+                                o.set_level(&jobs, avg as u8);
+                                let u = b.make_unit(o, battle::Side::Enemy, a(2), a(3));
+                                b.units.push(u);
+                            }
                         }
                     }
                 }
@@ -1223,6 +1322,7 @@ impl<A: Assets> Engine<A> {
                 if t > 60 {
                     self.log.push(format!("전투 {}", if won { "승리" } else { "패배 — 다시" }));
                     if won {
+                        self.commit_battle();
                         self.stage += 1;
                         self.saved = None;
                     }
@@ -1332,13 +1432,14 @@ impl<A: Assets> Engine<A> {
     pub fn snapshot(&self) -> String {
         let flags: Vec<String> = self.flags.iter().enumerate().filter(|(_, &f)| f).map(|(i, _)| i.to_string()).collect();
         let roster: Vec<String> = self.roster.iter().map(|r| r.to_string()).collect();
-        format!("1;{};{};{}", self.stage, flags.join(","), roster.join(","))
+        let offs: Vec<String> = self.officers.values().map(|o| format!("{}:{}:{}", o.person, o.level, o.exp)).collect();
+        format!("2;{};{};{};{}", self.stage, flags.join(","), roster.join(","), offs.join(","))
     }
 
     /// 불러오기 (제목 화면에서 시작하면 그 단계부터)
     pub fn restore(&mut self, s: &str) -> bool {
         let f: Vec<&str> = s.split(';').collect();
-        if f.len() < 4 || f[0] != "1" {
+        if f.len() < 4 || (f[0] != "1" && f[0] != "2") {
             return false;
         }
         let Ok(stage) = f[1].parse() else { return false };
@@ -1350,6 +1451,12 @@ impl<A: Assets> Engine<A> {
             }
         }
         self.roster = f[3].split(',').filter_map(|v| v.parse().ok()).collect();
+        self.pending_offs = f.get(4).map_or(Vec::new(), |o| {
+            o.split(',').filter_map(|e| {
+                let v: Vec<u32> = e.split(':').filter_map(|x| x.parse().ok()).collect();
+                (v.len() == 3).then(|| (v[0] as usize, v[1] as u8, v[2] as u8))
+            }).collect()
+        });
         true
     }
 

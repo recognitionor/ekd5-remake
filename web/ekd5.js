@@ -83,7 +83,7 @@
   // ---------- 이어하기 ----------
   let save = null;
   try { save = localStorage.getItem("ekd5-save"); } catch (_) {}
-  if (save && !save.startsWith("1;0;")) {
+  if (save && !(save.startsWith("1;0;") || save.startsWith("2;0;"))) {
     const stage = save.split(";")[1];
     const ok = confirm(`저장된 진행(${stage}단계)이 있습니다. 이어서 할까요?\n취소를 누르면 처음부터 시작합니다.`);
     if (ok) withStr(save, (p, n) => w.restore(p, n));
