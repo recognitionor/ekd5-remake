@@ -288,6 +288,9 @@ impl Battle {
     /// 이동 가능한 칸들 (적이 막음)
     pub fn reachable(&self, ui: usize) -> Vec<(i32, i32)> {
         let u = &self.units[ui];
+        if u.x < 0 || u.y < 0 || u.x >= self.cols || u.y >= self.rows {
+            return Vec::new();
+        }
         let mp = self.job_byte(u.job, 0) as i32;
         let mut best = vec![i32::MAX; (self.cols * self.rows) as usize];
         let mut q = VecDeque::new();
@@ -867,12 +870,12 @@ impl Battle {
             Phase::Ai { side: Side::Ally, .. } | Phase::TurnBanner { side: Side::Ally, .. } => "우군",
             _ => "아군",
         };
-        draw_text(scr, f, 8, 4, &format!("{}턴/{}  {}", self.turn, self.turn_limit, side_name), 18);
+        draw_text(scr, f, 8, 4, &format!("{}턴/{}  {}", self.turn, self.turn_limit, side_name), story::TEXT);
         if !self.objective.is_empty() {
-            draw_text(scr, f, 200, 4, &self.objective, 251);
+            draw_text(scr, f, 200, 4, &self.objective, story::NAME);
         }
         if matches!(self.phase, Phase::PlayerIdle) {
-            draw_text(scr, f, 540, 4, "[턴 종료]", 18);
+            draw_text(scr, f, 540, 4, "[턴 종료]", story::NAME);
         }
         // 선택된 부대 정보
         let sel = match &self.phase {
@@ -886,12 +889,12 @@ impl Battle {
             let (bx, by) = self.menu_pos(*unit);
             let has = !self.targets_from(*unit, (self.units[*unit].x, self.units[*unit].y)).is_empty();
             frame_box(scr, bx, by, 120, 64);
-            draw_text(scr, f, bx + 16, by + 8, "공격", if has { 18 } else { 24 });
-            draw_text(scr, f, bx + 16, by + 38, "대기", 18);
+            draw_text(scr, f, bx + 16, by + 8, "공격", if has { story::TEXT } else { 24 });
+            draw_text(scr, f, bx + 16, by + 38, "대기", story::TEXT);
         }
         if let Some((m, _)) = &self.message {
             frame_box(scr, 180, 440, 280, 32);
-            draw_text(scr, f, 196, 448, m, 18);
+            draw_text(scr, f, 196, 448, m, story::TEXT);
         }
         match &self.phase {
             Phase::TurnBanner { side, .. } => {
@@ -901,12 +904,12 @@ impl Battle {
                     Side::Enemy => "적군 차례".to_string(),
                 };
                 frame_box(scr, 200, 210, 240, 44);
-                draw_text(scr, f, 320 - s.chars().count() as i32 * 7, 224, &s, 18);
+                draw_text(scr, f, 320 - s.chars().count() as i32 * 7, 224, &s, story::TEXT);
             }
             Phase::Over { won, .. } => {
                 let s = if *won { "승리!" } else { "패배……" };
                 frame_box(scr, 240, 200, 160, 60);
-                draw_text(scr, f, 296, 222, s, 251);
+                draw_text(scr, f, 296, 222, s, story::NAME);
             }
             _ => {}
         }
@@ -916,7 +919,7 @@ impl Battle {
     fn draw_unit_box(&self, scr: &mut Screen, f: &Font, u: usize) {
         let un = &self.units[u];
         frame_box(scr, 0, 432, 260, 48);
-        draw_text(scr, f, 8, 438, &format!("Lv{} HP {}/{}", un.level, un.hp.max(0), un.max_hp), 18);
-        draw_text(scr, f, 8, 458, &format!("무{} 통{} 지{} 민{}", un.stats[0], un.stats[1], un.stats[2], un.stats[3]), 18);
+        draw_text(scr, f, 8, 438, &format!("Lv{} HP {}/{}", un.level, un.hp.max(0), un.max_hp), story::TEXT);
+        draw_text(scr, f, 8, 458, &format!("무{} 통{} 지{} 민{}", un.stats[0], un.stats[1], un.stats[2], un.stats[3]), story::TEXT);
     }
 }

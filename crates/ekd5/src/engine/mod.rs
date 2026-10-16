@@ -88,6 +88,8 @@ pub enum Scene {
     Title { pic: Pic, t: u32 },
     Story(Box<Story>),
     Battle(Box<battle::Battle>),
+    /// 엔딩 뒤
+    End { t: u32 },
 }
 
 /// 스크립트 대기 상태
@@ -131,6 +133,10 @@ pub struct Engine<A: Assets> {
     pub roster: Vec<usize>,
     /// 사건 처리 뒤 돌아갈 전투 단계
     resume: Option<battle::Phase>,
+    /// 실행할 사건 본문들 (뒤에서부터)
+    event_queue: Vec<usize>,
+    /// 승패 직전 사건 검사를 했는지
+    end_checked: bool,
     /// 시험용: 아군도 컴퓨터가 둠
     pub autoplay: bool,
     /// 전투 시작 시점 저장 (패배 후 다시 하기용)
@@ -165,6 +171,8 @@ impl<A: Assets> Engine<A> {
             terrain_tab: Rc::new(Vec::new()),
             roster: Vec::new(),
             resume: None,
+            event_queue: Vec::new(),
+            end_checked: false,
             autoplay: false,
             saved: None,
             save_out: None,
@@ -210,6 +218,13 @@ impl<A: Assets> Engine<A> {
                         })
                         .collect();
                 }
+            }
+        }
+        if self.screen.window_tex.is_none() {
+            match self.assets.get("MARK.E5") {
+                Asset::Pending => return false,
+                Asset::Ready(d) => self.screen.window_tex = d.get(0x18DC0..0x18DC0 + 32 * 48).map(|t| Pic::new(32, 48, t.to_vec())),
+                Asset::Missing => self.screen.window_tex = Some(Pic::new(32, 48, vec![30; 32 * 48])),
             }
         }
         if self.jobs.is_empty() {
@@ -262,6 +277,9 @@ impl<A: Assets> Engine<A> {
                     self.screen.level = 16;
                 }
             }
+            Scene::End { t } => {
+                *t += 1;
+            }
             Scene::Story(_) | Scene::Battle(_) => {
                 if !self.load_base() {
                     return;
@@ -285,6 +303,13 @@ impl<A: Assets> Engine<A> {
         let name = format!("{}_{}{}.EEX", if n % 2 == 0 { "R" } else { "S" }, n / 20, (n % 20) / 2);
         match self.assets.get(&name) {
             Asset::Pending => false,
+            Asset::Missing if n > 100 => {
+                // 마지막 이야기 뒤 = 끝
+                self.scene = Scene::End { t: 0 };
+                self.saved = None;
+                self.save_out = Some(String::new());
+                false
+            }
             Asset::Missing => {
                 self.error = Some(format!("{name} 없음"));
                 false
@@ -295,6 +320,9 @@ impl<A: Assets> Engine<A> {
                     false
                 }
                 Some(s) => {
+                    self.event_queue.clear();
+                    self.resume = None;
+                    self.end_checked = false;
                     self.log.push(format!("단계 {n}: {name}"));
                     self.save_out = Some(self.snapshot());
                     let mut vm = Vm::new(Rc::new(s));
@@ -489,6 +517,11 @@ impl<A: Assets> Engine<A> {
                 return;
             }
             if vm.section == 1 {
+                self.vm = Some(vm);
+                if self.next_event() {
+                    return;
+                }
+                let Some(vm) = self.vm.take() else { return };
                 if let (Some(p), Some(b)) = (self.resume.take(), self.battle()) {
                     b.phase = p;
                 }
@@ -1055,13 +1088,13 @@ impl<A: Assets> Engine<A> {
         }
     }
 
-    /// 절 1 사건 검사: 머리 조건이 맞는 첫 블록을 실행. 실행했으면 true
+    /// 절 1 사건 검사: 머리 조건이 맞는 블록들을 차례로 실행하도록 줄 세움. 하나라도 있으면 true
     fn check_events(&mut self) -> bool {
         let Some(mut vm) = self.vm.take() else { return false };
-        let mut fired = false;
+        let mut found = Vec::new();
         if vm.sections() > 1 && !vm.running {
             if let Ok(blocks) = vm.blocks(1) {
-                for (start, _) in blocks {
+                for (bi, (start, _)) in blocks.into_iter().enumerate() {
                     vm.pc = start;
                     let mut ok = true;
                     loop {
@@ -1075,27 +1108,43 @@ impl<A: Assets> Engine<A> {
                         }
                     }
                     if ok {
-                        vm.section = 1;
-                        vm.ends.clear();
-                        if vm.enter_body(true).is_ok() {
-                            vm.running = true;
-                            fired = true;
+                        if self.autoplay {
+                            self.log.push(format!("사건 블록 {bi}"));
                         }
-                        break;
+                        found.push(vm.pc);
                     }
                 }
             }
         }
         self.vm = Some(vm);
-        if fired {
-            if let Some(b) = self.battle() {
-                let p = std::mem::replace(&mut b.phase, battle::Phase::Script);
-                if self.resume.is_none() {
-                    self.resume = Some(p);
-                }
+        if found.is_empty() {
+            return false;
+        }
+        self.event_queue = found;
+        self.event_queue.reverse();
+        self.next_event();
+        if let Some(b) = self.battle() {
+            let p = std::mem::replace(&mut b.phase, battle::Phase::Script);
+            if self.resume.is_none() {
+                self.resume = Some(p);
             }
         }
-        fired
+        true
+    }
+
+    /// 줄 선 사건 본문 하나 시작. 없으면 false
+    fn next_event(&mut self) -> bool {
+        let Some(body) = self.event_queue.pop() else { return false };
+        let Some(vm) = self.vm.as_mut() else { return false };
+        vm.section = 1;
+        vm.ends.clear();
+        vm.pc = body;
+        if vm.enter_body(true).is_ok() {
+            vm.running = true;
+            true
+        } else {
+            false
+        }
     }
 
     /// 전투 진행 (스크립트가 쉬는 동안)
@@ -1193,8 +1242,13 @@ impl<A: Assets> Engine<A> {
         let ended = self.battle().is_some_and(|b| {
             b.started && !matches!(b.phase, battle::Phase::Script | battle::Phase::Over { .. }) && (!b.units.iter().any(|u| u.side == battle::Side::Enemy && u.hp > 0) || b.unit_of(0).is_some_and(|u| b.units[u].hp <= 0) || b.turn > b.turn_limit)
         });
-        if ended && self.check_events() {
-            return;
+        if !ended {
+            self.end_checked = false;
+        } else if !self.end_checked {
+            self.end_checked = true;
+            if self.check_events() {
+                return;
+            }
         }
         if let Some(b) = self.battle() {
             if b.started && !matches!(b.phase, battle::Phase::Script | battle::Phase::Over { .. }) {
@@ -1256,6 +1310,14 @@ impl<A: Assets> Engine<A> {
             }
             Scene::Story(st) => st.render(scr, self.font.as_ref(), self.tick),
             Scene::Battle(b) => b.render(scr, self.font.as_ref(), self.tick),
+            Scene::End { .. } => {
+                scr.clear(0);
+                scr.level = 16;
+                if let Some(f) = &self.font {
+                    story::draw_text(scr, f, 250, 220, "- 끝 -", 18);
+                    story::draw_text(scr, f, 176, 260, "플레이해 주셔서 고맙습니다", 18);
+                }
+            }
         }
         if let Some(e) = &self.error {
             if let Some(f) = &self.font {

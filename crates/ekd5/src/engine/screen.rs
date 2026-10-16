@@ -27,11 +27,13 @@ pub struct Screen {
     /// 밝기 0..=16 (16 = 원래). 원작 팔레트 페이드
     pub level: u8,
     rgba: Vec<u8>,
+    /// 창 바탕 무늬 (MARK.E5 0x18dc0, 32×48)
+    pub window_tex: Option<Pic>,
 }
 
 impl Default for Screen {
     fn default() -> Self {
-        Self { px: vec![0; W * H], pal: [[0; 3]; 256], level: 16, rgba: vec![0; W * H * 4] }
+        Self { px: vec![0; W * H], pal: [[0; 3]; 256], level: 16, rgba: vec![0; W * H * 4], window_tex: None }
     }
 }
 

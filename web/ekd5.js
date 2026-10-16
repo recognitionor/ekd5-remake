@@ -104,7 +104,7 @@
     if (ev) for (const line of ev.split("\n")) {
       const e = JSON.parse(line);
       if ("effect" in e) playWav(e.effect, 0.7);
-      else if ("save" in e) { try { localStorage.setItem("ekd5-save", e.save); } catch (_) {} }
+      else if ("save" in e) { try { if (e.save) localStorage.setItem("ekd5-save", e.save); else localStorage.removeItem("ekd5-save"); } catch (_) {} }
       else if ("log" in e) console.log("[ekd5]", e.log);
     }
   }

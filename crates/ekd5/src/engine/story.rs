@@ -311,13 +311,13 @@ impl Story {
                 if let Some(face) = face {
                     scr.blit(face, x - 32, y - 40, None);
                 }
-                draw_text(scr, f, x - name.chars().count() as i32 * 8, y + 42, name, 18);
+                draw_text(scr, f, x - name.chars().count() as i32 * 8, y + 42, name, TEXT);
             }
             if !self.caption.is_empty() {
                 let h = self.caption.len() as i32 * 18 + 12;
                 frame_box(scr, 40, 436 - h, 560, h);
                 for (i, l) in self.caption.iter().enumerate() {
-                    draw_text(scr, f, 56, 442 - h + i as i32 * 18, l, 18);
+                    draw_text(scr, f, 56, 442 - h + i as i32 * 18, l, TEXT);
                 }
             }
             if self.title_timer > 0 {
@@ -330,14 +330,14 @@ impl Story {
             }
             if let Some(c) = &self.card {
                 frame_box(scr, 160, 200, 320, 64);
-                draw_text(scr, f, 320 - c.chars().count() as i32 * 7, 224, c, 251);
+                draw_text(scr, f, 320 - c.chars().count() as i32 * 7, 224, c, NAME);
             }
             if let Some(p) = self.pages.get(self.page) {
                 if self.narration {
                     let h = 144;
                     frame_box(scr, 144, 240 - h / 2, 352, h);
                     for (i, l) in p.lines.iter().enumerate() {
-                        draw_text(scr, f, 168, 240 - h / 2 + 16 + i as i32 * 20, l, 18);
+                        draw_text(scr, f, 168, 240 - h / 2 + 16 + i as i32 * 20, l, TEXT);
                     }
                 } else {
                     self.draw_window(scr, f, p, tick);
@@ -352,7 +352,7 @@ impl Story {
                     if i == self.choice_sel {
                         scr.fill(x0 + 8, y, 344, 22, 24);
                     }
-                    draw_text(scr, f, x0 + 16, y + 3, &format!("{}. {c}", i + 1), 18);
+                    draw_text(scr, f, x0 + 16, y + 3, &format!("{}. {c}", i + 1), TEXT);
                 }
             }
         }
@@ -368,9 +368,9 @@ impl Story {
         if let Some(face) = &self.face {
             scr.blit(face, fx, y + 8, None);
         }
-        draw_text(scr, f, tx - 0x10, y + 6, &p.name, 251);
+        draw_text(scr, f, tx - 0x10, y + 6, &p.name, NAME);
         for (i, l) in p.lines.iter().enumerate() {
-            draw_text(scr, f, tx, y + 0x1A + i as i32 * 16, l, 18);
+            draw_text(scr, f, tx, y + 0x1A + i as i32 * 16, l, TEXT);
         }
         // 다음 표시
         if (tick / 8) % 2 == 0 {
@@ -379,13 +379,37 @@ impl Story {
     }
 }
 
-/// 창 바탕 (임시: 원작 창 그림 대신 단색 + 테두리)
+/// 창 (원작 FUN_004752f2): 32×48 무늬를 깔고, 오른쪽·아래 3px 그림자(0x83,0x85,0x87), 위·왼쪽 1px 선(0x80)
 pub fn frame_box(scr: &mut Screen, x: i32, y: i32, w: i32, h: i32) {
-    scr.fill(x, y, w, h, 24);
-    scr.fill(x + 2, y + 2, w - 4, h - 4, 30);
+    match scr.window_tex.take() {
+        Some(t) => {
+            let mut ty = y;
+            while ty < y + h {
+                let mut tx = x;
+                while tx < x + w {
+                    scr.blit_rect(&t, 0, 0, (x + w - tx).min(32), (y + h - ty).min(48), tx, ty, None);
+                    tx += 32;
+                }
+                ty += 48;
+            }
+            scr.window_tex = Some(t);
+        }
+        None => scr.fill(x, y, w, h, 30),
+    }
+    for k in 0..3 {
+        let c = 0x83 + k as u8 * 2;
+        scr.fill(x + k, y + h + k, w, 1, c);
+        scr.fill(x + w + k, y + k, 1, h + 2, c);
+    }
+    scr.fill(x, y - 1, w, 1, 0x80);
+    scr.fill(x - 1, y - 1, 1, h + 1, 0x80);
 }
 
-/// 글자 그리기 (EUC-KR). col = 팔레트 번호
+/// 창 글자 색 (원작 0x1f = 검정), 이름 색 (진한 빨강)
+pub const TEXT: u8 = 0x1F;
+pub const NAME: u8 = 62;
+
+/// 글자 그리기 (EUC-KR). col = 팔레트 번호 (창 글자색이 아니면 그림자)
 pub fn draw_text(scr: &mut Screen, f: &Font, x: i32, y: i32, s: &str, col: u8) {
     let (b, _, _) = encoding_rs::EUC_KR.encode(s);
     let mut cx = x;
@@ -394,9 +418,11 @@ pub fn draw_text(scr: &mut Screen, f: &Font, x: i32, y: i32, s: &str, col: u8) {
             for (r, bits) in rows.iter().enumerate() {
                 for bx in 0..w {
                     if bits & (0x8000 >> bx) != 0 {
-                        let (px, py) = (cx + bx + 1, y + r as i32 + 1);
-                        scr.fill(px, py, 1, 1, 31);
-                        scr.fill(px - 1, py - 1, 1, 1, col);
+                        let (px, py) = (cx + bx, y + r as i32);
+                        if col != TEXT && col != NAME {
+                            scr.fill(px + 1, py + 1, 1, 1, 31);
+                        }
+                        scr.fill(px, py, 1, 1, col);
                     }
                 }
             }
