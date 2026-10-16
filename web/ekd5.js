@@ -63,7 +63,7 @@
     e.preventDefault(); unlockAudio(); started = true;
     mouse = toGame(e);
     try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
-    if (e.button === 2) { pulse = KEY.CANCEL; pulseTicks = 3; } else { ptrDown = KEY.DECIDE; click = 1; }
+    if (e.button === 2) { pulse = KEY.CANCEL; pulseTicks = 3; } else { ptrDown = KEY.DECIDE; click = 1; pulse = KEY.DECIDE; pulseTicks = 2; }
   });
   const ptrUp = (e) => { if (e) mouse = toGame(e); ptrDown = 0; };
   canvas.addEventListener("pointerup", ptrUp);
