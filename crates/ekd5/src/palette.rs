@@ -19,3 +19,13 @@ pub fn from_bytes(d: &[u8]) -> Palette {
     }
     p
 }
+
+/// 가장 가까운 색 번호 (10..245 중)
+pub fn nearest(p: &Palette, c: [u8; 3]) -> u8 {
+    (10..246)
+        .min_by_key(|&i| {
+            let q = p[i];
+            (0..3).map(|k| (q[k] as i32 - c[k] as i32).pow(2)).sum::<i32>()
+        })
+        .unwrap_or(0) as u8
+}

@@ -53,6 +53,8 @@ pub struct Story {
     pub chapter_name: String,
     pub title_timer: u32,
     pub card: Option<String>,
+    /// 전투 중 말하는 부대의 화면 y (창 위치 결정)
+    pub speaker_y: Option<i32>,
 }
 
 impl Default for Story {
@@ -78,6 +80,7 @@ impl Default for Story {
             chapter_name: String::new(),
             title_timer: 0,
             card: None,
+            speaker_y: None,
         }
     }
 }
@@ -296,6 +299,11 @@ impl Story {
         // 위아래 띠
         scr.fill(0, 0, 640, 40, 0);
         scr.fill(0, 440, 640, 40, 0);
+        self.render_overlay(scr, font, tick);
+    }
+
+    /// 창들만 (대화/해설/선택지/자막/표식)
+    pub fn render_overlay(&mut self, scr: &mut Screen, font: Option<&Font>, tick: u32) {
         if let Some(f) = font {
             for (_, x, y, face, name) in &self.markers {
                 let (x, y) = (*x, *y + 40);
@@ -352,7 +360,7 @@ impl Story {
 
     fn draw_window(&self, scr: &mut Screen, f: &Font, p: &Page, tick: u32) {
         // 원작: 448×96, 왼쪽 x=16 (얼굴 왼쪽) / 오른쪽 x=176 (얼굴 오른쪽). 말하는 인물이 위쪽이면 창은 아래 (y=318), 아니면 위 (y=56)
-        let speaker_low = p.person.and_then(|id| self.actors.iter().find(|a| a.id == id)).map(|a| self.screen_pos(a.x, a.y).1 > 240).unwrap_or(false);
+        let speaker_low = if let Some(y) = self.speaker_y { y > 240 } else { p.person.and_then(|id| self.actors.iter().find(|a| a.id == id)).map(|a| self.screen_pos(a.x, a.y).1 > 240).unwrap_or(false) };
         let y = if speaker_low { 56 } else { 318 };
         let x = if self.left { 16 } else { 176 };
         frame_box(scr, x, y, 448, 96);
