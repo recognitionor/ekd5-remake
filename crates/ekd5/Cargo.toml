@@ -1,0 +1,8 @@
+[package]
+name = "ekd5"
+version = "0.1.0"
+edition = "2021"
+description = "삼국지 영걸전 조조전 데이터 형식/스크립트 (클린룸 재구현)"
+
+[dependencies]
+encoding_rs = "0.8"

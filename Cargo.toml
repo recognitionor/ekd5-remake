@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["crates/ekd5", "crates/ekd5-cli", "crates/ekd5-web"]
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[profile.dev.package."*"]
+opt-level = 2

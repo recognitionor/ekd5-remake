@@ -1,0 +1,13 @@
+[package]
+name = "ekd5-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ekd5"
+path = "src/main.rs"
+
+[dependencies]
+ekd5 = { path = "../ekd5" }
+png = "0.17"
+encoding_rs = "0.8"

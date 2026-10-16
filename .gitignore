@@ -1,0 +1,12 @@
+# 원본 게임 데이터/파생물 — 저작물이므로 커밋 금지
+/re/out/
+/data/
+/web/data/
+/target/
+*.WAV
+*.wav
+*.png
+.DS_Store
+__pycache__/
+/web/ekd5_web.wasm
+/deploy/

@@ -1,0 +1,11 @@
+[package]
+name = "ekd5-web"
+version = "0.1.0"
+edition = "2021"
+description = "WASM 프런트엔드 (JS 글루는 web/)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ekd5 = { path = "../ekd5" }
