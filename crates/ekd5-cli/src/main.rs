@@ -38,6 +38,17 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
     if let Some(n) = std::env::var("EKD5_STAGE").ok().and_then(|v| v.parse().ok()) {
         eng.stage = n;
     }
+    // 시험: 저장 문자열로 시작 (EKD5_RESTORE), 단계마다 저장 문자열 출력 (EKD5_SNAP)
+    if let Ok(r) = std::env::var("EKD5_RESTORE") {
+        eng.restore(&r);
+    }
+    let snap = std::env::var("EKD5_SNAP").is_ok();
+    // 시험: 시작 플래그 (EKD5_FLAGS="0,100")
+    for f in std::env::var("EKD5_FLAGS").unwrap_or_default().split(',').filter_map(|v| v.parse::<usize>().ok()) {
+        if f < eng.flags.len() {
+            eng.flags[f] = true;
+        }
+    }
     let press: Vec<(u32, u32)> = std::env::var("EKD5_PRESS").unwrap_or_default().split(',').filter_map(|s| {
         let (t, b) = s.split_once(':')?;
         Some((t.parse().ok()?, u32::from_str_radix(b, 16).ok()?))
@@ -58,6 +69,11 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
             None => eng.set_input(held, None, false),
         }
         eng.tick();
+        if let Some(sv) = eng.save_out.take() {
+            if snap && !sv.is_empty() {
+                println!("[{t:>6}] SNAP {sv}");
+            }
+        }
         for l in eng.log.drain(..) {
             println!("[{t:>6}] {l}");
         }
