@@ -490,21 +490,20 @@ impl Battle {
         }
         match self.phase.clone() {
             Phase::PlayerIdle => {
-                if let Some(c) = tapped {
+                // 위쪽 띠 오른쪽 [턴 종료]
+                let end_tap = tapped.is_some() && inp.mouse.is_some_and(|(mx, my)| my < 26 && mx > 500);
+                if end_tap {
+                    self.end_player_turn();
+                } else if let Some(c) = tapped {
                     if let Some(u) = self.at(c.0, c.1) {
                         if self.units[u].side == Side::Player && !self.units[u].acted {
                             let cells = self.reachable(u);
                             self.phase = Phase::Selected { unit: u, cells };
                         } else {
-                            self.message = Some((self.unit_info(u), 60));
+                            let name = self.unit_info(u);
+                            self.message = Some((name, 60));
                         }
-                    } else if c.1 * CELL - self.cam.1 < 40 || (c.0 * CELL - self.cam.0 > 540 && c.1 * CELL - self.cam.1 > 420) {
-                        // 화면 위 띠 / 오른쪽 아래 = 턴 끝
-                        self.end_player_turn();
                     }
-                }
-                if cancel {
-                    self.end_player_turn();
                 }
             }
             Phase::Selected { unit, cells } => {

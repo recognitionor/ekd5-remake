@@ -553,6 +553,7 @@ impl<A: Assets> Engine<A> {
             0xD => {
                 // 다음 절로 (원작 op0d → 7)
                 let next = vm.section + 1;
+                self.log.push(format!("절 {next}로 (pc {at:#x})"));
                 if next < vm.sections() {
                     self.start_section(vm, next)?;
                 } else {
@@ -753,6 +754,11 @@ impl<A: Assets> Engine<A> {
                     b.message = Some((t.to_string(), 90));
                 }
             }
+            0x5C => {
+                if let Some(b) = self.battle() {
+                    b.targets.push(a(0) as usize);
+                }
+            }
             0x44..=0x47 | 0x4B..=0x4F | 0x31 | 0x50 | 0x53 if self.battle().is_some() => self.battle_op(op, &args),
             _ => self.note(op),
         }
@@ -821,7 +827,7 @@ impl<A: Assets> Engine<A> {
                         continue;
                     }
                     let (side, hidden, x, y, lv, ai, tx, ty) = if op == 0x46 {
-                        (battle::Side::Player, r[1].i() == 1, r[2].i(), r[3].i(), r[5].i(), r[7].i(), r[9].i(), r[10].i())
+                        (battle::Side::Ally, r[1].i() == 1, r[2].i(), r[3].i(), r[5].i(), r[7].i(), r[9].i(), r[10].i())
                     } else {
                         (battle::Side::Enemy, r[1].i() == 1, r[3].i(), r[4].i(), r[6].i(), r[8].i(), r[10].i(), r[11].i())
                     };
@@ -960,28 +966,47 @@ impl<A: Assets> Engine<A> {
                     }
                 })
             }
+            // 사각형 안 (부대, x1, y1, x2, y2)
+            0x26 => {
+                let (w, x1, y1, x2, y2) = (a(0), a(1), a(2), a(3), a(4));
+                b.units.iter().any(|u| {
+                    u.visible && u.hp > 0 && (x1..=x2).contains(&u.x) && (y1..=y2).contains(&u.y) && match w {
+                        0x400 => true,
+                        0x401 => u.side != battle::Side::Enemy,
+                        0x402 => u.side == battle::Side::Enemy,
+                        p => u.person == p as usize,
+                    }
+                })
+            }
             // 이웃 (인물 a, 인물 b)
-            0x2E => match (b.unit_of(a(0) as usize), b.unit_of(a(1) as usize)) {
-                (Some(p), Some(q)) => {
-                    let (u, v) = (&b.units[p], &b.units[q]);
-                    u.visible && v.visible && u.hp > 0 && v.hp > 0 && (u.x - v.x).abs() + (u.y - v.y).abs() == 1
-                }
-                _ => false,
-            },
+            0x2E => {
+                let m = |u: &battle::Unit, w: i32| match w {
+                    0x400 => true,
+                    0x401 => u.side != battle::Side::Enemy,
+                    0x402 => u.side == battle::Side::Enemy,
+                    p => u.person == p as usize,
+                };
+                let live: Vec<&battle::Unit> = b.units.iter().filter(|u| u.visible && u.hp > 0).collect();
+                live.iter().any(|u| m(u, a(0)) && live.iter().any(|v| m(v, a(1)) && (u.x - v.x).abs() + (u.y - v.y).abs() == 1))
+            }
             // 능력 비교: 7 = HP (0 이면 퇴각)
             0x36 => {
-                let v = match b.unit_of(a(0) as usize) {
-                    Some(u) if b.units[u].visible || b.units[u].hp <= 0 => b.units[u].hp.max(0),
-                    Some(_) => 1,
-                    None => 0,
-                };
+                let Some(u) = b.unit_of(a(0) as usize) else { return false };
+                let v = b.units[u].hp.max(0);
                 match a(3) {
                     0 => v >= a(2),
                     1 => v < a(2),
                     _ => v == a(2),
                 }
             }
-            0x42 => true,
+            // 승리 조건: 목표(op5c)가 있으면 목표 전원 퇴각, 없으면 적 전멸 (원작 FUN_0044e6af)
+            0x42 => {
+                if b.targets.is_empty() {
+                    !b.units.iter().any(|u| u.side == battle::Side::Enemy && u.hp > 0)
+                } else {
+                    b.targets.iter().all(|&p| b.unit_of(p).is_none_or(|u| b.units[u].hp <= 0))
+                }
+            }
             0x43 => {
                 let cao_dead = b.unit_of(0).is_some_and(|u| b.units[u].hp <= 0);
                 cao_dead || b.turn > b.turn_limit
@@ -1128,12 +1153,20 @@ impl<A: Assets> Engine<A> {
             // 사건이 연달아 생길 수 있으니 하나씩
             self.check_events();
         }
-        // 스크립트가 끝을 내지 않았을 때의 기본 승패
+        // 스크립트가 끝을 내지 않았을 때의 기본 승패 (사건이 먼저)
+        let ended = self.battle().is_some_and(|b| {
+            b.started && !matches!(b.phase, battle::Phase::Script | battle::Phase::Over { .. }) && (!b.units.iter().any(|u| u.side == battle::Side::Enemy && u.hp > 0) || b.unit_of(0).is_some_and(|u| b.units[u].hp <= 0) || b.turn > b.turn_limit)
+        });
+        if ended && self.check_events() {
+            return;
+        }
         if let Some(b) = self.battle() {
             if b.started && !matches!(b.phase, battle::Phase::Script | battle::Phase::Over { .. }) {
                 let enemies = b.units.iter().filter(|u| u.side == battle::Side::Enemy && u.hp > 0).count();
                 let cao_dead = b.unit_of(0).is_some_and(|u| b.units[u].hp <= 0);
                 if enemies == 0 && b.turn > 0 {
+                    self.log.push("적 전멸".into());
+                    let Some(b) = self.battle() else { return };
                     b.phase = battle::Phase::Over { won: true, t: 0 };
                 } else if cao_dead || b.turn > b.turn_limit {
                     b.phase = battle::Phase::Over { won: false, t: 0 };
