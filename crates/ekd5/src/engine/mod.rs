@@ -1939,13 +1939,20 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x50 => {
-                // 동작 (인물, 동작 번호): 0 보통, 6/7 공격, 3/4/9 맞음·지침
+                // 동작 (원작 FUN_00418539 → FUN_0045976f): 인물, 동작 0..11 (0 = 보통). 소리: 6·7 SE07, 8 SE06, 그 외 SE08
                 if let Some(u) = b.unit_of(a(0) as usize) {
-                    b.units[u].pose = match a(1) {
+                    let m = a(1);
+                    b.units[u].pose = None;
+                    b.units[u].motion = (1..=11).contains(&m).then_some(m as u8);
+                    let se = match m {
                         0 => None,
-                        6 | 7 => Some(6),
-                        _ => Some(9),
+                        6 | 7 => Some("SE07.WAV"),
+                        8 => Some("SE06.WAV"),
+                        _ => Some("SE08.WAV"),
                     };
+                    if let Some(se) = se {
+                        b.sounds.push(se.into());
+                    }
                 }
             }
             _ => {}
@@ -2210,7 +2217,7 @@ impl<A: Assets> Engine<A> {
                         self.log.push(format!("아군 차례 {t}턴"));
                         if std::env::var("EKD5_DUMP").is_ok() {
                             if let Some(b) = self.battle() {
-                                let l: Vec<String> = b.units.iter().filter(|u| u.hp > 0).map(|u| format!("{:?}{}@{},{}{}a{}", u.side, u.person, u.x, u.y, if u.visible { "" } else { "h" }, u.ai)).collect();
+                                let l: Vec<String> = b.units.iter().filter(|u| u.hp > 0).map(|u| format!("{:?}{}@{},{}{}a{}s{}j{}", u.side, u.person, u.x, u.y, if u.visible { "" } else { "h" }, u.ai, u.sprite_idx, u.job)).collect();
                                 let l = l.join(" ");
                                 self.log.push(l);
                             }

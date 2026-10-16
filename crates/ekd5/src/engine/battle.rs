@@ -24,11 +24,12 @@ pub enum Side {
 
 impl Side {
     /// 부대 그림 진영 번호 (0 적 빨강, 1 우군 주황, 2 아군 파랑)
+    /// 그림 색 (원작 FUN_00441da9: 부대 +5 진영 = 조조군 0, 우군 1, 적 2)
     fn color(self) -> usize {
         match self {
-            Side::Enemy => 0,
+            Side::Player => 0,
             Side::Ally => 1,
-            Side::Player => 2,
+            Side::Enemy => 2,
         }
     }
     pub fn hostile(self, o: Side) -> bool {
@@ -75,6 +76,8 @@ pub struct Unit {
     pub fade: u8,
     /// 떠나는 연출 (종류 0 퇴각 / 1 퇴장 / 2 사망, 진행 틱) — 원작 FUN_00443b0b
     pub leave: Option<(u8, u32)>,
+    /// 스크립트 동작 (op50, 원작 FUN_0045976f 의 0..11)
+    pub motion: Option<u8>,
 }
 
 /// 전투 단계
@@ -474,6 +477,7 @@ impl Battle {
             pose: None,
             fade: 16,
             leave: None,
+            motion: None,
             off,
         }
     }
@@ -2397,6 +2401,44 @@ impl Battle {
                 draw_frame(scr, atk, 64, k, sx - 8, sy - 8, u.dir == 3);
             } else if let (Some(9), Some(spc)) = (u.pose, &u.spc) {
                 draw_frame(scr, spc, 48, 3, sx, sy, u.dir == 3);
+            } else if let (Some(m), None, None) = (u.motion, u.pose, u.leave) {
+                // 스크립트 동작 (원작 FUN_0045976f): 1 승리 SPC4, 2 방어 SPC0-2, 3·10 맞음 SPC3, 4 무릎 MOV9,
+                // 5 공격 준비 ATK 첫 장, 6·7 공격 ATK, 8 옆걸음 MOV4-5, 9 지침 MOV9-10, 11 옆 서기 MOV8
+                let side = u.dir >= 2;
+                let flip = u.dir == 3;
+                let dir_k = match u.dir {
+                    0 => 0,
+                    1 => 1,
+                    _ => 2,
+                };
+                match m {
+                    1 | 2 | 3 | 10 => {
+                        if let Some(spc) = &u.spc {
+                            let k = match m {
+                                1 => 4,
+                                2 => dir_k,
+                                _ => 3,
+                            };
+                            draw_frame(scr, spc, 48, k, sx, sy, flip && (m != 1));
+                        }
+                    }
+                    5 | 6 | 7 => {
+                        if let Some(atk) = &u.atk {
+                            let base = dir_k * 4;
+                            let k = if m == 5 { base } else { base + ((tick / 4) % 4) as usize };
+                            draw_frame(scr, atk, 64, k, sx - 8, sy - 8, flip);
+                        }
+                    }
+                    _ => {
+                        let k = match m {
+                            4 => 9,
+                            8 => 4 + ((tick / 4) % 2) as usize,
+                            9 => 9 + ((tick / 8) % 2) as usize,
+                            _ => 8,
+                        };
+                        draw_frame(scr, sp, 48, k, sx, sy, (m == 8 || m == 11) && (flip || !side && false));
+                    }
+                }
             } else {
                 // 지형 가림 (원작 FUN_0045335c: 지형 9·10 물, 2 수풀, 1 풀, 7 눈 — 마스크가 있는 곳은 부대를 안 그림)
                 let mo = match self.terr(u.x, u.y) {
