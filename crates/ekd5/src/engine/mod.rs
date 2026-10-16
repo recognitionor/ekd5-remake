@@ -4,6 +4,7 @@
 pub mod assets;
 pub mod battle;
 pub mod camp;
+pub mod duel;
 pub mod screen;
 pub mod story;
 pub mod ui;
@@ -1060,6 +1061,163 @@ impl<A: Assets> Engine<A> {
                     }
                 }
             }
+            0x21 => {
+                // 불 (원작 FUN_004162fa → op58 종류 0): x, y, 0 붙이기 / 1 끄기, 화면 이동, 조용히
+                let (x, y, off, look, quiet) = (a(0), a(1), a(2), a(3), a(4) != 0 && a(4) != 0xFFFF);
+                let mut placed = false;
+                if let Some(b) = self.battle() {
+                    if look != 0 && look != 0xFFFF && !quiet {
+                        b.focus(x, y);
+                    }
+                    if off == 0 {
+                        b.place_obj(0, 0x1A, x, y);
+                        placed = true;
+                    } else {
+                        b.remove_obj(0, x, y);
+                    }
+                }
+                if placed && !quiet {
+                    self.sounds.push(Sound::Effect("SE19.WAV".into()));
+                }
+            }
+            0x15 => {
+                // 부대 말 (원작 FUN_0045b757): 인물 a, 없으면 b 가 말함. 둘 다 없으면 해설
+                let (t, _, _) = encoding_rs::EUC_KR.decode(args[2].bytes());
+                let lines: Vec<String> = t.split('\n').filter(|l| !l.is_empty()).map(|l| l.to_string()).collect();
+                let on_map = |e: &Self, p: i32| -> bool {
+                    matches!(&e.scene, Scene::Battle(b) if b.unit_of(p as usize).is_some_and(|u| b.units[u].visible && b.units[u].hp > 0))
+                };
+                let who = if on_map(self, a(0)) { Some(a(0) as usize) } else if on_map(self, a(1)) { Some(a(1) as usize) } else { None };
+                let pages: Vec<story::Page> = match who {
+                    Some(pid) => {
+                        let name = self.persons.get(pid).map(|p| p.name.clone()).unwrap_or_default();
+                        let face = (pid < self.persons.len()).then(|| self.face_of(pid));
+                        lines.chunks(4).map(|c| story::Page { person: Some(pid), face, name: name.clone(), lines: c.to_vec() }).collect()
+                    }
+                    None => lines.chunks(6).map(|c| story::Page { person: None, face: None, name: String::new(), lines: c.to_vec() }).collect(),
+                };
+                let (packs, assets) = (&mut self.packs, &mut self.assets);
+                if let Scene::Battle(b) = &mut self.scene {
+                    match who.and_then(|p| b.unit_of(p)) {
+                        Some(u) => {
+                            let (x, y) = (b.units[u].x, b.units[u].y);
+                            if x * battle::CELL < b.cam.0 + 24 || x * battle::CELL > b.cam.0 + 568 || y * battle::CELL < b.cam.1 + 24 || y * battle::CELL > b.cam.1 + 408 {
+                                b.focus(x, y);
+                            }
+                            b.ui.speaker_y = Some(y * battle::CELL - b.cam.1 + 24);
+                            b.ui.narration = false;
+                        }
+                        None => b.ui.narration = true,
+                    }
+                    if b.ui.show_dialog(packs, assets, pages).is_err() {
+                        vm.pc = at;
+                        return Ok(false);
+                    }
+                    self.wait = Wait::Dialog;
+                }
+            }
+            0x2F => {
+                // 인물 모두 치우기 (원작 FUN_004292a5)
+                if let Scene::Story(st) = &mut self.scene {
+                    st.actors.clear();
+                }
+            }
+            // 화면 갱신 (원작 반환 2: 이번 틱 끝)
+            0x1E => return Ok(false),
+            0x48 if self.battle().is_some() => {
+                // 목록 부대 장비 (원작 FUN_004151a6): 인물, 무기, 무기 레벨, 방어구, 방어구 레벨, 보조. 0 = 기본 장비, 1 = 없음
+                let jobs = self.jobs.clone();
+                let v = |i: usize| if a(i) == 0xFFFF { 0 } else { a(i) };
+                let (pid, w, wl, ar, al, ac) = (a(0) as usize, v(1), v(2), v(3), v(4), v(5));
+                if let Some(b) = self.battle() {
+                    if let Some(u) = b.units.iter_mut().find(|u| u.person == pid && u.side != battle::Side::Player) {
+                        let o = &mut u.off;
+                        for (slot, id, lv) in [(0u8, w, wl), (1, ar, al)] {
+                            match id {
+                                0 => o.auto_equip(&jobs, slot),
+                                1 => {
+                                    if slot == 0 { o.weapon = None } else { o.armor = None }
+                                }
+                                id if id < 0x68 => {
+                                    let g = Some((id as u8, (lv as u8).max(1)));
+                                    if slot == 0 { o.weapon = g } else { o.armor = g }
+                                }
+                                _ => {}
+                            }
+                        }
+                        match ac {
+                            0 => {}
+                            1 => o.acc = None,
+                            id if id < 0x68 => o.acc = Some(id as u8),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            0x68 => {
+                // 일기토 시작 (두 인물)
+                let who = [a(0) as usize, a(1) as usize];
+                self.log.push(format!("일기토 {} 대 {}", who[0], who[1]));
+                if let Some(b) = self.battle() {
+                    let sp = |p: usize| match b.unit_of(p) {
+                        Some(u) => b.units[u].sprite_idx,
+                        None => battle::sprite_index(p, 0, battle::Side::Enemy),
+                    };
+                    let (s0, s1) = (sp(who[0]), sp(who[1]));
+                    b.duel = Some(duel::Duel::new((who[0], s0), (who[1], s1)));
+                }
+            }
+            0x5F => {
+                if let Some(b) = self.battle() {
+                    b.duel = None;
+                    b.ui.speaker_y = None;
+                }
+            }
+            0x61 => {}
+            0x64 => {
+                // 일기토 동작 (쪽, 동작)
+                let t = self.battle().and_then(|b| b.duel.as_mut()).map(|d| d.motion(a(0) as usize, a(1) as u8));
+                if let Some(t) = t {
+                    self.wait = Wait::Ticks(t);
+                }
+            }
+            0x65 | 0x66 => {
+                // 일기토 공방 (쪽, 종류, 맞음)
+                let rush = op == 0x65 && a(1) >= 2 || op == 0x66 && a(1) == 2;
+                let t = self.battle().and_then(|b| b.duel.as_mut()).map(|d| d.exchange(a(0) as usize, rush, a(2) != 0));
+                if let Some(t) = t {
+                    self.sounds.push(Sound::Effect("SE07.WAV".into()));
+                    self.wait = Wait::Ticks(t);
+                }
+            }
+            0x60 | 0x63 => {
+                // 일기토 대사 (쪽, 글, 60: 등장 동작 / 63: 기다림)
+                let side = (a(0) as usize).min(1);
+                let pid = self.battle().and_then(|b| b.duel.as_mut()).map(|d| {
+                    d.f[side].shown = true;
+                    if op == 0x60 && a(2) != 0 {
+                        d.motion(side, a(2) as u8);
+                    }
+                    d.f[side].person
+                });
+                if let Some(pid) = pid {
+                    let (t, _, _) = encoding_rs::EUC_KR.decode(args[1].bytes());
+                    let lines: Vec<String> = t.split('\n').filter(|l| !l.is_empty()).map(|l| l.to_string()).collect();
+                    let name = self.persons.get(pid).map(|p| p.name.clone()).unwrap_or_default();
+                    let face = (pid < self.persons.len()).then(|| self.face_of(pid));
+                    let pages: Vec<story::Page> = lines.chunks(4).map(|c| story::Page { person: Some(pid), face, name: name.clone(), lines: c.to_vec() }).collect();
+                    let (packs, assets) = (&mut self.packs, &mut self.assets);
+                    if let Scene::Battle(b) = &mut self.scene {
+                        // 왼쪽(0) 장수 말은 위, 오른쪽(1) 은 아래
+                        b.ui.speaker_y = Some(if side == 0 { 400 } else { 60 });
+                        if b.ui.show_dialog(packs, assets, pages).is_err() {
+                            vm.pc = at;
+                            return Ok(false);
+                        }
+                        self.wait = Wait::Dialog;
+                    }
+                }
+            }
             0x5B => {
                 // 목표 구역 표시 (원작 FUN_004190c1): x1, y1, x2, y2, 끄기
                 let show = matches!(a(4), 0 | 0xFFFF);
@@ -1073,7 +1231,7 @@ impl<A: Assets> Engine<A> {
                     b.targets.push(a(0) as usize);
                 }
             }
-            0x44..=0x47 | 0x4B..=0x4F | 0x31 | 0x50 | 0x53 if self.battle().is_some() => self.battle_op(op, &args),
+            0x44..=0x47 | 0x4B..=0x4F | 0x31 | 0x50 | 0x53 | 0x55 if self.battle().is_some() => self.battle_op(op, &args),
             _ => self.note(op),
         }
         Ok(true)
@@ -1135,12 +1293,37 @@ impl<A: Assets> Engine<A> {
                 }
             }
         }
+        // 일기토 그림
+        if let Some(d) = b.duel.as_mut() {
+            for f in d.f.iter_mut().filter(|f| f.pics.is_none()) {
+                let i = f.sprite_idx;
+                match (self.packs.get(&mut self.assets, "UNIT_MOV.E5", i), self.packs.get(&mut self.assets, "UNIT_ATK.E5", i), self.packs.get(&mut self.assets, "UNIT_SPC.E5", i)) {
+                    (Ok(m), Ok(a), Ok(s)) => {
+                        f.pics = Some(duel::Sprites {
+                            mov: Rc::new(Pic::new(48, 48 * 11, m.unwrap_or_default())),
+                            atk: Rc::new(Pic::new(64, 64 * 12, a.unwrap_or_default())),
+                            spc: Rc::new(Pic::new(48, 48 * 5, s.unwrap_or_default())),
+                        });
+                    }
+                    _ => return false,
+                }
+            }
+        }
         // 부대 그림
         for i in 0..b.units.len() {
             if b.units[i].sprite.is_none() {
                 match self.packs.get(&mut self.assets, "UNIT_MOV.E5", b.units[i].sprite_idx) {
                     Err(Pending) => return false,
                     Ok(d) => b.units[i].sprite = Some(Rc::new(Pic::new(48, 48 * 11, d.unwrap_or_default()))),
+                }
+            }
+            if b.units[i].atk.is_none() {
+                match (self.packs.get(&mut self.assets, "UNIT_ATK.E5", b.units[i].sprite_idx), self.packs.get(&mut self.assets, "UNIT_SPC.E5", b.units[i].sprite_idx)) {
+                    (Ok(a), Ok(s)) => {
+                        b.units[i].atk = Some(Rc::new(Pic::new(64, 64 * 12, a.unwrap_or_default())));
+                        b.units[i].spc = Some(Rc::new(Pic::new(48, 48 * 5, s.unwrap_or_default())));
+                    }
+                    _ => return false,
                 }
             }
         }
@@ -1200,6 +1383,9 @@ impl<A: Assets> Engine<A> {
                     let mut o = offs.get(&(pid as usize)).cloned().unwrap();
                     if !roster.contains(&(pid as usize)) {
                         o.set_level(&jobs, level_of(lv));
+                        // 원작: 목록 부대는 레벨에 맞는 무기·방어구를 자동 장착 (op48 로 바꿀 수 있음)
+                        o.auto_equip(&jobs, 0);
+                        o.auto_equip(&jobs, 1);
                     }
                     let mut u = b.make_unit(o, side, x, y);
                     u.visible = !hidden;
@@ -1212,6 +1398,9 @@ impl<A: Assets> Engine<A> {
                     }
                     b.units.retain(|o| o.person != pid as usize);
                     b.units.push(u);
+                    if op == 0x47 {
+                        b.list47.push(pid as usize);
+                    }
                 }
             }
             0x4B => {
@@ -1250,6 +1439,25 @@ impl<A: Assets> Engine<A> {
                 } else if let Some(u) = b.unit_of(a(1) as usize) {
                     b.units[u].visible = true;
                     b.units[u].fade = 16;
+                }
+            }
+            0x55 => {
+                // 증원 등장 (원작 FUN_00417d2c → FUN_0045b181): 0 = 인물, 1 = 적 목록 번호. 숨어 있던 부대만 (x, y) 에 나타남
+                let pid = if a(0) == 1 { b.list47.get(a(2) as usize).copied() } else { Some(a(1) as usize) };
+                if let Some(u) = pid.and_then(|p| b.unit_of(p)) {
+                    if !b.units[u].visible && b.units[u].hp > 0 {
+                        let (x, y) = b.free_near(b.units[u].job, a(3), a(4));
+                        let un = &mut b.units[u];
+                        un.visible = true;
+                        un.x = x;
+                        un.y = y;
+                        un.px = (x * battle::CELL) as f32;
+                        un.py = (y * battle::CELL) as f32;
+                        un.path.clear();
+                        b.focus(x, y);
+                        self.sounds.push(Sound::Effect("SE15.WAV".into()));
+                        self.wait = Wait::Ticks(6);
+                    }
                 }
             }
             0x4D => {
@@ -1556,6 +1764,13 @@ impl<A: Assets> Engine<A> {
                             }
                         }
                         self.log.push(format!("아군 차례 {t}턴"));
+                        if std::env::var("EKD5_DUMP").is_ok() {
+                            if let Some(b) = self.battle() {
+                                let l: Vec<String> = b.units.iter().filter(|u| u.hp > 0).map(|u| format!("{:?}{}@{},{}{}a{}", u.side, u.person, u.x, u.y, if u.visible { "" } else { "h" }, u.ai)).collect();
+                                let l = l.join(" ");
+                                self.log.push(l);
+                            }
+                        }
                         let Some(b) = self.battle() else { return };
                         if let Some(u) = b.unit_of(0).filter(|&u| b.units[u].visible) {
                             let (x, y) = (b.units[u].x, b.units[u].y);

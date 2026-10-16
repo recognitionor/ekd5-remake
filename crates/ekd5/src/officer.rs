@@ -169,4 +169,24 @@ impl Officer {
         self.gear_exp[slot] = if *lv >= cap { 0 } else { total as u8 };
         up
     }
+
+    /// 레벨에 맞는 기본 장비 (원작 FUN_004083d7): 직업이 쓸 수 있는 첫 무기 계열(직업 +9..+22) / 방어구 계열(+23..+26) 에서
+    /// 등급 = min(레벨/12, 2), 아이템 레벨 = 레벨 < 36 이면 (레벨%12)/4+1, 아니면 3. 무기 = 계열/2×3+등급, 방어구 = 0x26 + 같은 식
+    pub fn auto_equip(&mut self, jobs: &[u8], slot: u8) {
+        let tier = (self.level / 12).min(2);
+        let lv = if self.level < 36 { (self.level % 12) / 4 + 1 } else { 3 };
+        let can = |k: usize| jobs.get(self.job as usize * 27 + 9 + k).copied().unwrap_or(0) != 0;
+        let (range, base) = if slot == 0 { (0..14, 0u8) } else { (14..18, 0x26u8) };
+        let start = range.start;
+        if let Some(k) = range.clone().find(|&k| can(k)) {
+            let id = base + ((k - start) / 2) as u8 * 3 + tier;
+            let g = Some((id, lv));
+            if slot == 0 {
+                self.weapon = g;
+            } else {
+                self.armor = g;
+            }
+            self.gear_exp[slot as usize] = 0;
+        }
+    }
 }

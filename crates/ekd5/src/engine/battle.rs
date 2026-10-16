@@ -67,6 +67,9 @@ pub struct Unit {
     pub ai_person: Option<usize>,
     pub ai_target: Option<(i32, i32)>,
     pub sprite: Option<Rc<Pic>>,
+    /// 공격 그림 (UNIT_ATK 64×64×12: 아래 0-3, 위 4-7, 옆 8-11), 특수 (UNIT_SPC 48×48×5: 막기 0-2, 맞음 3, 승리 4)
+    pub atk: Option<Rc<Pic>>,
+    pub spc: Option<Rc<Pic>>,
     pub sprite_idx: usize,
     pub pose: Option<u8>,
     pub fade: u8,
@@ -146,6 +149,11 @@ pub struct Battle {
     pub gate_queue: Vec<(usize, i32, i32)>,
     /// 목표 구역 표시 (op5b: x1, y1, x2, y2)
     pub goal_zone: Option<(i32, i32, i32, i32)>,
+    /// op47 적 목록 순서 (op55 번호 지정용)
+    pub list47: Vec<usize>,
+    /// 일기토 화면
+    pub duel: Option<super::duel::Duel>,
+    duel_tick: u32,
     ai_plan: Option<AiPlan>,
     cast_t: u32,
     /// 시험 기록용
@@ -207,6 +215,20 @@ pub fn sprite_index(person: usize, job: u8, side: Side) -> usize {
 }
 
 /// 48×48 칸들을 이어 붙인 맵 → 한 장
+/// 세로로 쌓인 그림의 k 번째 장 (size×size), 0 = 투명
+fn draw_frame(scr: &mut Screen, p: &Pic, size: usize, k: usize, dx: i32, dy: i32, flip: bool) {
+    let base = k * size * size;
+    for y in 0..size {
+        for x in 0..size {
+            let sx = if flip { size - 1 - x } else { x };
+            let Some(&c) = p.px.get(base + y * size + sx) else { return };
+            if c != 0 {
+                scr.fill(dx + x as i32, dy + y as i32, 1, 1, c);
+            }
+        }
+    }
+}
+
 pub fn untile_map(d: &[u8], cols: usize, rows: usize) -> Pic {
     let w = cols * 48;
     let mut px = vec![0u8; w * rows * 48];
@@ -263,6 +285,9 @@ impl Battle {
             mark_tiles: Vec::new(),
             gate_queue: Vec::new(),
             goal_zone: None,
+            list47: Vec::new(),
+            duel: None,
+            duel_tick: 0,
             ai_plan: None,
             cast_t: 0,
             cast_log: Vec::new(),
@@ -382,11 +407,31 @@ impl Battle {
             ai_target: None,
             ai_person: None,
             sprite: None,
+            atk: None,
+            spc: None,
             sprite_idx: sprite_index(person, off.job, side),
             pose: None,
             fade: 16,
             off,
         }
+    }
+
+    /// (x, y) 에서 가장 가까운 빈 칸 (지나갈 수 있는 곳)
+    pub fn free_near(&self, job: u8, x: i32, y: i32) -> (i32, i32) {
+        for r in 0i32..8 {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if dx.abs().max(dy.abs()) != r {
+                        continue;
+                    }
+                    let (cx, cy) = (x + dx, y + dy);
+                    if cx >= 0 && cy >= 0 && cx < self.cols && cy < self.rows && self.at(cx, cy).is_none() && self.move_cost(job, cx, cy).is_some() {
+                        return (cx, cy);
+                    }
+                }
+            }
+        }
+        (x, y)
     }
 
     pub fn unit_of(&self, person: usize) -> Option<usize> {
@@ -1504,6 +1549,8 @@ impl Battle {
                 let (ux, uy, vx, vy) = (self.units[x].x, self.units[x].y, self.units[y].x, self.units[y].y);
                 self.units[x].dir = if (vx - ux).abs() > (vy - uy).abs() { if vx < ux { 2 } else { 3 } } else if vy < uy { 1 } else { 0 };
                 self.units[x].pose = Some(6);
+                let m = format!("@공격 {}→{}", self.units[x].person, self.units[y].person);
+                self.cast_log.push(m);
             }
             if st == 8 {
                 let (vx, vy) = (self.units[y].x, self.units[y].y);
@@ -1797,7 +1844,19 @@ impl Battle {
             };
             let frame = if u.hp > 0 && u.hp * 4 < u.max_hp && u.pose.is_none() && !walking { 9 + step } else { frame };
             let (sx, sy) = (u.px as i32 - self.cam.0, u.py as i32 - self.cam.1);
-            if flip {
+            // 공격 동작 (UNIT_ATK) · 맞음 (UNIT_SPC 3)
+            let striking = self.strikes.front().is_some_and(|s| s.0 == i);
+            if let (Some(6), true, Some(atk)) = (u.pose, striking, &u.atk) {
+                let base = match u.dir {
+                    0 => 0,
+                    1 => 4,
+                    _ => 8,
+                };
+                let k = base + (self.strike_t / 3).min(3) as usize;
+                draw_frame(scr, atk, 64, k, sx - 8, sy - 8, u.dir == 3);
+            } else if let (Some(9), Some(spc)) = (u.pose, &u.spc) {
+                draw_frame(scr, spc, 48, 3, sx, sy, u.dir == 3);
+            } else if flip {
                 for yy in 0..48 {
                     for xx in 0..48 {
                         let c = sp.px[((frame * 48 + yy) as usize) * 48 + (47 - xx) as usize];
@@ -1906,6 +1965,13 @@ impl Battle {
                 draw_text(scr, f, 296, 222, s, story::NAME);
             }
             _ => {}
+        }
+        if let Some(d) = self.duel.as_mut() {
+            if tick != self.duel_tick {
+                self.duel_tick = tick;
+                d.update();
+            }
+            d.render(scr, self.col[6], self.col[5], tick);
         }
         self.ui.render_overlay(scr, Some(f), tick);
     }
