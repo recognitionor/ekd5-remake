@@ -177,6 +177,8 @@ pub struct Engine<A: Assets> {
     pub tutor: Option<tutor::Tutor>,
     /// 아이콘 (ICONS.BIN)
     pub icons: Rc<icons::Icons>,
+    /// 전체 지도 켜기 (웹 버튼)
+    pub minimap_on: bool,
     icons_loaded: bool,
     /// 동영상을 보여줄 수 있는 환경 (웹)
     pub movies: bool,
@@ -248,6 +250,7 @@ impl<A: Assets> Engine<A> {
             common_out: None,
             tutor: None,
             icons: Rc::new(icons::Icons::default()),
+            minimap_on: false,
             icons_loaded: false,
             movies: false,
             logo_shown: false,
@@ -569,6 +572,7 @@ impl<A: Assets> Engine<A> {
                         let mut b = battle::Battle::new((n / 2) as usize, self.jobs.clone(), self.terrain_tab.clone());
                         b.cheat = self.cheat;
                         b.icons = self.icons.clone();
+                        b.names = Rc::new(self.persons.iter().map(|p| p.name.clone()).collect());
                         b.items = self.items.clone();
                         b.strategies = self.strategies.clone();
                         b.inventory = self.inventory.clone();
@@ -1601,11 +1605,20 @@ impl<A: Assets> Engine<A> {
                 palette::nearest(p, [0, 0, 0]),
             ];
         }
+        // 전체 지도 (SMLMAP.E5)
+        if b.minimap.is_none() {
+            match self.packs.get(&mut self.assets, "SMLMAP.E5", b.map_no) {
+                Err(Pending) => return false,
+                Ok(d) => b.minimap = Some(Rc::new(Pic::new(b.cols as usize * 6, b.rows as usize * 6, d.unwrap_or_default()))),
+            }
+        }
+        b.show_minimap = self.minimap_on;
         // 겹침 그림 (MARK.E5)
         if b.mark_tiles.is_empty() {
             match self.assets.get("MARK.E5") {
                 Asset::Pending => return false,
                 Asset::Ready(d) => {
+                    b.mark = d.clone();
                     b.mark_tiles = [0x8BC0, 0x94C0, 0x9DC0, 0xA6C0, 0xAFC0, 0xB8C0, 0x1B2E0, 0x1BBE0]
                         .iter()
                         .map(|&o| Pic::new(48, 48, d.get(o..o + 2304).map(|t| t.to_vec()).unwrap_or_default()))
@@ -2060,8 +2073,21 @@ impl<A: Assets> Engine<A> {
     /// 전투 진행 (스크립트가 쉬는 동안)
     fn update_battle(&mut self) {
         let running = self.vm.as_ref().is_some_and(|v| v.running);
+        let inp0 = self.input.clone();
         if running || self.wait != Wait::None {
+            // 대사·연출 중에도 화면은 끌어서 볼 수 있게 (탭은 대사 넘기기로 쓰이니 무시)
+            if let Some(b) = self.battle() {
+                if b.duel.is_none() {
+                    b.drag_input(&inp0);
+                }
+            }
             return;
+        }
+        if let Some(b) = self.battle() {
+            // 적·우군 차례, 차례 표시 중에도 끌기
+            if matches!(b.phase, battle::Phase::Ai { .. } | battle::Phase::TurnBanner { .. } | battle::Phase::Attack { .. } | battle::Phase::Cast { .. }) {
+                b.drag_input(&inp0);
+            }
         }
         let inp = self.input.clone();
         let autoplay = self.autoplay;
@@ -2347,6 +2373,19 @@ impl<A: Assets> Engine<A> {
             }).collect()
         });
         true
+    }
+
+    /// 명성 게이지 색 (원작 FUN_00478905: MARK 8×8 무늬 0x00 채움, 0xC0 나머지, 0x40 강조) — 무늬 줄마다 RGB, 3×8×3 바이트
+    pub fn gauge_colors(&mut self) -> Vec<u8> {
+        let Asset::Ready(m) = self.assets.get("MARK.E5") else { return Vec::new() };
+        let mut out = Vec::new();
+        for o in [0x00usize, 0xC0, 0x40] {
+            for y in 0..8 {
+                let c = m.get(o + y * 8).copied().unwrap_or(0) as usize;
+                out.extend(self.screen.pal[c]);
+            }
+        }
+        out
     }
 
     /// 웹: 동영상 끝

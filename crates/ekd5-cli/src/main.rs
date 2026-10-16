@@ -159,6 +159,7 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
     let mut eng = Engine::new(DirAssets::new(data));
     eng.autoplay = std::env::var("EKD5_AUTOPLAY").is_ok();
     eng.cheat = std::env::var("EKD5_CHEAT").is_ok();
+    eng.minimap_on = std::env::var("EKD5_MINIMAP").is_ok();
     if let Some(n) = std::env::var("EKD5_STAGE").ok().and_then(|v| v.parse().ok()) {
         eng.stage = n;
     }

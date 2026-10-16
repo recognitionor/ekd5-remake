@@ -94,6 +94,11 @@
     b.addEventListener("pointerup", up); b.addEventListener("pointercancel", up); b.addEventListener("pointerleave", up);
   }
   holdBtn("cancel", KEY.CANCEL);
+  // 전체 지도 (원작 미니맵 창)
+  const mapBtn = document.getElementById("map");
+  const toggleMap = () => { const on = w.toggle_minimap(); mapBtn.classList.toggle("on", !!on); };
+  mapBtn.addEventListener("click", (e) => { e.preventDefault(); toggleMap(); });
+  addEventListener("keydown", (e) => { if (e.code === "KeyM") toggleMap(); });
   holdBtn("skip", KEY.DECIDE);
   document.getElementById("full").addEventListener("click", async () => {
     try {
@@ -132,19 +137,27 @@
   movie.addEventListener("pointerdown", (e) => { e.preventDefault(); unlockAudio(); endMovie(); });
   w.enable_movies();
 
-  // ---------- 명성 게이지 (원작 FUN_00478905 / FUN_0040d717: 바뀔 때 다섯 번에 나눠 깜빡이며 움직임) ----------
-  const fameEl = document.getElementById("fame"), fameFill = document.getElementById("fameFill"),
-        fameBar = document.getElementById("fameBar"), fameNum = document.getElementById("fameNum");
-  let fameShown = -1, fameStep = 0;
+  // ---------- 명성 게이지 (원작 FUN_00478905 / FUN_0040d717): 가로 200, 채움 = 명성×2, MARK 무늬
+  // 채움 0x00 (16 미만이면 0x40), 나머지 0xC0 (85 이상이면 0x40). 바뀔 때 다섯 번에 나눠 깜빡이며 움직임
+  const fameEl = document.getElementById("fame"), fameCv = document.getElementById("fameCv"), fameNum = document.getElementById("fameNum");
+  const fctx = fameCv.getContext("2d");
+  let fameShown = -1, fameStep = 0, fameDrawn = -2, gcol = null;
+  function drawFame(v) {
+    if (!gcol || gcol.length < 72) { const p = w.gauge_colors(); const n = w.out_len(); if (n >= 72) gcol = mem().slice(p, p + 72); else return; }
+    const row = (k, y) => `rgb(${gcol[k * 24 + y * 3]},${gcol[k * 24 + y * 3 + 1]},${gcol[k * 24 + y * 3 + 2]})`;
+    const fill = Math.max(1, v * 2), a = v < 16 ? 2 : 0, b = v >= 85 ? 2 : 1;
+    for (let y = 0; y < 8; y++) {
+      fctx.fillStyle = row(a, y); fctx.fillRect(0, y, fill, 1);
+      fctx.fillStyle = row(b, y); fctx.fillRect(fill, y, 200 - fill, 1);
+    }
+  }
   function updateFame(v) {
     if (fameShown < 0) fameShown = v;
     if (fameShown !== v) {
       if (++fameStep >= 3) { fameStep = 0; fameShown += Math.sign(v - fameShown) * Math.max(1, Math.ceil(Math.abs(v - fameShown) / 5)); }
       fameEl.classList.toggle("blink", Math.floor(performance.now() / 120) % 2 === 0);
     } else fameEl.classList.remove("blink");
-    fameFill.style.height = fameShown + "%";
-    fameFill.classList.toggle("low", fameShown < 16);
-    fameBar.classList.toggle("high", fameShown >= 85);
+    if (fameDrawn !== fameShown || !gcol) { drawFame(fameShown); fameDrawn = fameShown; }
     fameNum.textContent = fameShown;
   }
 

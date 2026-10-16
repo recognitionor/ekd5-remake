@@ -16,18 +16,16 @@
     padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
   #screen { aspect-ratio: 4 / 3; image-rendering: pixelated; background: #000; touch-action: none;
     width: min(calc(100vw - var(--bar) - env(safe-area-inset-left) - env(safe-area-inset-right)),
-               calc((100vh - env(safe-area-inset-top) - env(safe-area-inset-bottom)) * 4 / 3)); }
+               calc((100vh - 22px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) * 4 / 3)); }
   #bar { width: var(--bar); height: 100%; display: flex; flex-direction: column; justify-content: center; gap: 10px; align-items: center; }
   #bar button { width: 54px; height: 54px; border-radius: 14px; border: 1px solid var(--btn-bd);
     background: var(--btn-bg); color: var(--fg); font-size: 13px; font-weight: 600; line-height: 1.15; padding: 0; touch-action: manipulation; }
   #bar button:active, #bar button.on { background: rgba(255,255,255,.32); }
-  /* 명성 게이지 (원작 상태줄: 채움 주황, 나머지 파랑, 16 미만이면 채움 노랑, 85 이상이면 나머지 노랑) */
-  #fame { display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: 11px; }
-  #fameBar { width: 10px; height: 64px; background: #0070f0; border: 1px solid var(--btn-bd); display: flex; flex-direction: column-reverse; }
-  #fameBar.high { background: #f0f000; }
-  #fameFill { width: 100%; height: 0%; background: #f04000; }
-  #fameFill.low { background: #f0f000; }
-  #fame.blink #fameBar { opacity: .4; }
+  /* 명성 게이지 (원작 상태줄: 가로 200×8, MARK 무늬) */
+  #col { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  #fame { display: flex; align-items: center; gap: 8px; font-size: 12px; height: 14px; }
+  #fameCv { width: 200px; height: 10px; image-rendering: pixelated; background: #000; border: 1px solid var(--btn-bd); }
+  #fame.blink #fameCv { opacity: .45; }
   #bar #cancel { height: 72px; background: rgba(220,80,80,.25); border-color: rgba(255,120,120,.5); }
   #movie { display: none; position: fixed; inset: 0; z-index: 10; width: 100%; height: 100%; background: #000; object-fit: contain; }
   #movie.on { display: block; }
@@ -41,9 +39,12 @@
 </head>
 <body>
 <div id="app">
-  <canvas id="screen" width="640" height="480"></canvas>
+  <div id="col">
+    <div id="fame"><span>명성</span><canvas id="fameCv" width="200" height="8"></canvas><span id="fameNum">0</span></div>
+    <canvas id="screen" width="640" height="480"></canvas>
+  </div>
   <div id="bar">
-    <div id="fame"><span>명성</span><div id="fameBar"><div id="fameFill"></div></div><span id="fameNum">0</span></div>
+    <button id="map">지도</button>
     <button id="cancel">취소</button>
     <button id="skip">넘기기</button>
     <button id="full">전체<br>화면</button>

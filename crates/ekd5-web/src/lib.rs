@@ -144,6 +144,24 @@ pub extern "C" fn movie_done() {
     with(|app| app.engine.movie_done())
 }
 
+/// 전체 지도 켜고 끄기
+#[no_mangle]
+pub extern "C" fn toggle_minimap() -> i32 {
+    with(|app| {
+        app.engine.minimap_on = !app.engine.minimap_on;
+        app.engine.minimap_on as i32
+    })
+}
+
+/// 명성 게이지 색 (out 에 72 바이트)
+#[no_mangle]
+pub extern "C" fn gauge_colors() -> *const u8 {
+    with(|app| {
+        app.out = app.engine.gauge_colors();
+        app.out.as_ptr()
+    })
+}
+
 /// 명성 (0..100, 원작 상태줄 게이지)
 #[no_mangle]
 pub extern "C" fn fame() -> i32 {

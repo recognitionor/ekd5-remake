@@ -165,6 +165,15 @@ pub struct Battle {
     /// 낼 효과음 (엔진이 가져감)
     pub sounds: Vec<String>,
     pub icons: Rc<super::icons::Icons>,
+    /// 전체 지도 (원작 SMLMAP.E5, 칸당 6픽셀) 와 표시 여부
+    pub minimap: Option<Rc<Pic>>,
+    /// MARK.E5 원본 (지형 가림 마스크·게이지 무늬·아이콘)
+    pub mark: Rc<Vec<u8>>,
+    /// 인물 이름 (정보창)
+    pub names: Rc<Vec<String>>,
+    pub show_minimap: bool,
+    /// 눌러 본 부대 정보창 (부대, 남은 틱)
+    info_unit: Option<(usize, u32)>,
     ai_plan: Option<AiPlan>,
     cast_t: u32,
     /// 시험 기록용
@@ -306,6 +315,11 @@ impl Battle {
             cast_end: None,
             sounds: Vec::new(),
             icons: Rc::new(Default::default()),
+            minimap: None,
+            mark: Rc::new(Vec::new()),
+            names: Rc::new(Vec::new()),
+            show_minimap: false,
+            info_unit: None,
             ai_plan: None,
             cast_t: 0,
             cast_log: Vec::new(),
@@ -1514,8 +1528,25 @@ impl Battle {
     }
 
     /// 사람 차례 입력/진행. 반환: 사건 검사가 필요하면 true
-    pub fn update_player(&mut self, inp: &Input) -> bool {
-        // 끌어서 화면 옮기기
+    /// 전체 지도 위치 (오른쪽 위)
+    fn minimap_rect(&self) -> Option<(i32, i32, i32, i32)> {
+        let m = self.minimap.as_ref().filter(|_| self.show_minimap)?;
+        Some((640 - m.w as i32 - 8, 30, m.w as i32, m.h as i32))
+    }
+
+    /// 끌어서 화면 옮기기 (어느 단계에서나). 반환: 끌지 않고 뗀 칸 (탭)
+    pub fn drag_input(&mut self, inp: &Input) -> Option<(i32, i32)> {
+        // 전체 지도를 누르면 그곳으로
+        if let (Some((mx, my)), Some((x, y, w, h))) = (inp.mouse, self.minimap_rect()) {
+            if mx >= x && my >= y && mx < x + w && my < y + h {
+                if inp.held & key::DECIDE != 0 {
+                    let (cx, cy) = ((mx - x) / 6, (my - y) / 6);
+                    self.focus(cx, cy);
+                }
+                self.drag = None;
+                return None;
+            }
+        }
         let mut tapped = None;
         if let Some((mx, my)) = inp.mouse {
             if inp.held & key::DECIDE != 0 {
@@ -1538,6 +1569,11 @@ impl Battle {
                 }
             }
         }
+        tapped
+    }
+
+    pub fn update_player(&mut self, inp: &Input) -> bool {
+        let mut tapped = self.drag_input(inp);
         // 키보드
         let mut dc = (0, 0);
         if inp.pressed & key::UP != 0 { dc.1 -= 1; }
@@ -1570,8 +1606,7 @@ impl Battle {
                             let cells = self.reachable(u);
                             self.phase = Phase::Selected { unit: u, cells };
                         } else {
-                            let name = self.unit_info(u);
-                            self.message = Some((name, 60));
+                            self.info_unit = Some((u, 120));
                         }
                     }
                 }
@@ -1843,10 +1878,6 @@ impl Battle {
         ((sx + 56).min(640 - 128), (sy - 8).clamp(8, 480 - 72))
     }
 
-    fn unit_info(&self, u: usize) -> String {
-        let un = &self.units[u];
-        format!("Lv{} HP {}/{}", un.level, un.hp.max(0), un.max_hp)
-    }
 
     /// 공격 연출 (한 번에 한 타격씩, 18틱). 끝나면 true
     pub fn attack_step(&mut self, a: usize, d: usize, t: u32) -> bool {
@@ -2201,17 +2232,28 @@ impl Battle {
                 draw_frame(scr, atk, 64, k, sx - 8, sy - 8, u.dir == 3);
             } else if let (Some(9), Some(spc)) = (u.pose, &u.spc) {
                 draw_frame(scr, spc, 48, 3, sx, sy, u.dir == 3);
-            } else if flip {
+            } else {
+                // 지형 가림 (원작 FUN_0045335c: 지형 9·10 물, 2 수풀, 1 풀, 7 눈 — 마스크가 있는 곳은 부대를 안 그림)
+                let mo = match self.terr(u.x, u.y) {
+                    9 | 10 => Some(0x27C0),
+                    2 => Some(0x30C0),
+                    1 => Some(0x39C0),
+                    7 => Some(0x42C0),
+                    _ => None,
+                };
+                let mask = mo.and_then(|o| self.mark.get(o..o + 2304));
                 for yy in 0..48 {
                     for xx in 0..48 {
-                        let c = sp.px[((frame * 48 + yy) as usize) * 48 + (47 - xx) as usize];
+                        if mask.is_some_and(|m| m[(yy * 48 + xx) as usize] != 0) {
+                            continue;
+                        }
+                        let sxp = if flip { 47 - xx } else { xx };
+                        let c = sp.px[((frame * 48 + yy) as usize) * 48 + sxp as usize];
                         if c != 0 {
                             scr.fill(sx + xx, sy + yy, 1, 1, c);
                         }
                     }
                 }
-            } else {
-                scr.blit_rect(sp, 0, frame * 48, 48, 48, sx, sy, Some(0));
             }
             if u.acted && u.side == Side::Player && matches!(self.phase, Phase::PlayerIdle | Phase::Selected { .. } | Phase::Menu { .. } | Phase::Targeting { .. } | Phase::Moving { .. }) {
                 // 행동 끝 표시: 어두운 점
@@ -2221,10 +2263,6 @@ impl Battle {
                     }
                 }
             }
-            // HP 막대
-            let w = (u.hp.max(0) * 40 / u.max_hp.max(1)).clamp(0, 40);
-            scr.fill(sx + 4, sy + 44, 40, 3, self.col[6]);
-            scr.fill(sx + 4, sy + 44, w, 3, if u.side == Side::Enemy { self.col[3] } else { self.col[2] });
         }
         // 커서
         let (cx, cy) = (self.cursor.0 * CELL - self.cam.0, self.cursor.1 * CELL - self.cam.1);
@@ -2257,8 +2295,11 @@ impl Battle {
             Phase::Selected { unit, .. } | Phase::Menu { unit, .. } | Phase::Targeting { unit, .. } | Phase::Moving { unit, .. } | Phase::StratList { unit, .. } | Phase::StratTarget { unit, .. } | Phase::ToolList { unit, .. } | Phase::ToolTarget { unit, .. } => Some(*unit),
             _ => None,
         };
-        if let Some(u) = sel {
+        if let Some(u) = sel.or(self.info_unit.map(|x| x.0)) {
             self.draw_unit_box(scr, f, u);
+        }
+        if let Some((u, t)) = self.info_unit {
+            self.info_unit = (t > 1 && sel.is_none()).then_some((u, t - 1));
         }
         if let Phase::Menu { unit, .. } = &self.phase {
             let (bx, by) = self.menu_pos(*unit);
@@ -2327,6 +2368,26 @@ impl Battle {
         if let Some(f) = &self.fx {
             f.render(scr, self.cam);
         }
+        // 전체 지도 (원작 FUN_0044c8e8: 축소 그림 + 부대 4×4 점 — 조조군 0x2A, 우군 0xAD, 적 0xAC — + 보이는 범위)
+        if let (Some(m), Some((x, y, w, h))) = (&self.minimap, self.minimap_rect()) {
+            scr.fill(x - 2, y - 2, w + 4, h + 4, self.col[6]);
+            scr.blit(m, x, y, None);
+            for u in self.units.iter().filter(|u| u.visible && u.hp > 0) {
+                let c = match u.side {
+                    Side::Player => 0x2A,
+                    Side::Ally => 0xAD,
+                    Side::Enemy => 0xAC,
+                };
+                scr.fill(x + u.x * 6 + 1, y + u.y * 6 + 1, 4, 4, c);
+            }
+            let (vx, vy) = (x + self.cam.0 * 6 / CELL, y + self.cam.1 * 6 / CELL);
+            let (vw, vh) = (640 * 6 / CELL, 480 * 6 / CELL);
+            let c = self.col[4];
+            scr.fill(vx, vy, vw.min(w), 1, c);
+            scr.fill(vx, vy + vh.min(h) - 1, vw.min(w), 1, c);
+            scr.fill(vx, vy, 1, vh.min(h), c);
+            scr.fill(vx + vw.min(w) - 1, vy, 1, vh.min(h), c);
+        }
         if let Some(t) = self.intro {
             // 가장자리에서 가운데로 열림 (16틱), 그 뒤 "작전개시" (원작 문자열 0x498a04)
             let open = (t as i32 * 20).min(320);
@@ -2348,18 +2409,51 @@ impl Battle {
         self.ui.render_overlay(scr, Some(f), tick);
     }
 
+    /// 원작 게이지 (FUN_0045317f): 폭 128·높이 8, 바탕 31번, 채움은 MARK 8×8 무늬 (HP 0x80, MP 0x40, 경험치 0x140)
+    fn gauge(&self, scr: &mut Screen, x: i32, y: i32, pat: usize, v: i32, max: i32) {
+        scr.fill(x, y, 128, 8, 31);
+        let w = if max > 0 { (v.max(0) * 100 / max * 128 / 100).min(128) } else { 0 };
+        for yy in 0..8 {
+            let c = self.mark.get(pat + yy as usize * 8).copied().unwrap_or(18);
+            scr.fill(x, y + yy, w, 1, c);
+        }
+    }
+
+    /// MARK 의 그림 한 장 (0 = 투명)
+    fn mark_pic(&self, scr: &mut Screen, off: usize, w: i32, h: i32, x: i32, y: i32) {
+        for yy in 0..h {
+            for xx in 0..w {
+                let c = self.mark.get(off + (yy * w + xx) as usize).copied().unwrap_or(0);
+                if c != 0 {
+                    scr.fill(x + xx, y + yy, 1, 1, c);
+                }
+            }
+        }
+    }
+
+    /// 부대 정보창 (원작 FUN_00452964 의 꾸밈: 하트 0x180·깃털 0x3C0 아이콘 + 게이지, 지형 그림)
     fn draw_unit_box(&self, scr: &mut Screen, f: &Font, u: usize) {
         let un = &self.units[u];
-        // 지형 그림 (원작 MapAtr.dll, 지형 번호) 과 지형 효과
-        frame_box(scr, 0, 412, 380, 68);
+        let (bx, by) = (0, 384);
+        frame_box(scr, bx, by, 404, 96);
+        let name = self.names.get(un.person).cloned().unwrap_or_default();
+        draw_text(scr, f, bx + 12, by + 8, &format!("{name}  Lv{}", un.level), story::NAME);
+        self.mark_pic(scr, 0x180, 24, 24, bx + 8, by + 28);
+        self.gauge(scr, bx + 40, by + 36, 0x80, un.hp, un.max_hp);
+        draw_text(scr, f, bx + 176, by + 32, &format!("{:3}/{:3}", un.hp.max(0), un.max_hp), story::TEXT);
+        self.mark_pic(scr, 0x3C0, 24, 24, bx + 8, by + 54);
+        self.gauge(scr, bx + 40, by + 62, 0x40, un.mp, un.off.max_mp as i32);
+        draw_text(scr, f, bx + 176, by + 58, &format!("{:3}/{:3}", un.mp.max(0), un.off.max_mp), story::TEXT);
+        // 경험치
+        self.gauge(scr, bx + 40, by + 84, 0x140, un.off.exp as i32, 100);
+        draw_text(scr, f, bx + 12, by + 78, "EXP", story::TEXT);
+        // 지형 그림·효과
         let t = self.terr(un.x, un.y);
         if let Some(p) = self.icons.pic(super::icons::TERRAIN, t as usize, &scr.pal) {
-            scr.blit(&p, 8, 422, None);
+            scr.blit(&p, bx + 290, by + 10, None);
         }
         let eff = self.terrain_bonus(un.job, un.x, un.y);
-        draw_text(scr, f, 64, 418, &format!("Lv{}  HP {}/{}  MP {}/{}", un.level, un.hp.max(0), un.max_hp, un.mp.max(0), un.off.max_mp), story::TEXT);
-        let v = |k: u8| un.off.value(&self.items, k);
-        draw_text(scr, f, 64, 438, &format!("공{} 방{} 정{} 순{} 사{}", v(0), v(1), v(2), v(3), v(4)), story::TEXT);
-        draw_text(scr, f, 64, 458, &format!("지형 효과 {eff}%"), story::TEXT);
+        draw_text(scr, f, bx + 280, by + 66, &format!("{eff:>3}%"), story::TEXT);
     }
+
 }
