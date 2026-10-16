@@ -132,7 +132,11 @@ pub extern "C" fn take_events() -> *const u8 {
         for s in app.engine.take_sounds() {
             match s {
                 Sound::Effect(f) => lines.push(format!("{{\"effect\":{f:?}}}")),
+                Sound::Music(n) => lines.push(format!("{{\"music\":{}}}", n.unwrap_or(-1))),
             }
+        }
+        if let Some(e) = &app.engine.error {
+            lines.push(format!("{{\"error\":{e:?}}}"));
         }
         for l in app.engine.log.drain(..) {
             lines.push(format!("{{\"log\":{l:?}}}"));

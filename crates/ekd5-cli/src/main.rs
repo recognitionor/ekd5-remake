@@ -38,11 +38,19 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
         Some((t.parse().ok()?, u32::from_str_radix(b, 16).ok()?))
     }).collect();
     for t in 1..=ticks {
-        let held = press.iter().filter(|p| p.0 == t).fold(0, |a, p| a | p.1);
+        // 자동: 30틱마다 결정 키
+        let auto = std::env::var("EKD5_AUTO").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+        let held = press.iter().filter(|p| p.0 == t).fold(0, |a, p| a | p.1) | if auto > 0 && t % auto == 0 { 0x20 } else { 0 };
         eng.set_input(held, None, false);
         eng.tick();
         for l in eng.log.drain(..) {
             println!("[{t:>6}] {l}");
+        }
+        if let Some(e) = &eng.error {
+            println!("[{t:>6}] 오류 {e}");
+            let rgba = eng.render().to_vec();
+            write_png(&out.join(format!("t{t:05}.png")), 640, 480, &rgba);
+            break;
         }
         if t % every == 0 {
             let rgba = eng.render().to_vec();
