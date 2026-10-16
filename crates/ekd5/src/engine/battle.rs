@@ -261,9 +261,18 @@ impl Battle {
         self.terrain.get((y * self.cols + x) as usize).copied().unwrap_or(0)
     }
 
+    /// 지형 표 행 (원작 FUN_00407bc0: 직업 < 39 → 직업/3, < 53 → 직업−26)
+    fn move_row(job: u8) -> usize {
+        if job < 0x27 { job as usize / 3 } else if job < 0x35 { job as usize - 0x1A } else { 0x1A }
+    }
+
     fn move_cost(&self, job: u8, x: i32, y: i32) -> Option<i32> {
-        let mt = self.job_byte(job, 1) as usize;
+        let mt = Self::move_row(job);
         let t = self.terr(x, y) as usize;
+        // 성문(0x11)은 원작 표에서 모두 막힘이지만 성 안 적과 싸울 수 없게 되므로 지나갈 수 있게 둔다 (원작의 성문 개방 처리 미분석)
+        if t == 0x11 {
+            return Some(1);
+        }
         match self.terrain_tab.get(mt * 60 + 30 + t.min(29)) {
             Some(&0xFF) | None => None,
             Some(&c) => Some(c as i32),
@@ -272,7 +281,7 @@ impl Battle {
 
     /// 지형 효과 (100 = 보통)
     fn terrain_bonus(&self, job: u8, x: i32, y: i32) -> i32 {
-        let mt = self.job_byte(job, 1) as usize;
+        let mt = Self::move_row(job);
         self.terrain_tab.get(mt * 60 + (self.terr(x, y) as usize).min(29)).map_or(100, |&v| v as i32 * 10)
     }
 
@@ -313,6 +322,33 @@ impl Battle {
             }
         }
         out
+    }
+
+    /// 목표 칸까지 지형 이동 비용 거리 (부대 무시)
+    fn dist_field(&self, job: u8, goal: (i32, i32)) -> Vec<i32> {
+        let n = (self.cols * self.rows) as usize;
+        let mut d = vec![i32::MAX / 2; n];
+        let mut q = VecDeque::new();
+        if goal.0 >= 0 && goal.1 >= 0 && goal.0 < self.cols && goal.1 < self.rows {
+            d[(goal.1 * self.cols + goal.0) as usize] = 0;
+            q.push_back(goal);
+        }
+        while let Some((x, y)) = q.pop_front() {
+            let c = d[(y * self.cols + x) as usize];
+            for (dx, dy) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
+                let (nx, ny) = (x + dx, y + dy);
+                if nx < 0 || ny < 0 || nx >= self.cols || ny >= self.rows {
+                    continue;
+                }
+                let Some(cost) = self.move_cost(job, nx, ny) else { continue };
+                let i = (ny * self.cols + nx) as usize;
+                if c + cost < d[i] {
+                    d[i] = c + cost;
+                    q.push_back((nx, ny));
+                }
+            }
+        }
+        d
     }
 
     /// 경로 (BFS, 이동 비용 무시한 칸 경로)
@@ -691,7 +727,12 @@ impl Battle {
                             self.units.iter().filter(|o| o.visible && o.hp > 0 && o.side.hostile(s)).map(|o| (o.x, o.y)).min_by_key(|&(x, y)| (x - ux).abs() + (y - uy).abs())
                         });
                         match goal {
-                            Some(g) => *cells.iter().min_by_key(|&&(x, y)| (x - g.0).abs() + (y - g.1).abs()).unwrap_or(&(self.units[u].x, self.units[u].y)),
+                            Some(g) => {
+                                // 지형을 따라 잰 거리 (벽은 돌아감)
+                                let df = self.dist_field(self.units[u].job, g);
+                                let idx = |c: &(i32, i32)| (c.1 * self.cols + c.0) as usize;
+                                *cells.iter().min_by_key(|c| df[idx(c)]).unwrap_or(&(self.units[u].x, self.units[u].y))
+                            }
                             None => (self.units[u].x, self.units[u].y),
                         }
                     }

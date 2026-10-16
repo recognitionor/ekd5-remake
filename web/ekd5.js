@@ -80,6 +80,15 @@
     } catch (_) {}
   });
 
+  // ---------- 이어하기 ----------
+  let save = null;
+  try { save = localStorage.getItem("ekd5-save"); } catch (_) {}
+  if (save && !save.startsWith("1;0;")) {
+    const stage = save.split(";")[1];
+    const ok = confirm(`저장된 진행(${stage}단계)이 있습니다. 이어서 할까요?\n취소를 누르면 처음부터 시작합니다.`);
+    if (ok) withStr(save, (p, n) => w.restore(p, n));
+  }
+
   // ---------- 루프 ----------
   setStatus("화면을 탭하면 시작합니다");
   let last = performance.now(), acc = 0;
@@ -95,6 +104,7 @@
     if (ev) for (const line of ev.split("\n")) {
       const e = JSON.parse(line);
       if ("effect" in e) playWav(e.effect, 0.7);
+      else if ("save" in e) { try { localStorage.setItem("ekd5-save", e.save); } catch (_) {} }
       else if ("log" in e) console.log("[ekd5]", e.log);
     }
   }

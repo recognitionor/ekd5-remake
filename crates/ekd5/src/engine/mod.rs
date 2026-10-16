@@ -135,6 +135,8 @@ pub struct Engine<A: Assets> {
     pub autoplay: bool,
     /// 전투 시작 시점 저장 (패배 후 다시 하기용)
     saved: Option<(Vec<bool>, Vec<usize>)>,
+    /// 단계 시작마다 만든 저장 문자열 (웹이 가져감)
+    pub save_out: Option<String>,
     unknown: std::collections::BTreeSet<u16>,
 }
 
@@ -165,6 +167,7 @@ impl<A: Assets> Engine<A> {
             resume: None,
             autoplay: false,
             saved: None,
+            save_out: None,
             unknown: Default::default(),
         }
     }
@@ -293,6 +296,7 @@ impl<A: Assets> Engine<A> {
                 }
                 Some(s) => {
                     self.log.push(format!("단계 {n}: {name}"));
+                    self.save_out = Some(self.snapshot());
                     let mut vm = Vm::new(Rc::new(s));
                     if n % 2 == 1 {
                         match &self.saved {
@@ -1001,6 +1005,9 @@ impl<A: Assets> Engine<A> {
             }
             // 승리 조건: 목표(op5c)가 있으면 목표 전원 퇴각, 없으면 적 전멸 (원작 FUN_0044e6af)
             0x42 => {
+                if b.cheat && b.turn > 3 {
+                    return true;
+                }
                 if b.targets.is_empty() {
                     !b.units.iter().any(|u| u.side == battle::Side::Enemy && u.hp > 0)
                 } else {
@@ -1011,7 +1018,36 @@ impl<A: Assets> Engine<A> {
                 let cao_dead = b.unit_of(0).is_some_and(|u| b.units[u].hp <= 0);
                 cao_dead || b.turn > b.turn_limit
             }
-            0x37 | 0x38 | 0x41 | 0x48 => false,
+            // 진영별 부대 수 비교 (종류 0 아군/1 우군/2 적/4 아군+우군/5 적/6 전부, 수, 비교, 영역?, x1, y1, x2, y2) — 원작 FUN_0044e93d
+            0x41 => {
+                let (kind, n, cmp, area) = (a(0), a(1), a(2), a(3) == 1);
+                let (x1, y1, x2, y2) = (a(4), a(5), a(6), a(7));
+                let cnt = b
+                    .units
+                    .iter()
+                    .filter(|u| u.visible && u.hp > 0)
+                    .filter(|u| !area || ((x1..=x2).contains(&u.x) && (y1..=y2).contains(&u.y)))
+                    .filter(|u| {
+                        let c = match u.side {
+                            battle::Side::Player => 0,
+                            battle::Side::Ally => 1,
+                            battle::Side::Enemy => 2,
+                        };
+                        match kind {
+                            0..=3 => c == kind,
+                            4 => c <= 1,
+                            5 => c >= 2,
+                            _ => true,
+                        }
+                    })
+                    .count() as i32;
+                match cmp {
+                    0 => cnt >= n,
+                    1 => cnt < n,
+                    _ => cnt == n,
+                }
+            }
+            0x37 | 0x38 | 0x48 => false,
             _ => {
                 self.note(op);
                 false
@@ -1228,6 +1264,31 @@ impl<A: Assets> Engine<A> {
             }
         }
         scr.rgba()
+    }
+
+    /// 저장: "판1;단계;켜진 플래그들;합류 장수들"
+    pub fn snapshot(&self) -> String {
+        let flags: Vec<String> = self.flags.iter().enumerate().filter(|(_, &f)| f).map(|(i, _)| i.to_string()).collect();
+        let roster: Vec<String> = self.roster.iter().map(|r| r.to_string()).collect();
+        format!("1;{};{};{}", self.stage, flags.join(","), roster.join(","))
+    }
+
+    /// 불러오기 (제목 화면에서 시작하면 그 단계부터)
+    pub fn restore(&mut self, s: &str) -> bool {
+        let f: Vec<&str> = s.split(';').collect();
+        if f.len() < 4 || f[0] != "1" {
+            return false;
+        }
+        let Ok(stage) = f[1].parse() else { return false };
+        self.stage = stage;
+        self.flags.fill(false);
+        for x in f[2].split(',').filter_map(|v| v.parse::<usize>().ok()) {
+            if x < self.flags.len() {
+                self.flags[x] = true;
+            }
+        }
+        self.roster = f[3].split(',').filter_map(|v| v.parse().ok()).collect();
+        true
     }
 
     pub fn take_sounds(&mut self) -> Vec<Sound> {

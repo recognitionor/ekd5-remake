@@ -135,6 +135,9 @@ pub extern "C" fn take_events() -> *const u8 {
                 Sound::Music(n) => lines.push(format!("{{\"music\":{}}}", n.unwrap_or(-1))),
             }
         }
+        if let Some(sv) = app.engine.save_out.take() {
+            lines.push(format!("{{\"save\":{sv:?}}}"));
+        }
         if let Some(e) = &app.engine.error {
             lines.push(format!("{{\"error\":{e:?}}}"));
         }
@@ -144,4 +147,13 @@ pub extern "C" fn take_events() -> *const u8 {
         app.out = lines.join("\n").into_bytes();
         app.out.as_ptr()
     })
+}
+
+/// 저장 문자열로 이어하기 (제목 화면 전에 부름). 성공 1
+/// # Safety
+/// 유효한 UTF-8 포인터
+#[no_mangle]
+pub unsafe extern "C" fn restore(ptr: *const u8, len: usize) -> i32 {
+    let s = str_at(ptr, len);
+    with(|app| app.engine.restore(&s) as i32)
 }
