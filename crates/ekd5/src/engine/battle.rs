@@ -9,6 +9,7 @@ use super::story::{self, draw_text, frame_box};
 use super::{key, Input};
 use crate::font::Font;
 use crate::officer::Officer;
+use crate::strategy::{self, status, Effect, Strategy};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
@@ -54,6 +55,10 @@ pub struct Unit {
     /// 능력 (원작 장수 기록)
     pub off: Officer,
     pub mp: i32,
+    /// 능력 상태 (3 = 보통, <3 ×0.7, ≥4 ×1.2) — 원작 부대 +0x18..
+    pub state: [u8; 5],
+    /// 상태이상 비트 (독 2, 혼란 4, 마비 8, 봉책 0x10)
+    pub status: u8,
     pub acted: bool,
     pub visible: bool,
     pub ai: u8,
@@ -75,6 +80,14 @@ pub enum Phase {
     Menu { unit: usize, from: (i32, i32) },
     Targeting { unit: usize, from: (i32, i32), cells: Vec<(i32, i32)> },
     Attack { unit: usize, target: usize, t: u32 },
+    /// 책략 고르기
+    StratList { unit: usize, from: (i32, i32), list: Vec<u8> },
+    StratTarget { unit: usize, from: (i32, i32), sid: u8, cells: Vec<(i32, i32)> },
+    /// 책략 시전 연출
+    Cast { unit: usize, sid: u8, cell: (i32, i32), t: u32 },
+    /// 도구 고르기 (소지품 번호들)
+    ToolList { unit: usize, from: (i32, i32), list: Vec<usize> },
+    ToolTarget { unit: usize, from: (i32, i32), inv: usize, cells: Vec<(i32, i32)> },
     Ai { side: Side, idx: usize, stage: u8 },
     TurnBanner { t: u32, side: Side },
     Over { won: bool, t: u32 },
@@ -107,6 +120,10 @@ pub struct Battle {
     pub items: Rc<Vec<u8>>,
     /// 진행 중인 공격 (공격자, 대상, 피해(None=빗나감), 치명타)
     pub strikes: VecDeque<(usize, usize, Option<i32>, bool)>,
+    /// 책략 표
+    pub strategies: Rc<Vec<Strategy>>,
+    /// 소지품 (아이템, 레벨) — 전투 끝나면 엔진에 되돌림
+    pub inventory: Vec<(u8, u8)>,
     pub rng: u32,
     pub attack_target: Option<(usize, u32)>,
     /// 표시 색 (이동 범위, 공격 범위, 아군 막대, 적 막대, 흰색, 노랑, 검정)
@@ -115,6 +132,18 @@ pub struct Battle {
     pub cheat: bool,
     strike_t: u32,
     killed_by: Option<usize>,
+    cast_fx: Vec<(i32, i32)>,
+    ai_plan: Option<AiPlan>,
+    cast_t: u32,
+    /// 시험 기록용
+    pub cast_log: Vec<String>,
+}
+
+/// 컴퓨터 행동 계획
+#[derive(Clone, Debug)]
+pub enum AiPlan {
+    Attack(usize),
+    Strat(u8, (i32, i32)),
 }
 
 /// 직업 → 그림 그룹 (원작 FUN_00406ce7 표)
@@ -207,12 +236,18 @@ impl Battle {
             terrain_tab,
             items: Rc::new(Vec::new()),
             strikes: VecDeque::new(),
+            strategies: Rc::new(Vec::new()),
+            inventory: Vec::new(),
             rng: 12345,
             attack_target: None,
             col: [85, 58, 85, 58, 18, 251, 31],
             cheat: false,
             strike_t: 0,
             killed_by: None,
+            cast_fx: Vec::new(),
+            ai_plan: None,
+            cast_t: 0,
+            cast_log: Vec::new(),
         }
     }
 
@@ -248,6 +283,8 @@ impl Battle {
             level: off.level as i32,
             job: off.job,
             mp: off.max_mp as i32,
+            state: [3; 5],
+            status: 0,
             acted: false,
             visible: true,
             ai: 0,
@@ -302,7 +339,7 @@ impl Battle {
         if u.x < 0 || u.y < 0 || u.x >= self.cols || u.y >= self.rows {
             return Vec::new();
         }
-        let mp = self.job_byte(u.job, 0) as i32;
+        let mp = if u.status & status::PARALYZE != 0 { 0 } else { self.job_byte(u.job, 0) as i32 };
         let mut best = vec![i32::MAX; (self.cols * self.rows) as usize];
         let mut q = VecDeque::new();
         best[(u.y * self.cols + u.x) as usize] = 0;
@@ -502,7 +539,327 @@ impl Battle {
 
     /// 능력치 (0 공격 1 방어 2 정신 3 순발 4 사기). 원작은 부대 상태(3 = 보통)에 따라 ×0.7 / ×1.2
     fn val(&self, u: usize, stat: u8) -> u32 {
-        self.units[u].off.value(&self.items, stat) as u32
+        let v = self.units[u].off.value(&self.items, stat) as u32;
+        match self.units[u].state[stat as usize] {
+            0..=2 => v * 7 / 10,
+            3 => v,
+            _ => (v * 12 / 10).min(400),
+        }
+    }
+
+    /// 쓸 수 있는 책략 (직업·레벨, MP, 봉책 아님)
+    pub fn known_strategies(&self, u: usize) -> Vec<u8> {
+        let un = &self.units[u];
+        if un.status & status::SEAL != 0 {
+            return Vec::new();
+        }
+        self.strategies.iter().filter(|s| s.known(un.job, un.level as u8)).map(|s| s.id).collect()
+    }
+
+    fn strat(&self, sid: u8) -> Option<&Strategy> {
+        self.strategies.get(sid as usize)
+    }
+
+    /// 책략 사거리 칸
+    pub fn strat_cells(&self, u: usize, sid: u8) -> Vec<(i32, i32)> {
+        let Some(st) = self.strat(sid) else { return Vec::new() };
+        let from = (self.units[u].x, self.units[u].y);
+        let mut v: Vec<(i32, i32)> = if st.range == 10 {
+            (0..self.rows).flat_map(|y| (0..self.cols).map(move |x| (x, y))).collect()
+        } else {
+            Self::range_offsets(st.range).into_iter().map(|(dx, dy)| (from.0 + dx, from.1 + dy)).collect()
+        };
+        if st.target == 1 || st.range == 11 {
+            v.push(from);
+        }
+        v.retain(|&(x, y)| x >= 0 && y >= 0 && x < self.cols && y < self.rows);
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// 그 칸에 책략을 쓰면 영향받는 부대들
+    fn strat_victims(&self, u: usize, sid: u8, cell: (i32, i32)) -> Vec<usize> {
+        let Some(st) = self.strat(sid) else { return Vec::new() };
+        let side = self.units[u].side;
+        st.area_offsets()
+            .into_iter()
+            .filter_map(|(dx, dy)| self.at(cell.0 + dx, cell.1 + dy))
+            .filter(|&t| if st.target == 0 { self.units[t].side.hostile(side) } else { !self.units[t].side.hostile(side) })
+            .collect()
+    }
+
+    /// 책략 성공률 (원작 FUN_0043d84f: (정신+사기) 비교 곡선 × 책략별 배율, 포박된 대상은 100)
+    fn strat_rate_for(&self, a: usize, d: usize, sid: u8) -> u32 {
+        if self.units[d].status & status::PARALYZE != 0 && sid != 9 && sid != 21 {
+            return 100;
+        }
+        let base = self.strat_rate(a, d);
+        match sid {
+            9 | 21 => {
+                if self.units[d].person < 0x1A || self.targets.contains(&self.units[d].person) { 0 } else { base / if sid == 9 { 3 } else { 2 } }
+            }
+            _ => base * strategy::rate_scale(sid) / 100,
+        }
+    }
+
+    fn strat_rate(&self, a: usize, d: usize) -> u32 {
+        let (x, y) = (self.val(a, 2) + self.val(a, 4), (self.val(d, 2) + self.val(d, 4)).max(1));
+        if x >= y * 2 {
+            100
+        } else if x >= y {
+            (x - y) * 10 / y + 90
+        } else if x >= y / 2 {
+            (x - y / 2) * 30 / (y / 2).max(1) + 60
+        } else {
+            x.saturating_sub(y / 3) * 30 / (y / 3).max(1) + 30
+        }
+    }
+
+    /// 책략 피해 (원작 FUN_0043e0ba)
+    fn strat_damage(&mut self, a: usize, d: usize, pw: u32) -> i32 {
+        let (ia, id) = (self.val(a, 2), self.val(d, 2));
+        let mut v = self.units[a].level.max(1) as u32 + 25;
+        if ia < id {
+            v = v.saturating_sub((id - ia) / 3);
+        } else {
+            v += (ia - id) / 3;
+        }
+        v = v * pw / 10;
+        match self.units[d].job {
+            0x27 | 0x2A | 0x2B => v = v * 11 / 10,
+            0x31 | 0x32 => v = v * 13 / 10,
+            _ => {}
+        }
+        let r = self.rand(7) as u32;
+        v = if r < 3 { v.saturating_sub(r) } else { v - 2 + r };
+        if self.cheat {
+            v = if self.units[a].side == Side::Enemy { 1 } else { v * 4 };
+        }
+        (v.max(1) as i32).min(self.units[d].hp.max(0))
+    }
+
+    /// 책략 효과 적용. 반환: 표시 글 (칸, 글)
+    fn apply_strategy(&mut self, u: usize, sid: u8, cell: (i32, i32)) -> Vec<((i32, i32), String)> {
+        let mut out = Vec::new();
+        let Some(st) = self.strat(sid).cloned() else { return out };
+        self.units[u].mp = (self.units[u].mp - st.mp as i32).max(0);
+        let jobs = self.jobs.clone();
+        for t in self.strat_victims(u, sid, cell) {
+            let pos = (self.units[t].x, self.units[t].y);
+            let hostile = st.target == 0;
+            let terr = self.terr(pos.0, pos.1);
+            let already = matches!(strategy::effect(sid), Effect::Status(bit, _) if self.units[t].status & bit != 0);
+            if !strategy::terrain_ok(sid, terr) || already {
+                out.push((pos, "효과 없음".to_string()));
+                continue;
+            }
+            if hostile && (self.rand(100) as u32) >= self.strat_rate_for(u, t, sid) && !(self.cheat && self.units[u].side != Side::Enemy) {
+                out.push((pos, "실패".to_string()));
+                continue;
+            }
+            let mut dmg = 0;
+            let text = match strategy::effect(sid) {
+                Effect::Damage(pw) => {
+                    dmg = self.strat_damage(u, t, pw);
+                    format!("{dmg}")
+                }
+                Effect::Instant => {
+                    dmg = self.units[t].hp.max(0);
+                    format!("{dmg}")
+                }
+                Effect::MpDamage(pw) => {
+                    let m = (self.strat_damage(u, t, pw)).min(self.units[t].mp);
+                    self.units[t].mp -= m;
+                    format!("MP-{m}")
+                }
+                Effect::Status(bit, pw) => {
+                    if pw > 0 {
+                        dmg = self.strat_damage(u, t, pw);
+                    }
+                    self.units[t].status |= bit;
+                    let name = match bit {
+                        status::POISON => "독",
+                        status::CONFUSE => "혼란",
+                        status::PARALYZE => "마비",
+                        _ => "봉책",
+                    };
+                    if dmg > 0 { format!("{dmg} {name}") } else { name.to_string() }
+                }
+                Effect::Heal(big) => {
+                    let i = self.val(u, 2) as i32;
+                    let h = if big { i / 2 + 70 } else { i / 10 + 40 };
+                    let un = &mut self.units[t];
+                    let h = h.min(un.max_hp - un.hp).max(0);
+                    un.hp += h;
+                    format!("+{h}")
+                }
+                Effect::Mp(n) => {
+                    let un = &mut self.units[t];
+                    let m = (n as i32).min(un.off.max_mp as i32 - un.mp).max(0);
+                    un.mp += m;
+                    format!("MP+{m}")
+                }
+                Effect::Buff(k, up) => {
+                    let s = &mut self.units[t].state[k as usize];
+                    *s = if up { (*s + 1).clamp(4, 5) } else { s.saturating_sub(1).min(2) };
+                    let names = ["공격", "방어", "정신", "순발", "사기"];
+                    format!("{}{}", names[k as usize], if up { "↑" } else { "↓" })
+                }
+                Effect::Cure => {
+                    self.units[t].status = 0;
+                    "회복".to_string()
+                }
+                Effect::None => String::new(),
+            };
+            if dmg > 0 {
+                self.units[t].hp -= dmg;
+                if self.units[t].hp <= 0 {
+                    self.units[t].fade = 15;
+                }
+                let e = Self::exp_for(self.units[u].level, self.units[t].level, self.units[t].hp <= 0);
+                self.units[u].off.gain_exp(&jobs, e);
+            } else if !hostile {
+                // 아군 지원도 경험치 조금
+                self.units[u].off.gain_exp(&jobs, 8);
+            }
+            out.push((pos, text));
+        }
+        let un = &mut self.units[u];
+        if un.off.level as i32 > un.level {
+            let old = un.max_hp;
+            un.max_hp = un.off.max_hp as i32;
+            un.hp += un.max_hp - old;
+            un.level = un.off.level as i32;
+            self.message = Some((format!("레벨 업! Lv{}", un.level), 60));
+        }
+        out
+    }
+
+    /// 책략 연출. 끝나면 true
+    pub fn cast_step(&mut self, u: usize, sid: u8, cell: (i32, i32), t: u32) -> bool {
+        if t == 0 {
+            self.units[u].pose = Some(6);
+            self.cast_fx = self.strat(sid).map(|s| s.area_offsets().into_iter().map(|(dx, dy)| (cell.0 + dx, cell.1 + dy)).collect()).unwrap_or_default();
+            let name = self.strat(sid).map(|s| s.name.clone()).unwrap_or_default();
+            self.cast_log.push(name.clone());
+            self.message = Some((name, 40));
+        }
+        if t == 14 {
+            let res = self.apply_strategy(u, sid, cell);
+            if let Some(((x, y), txt)) = res.first() {
+                self.popup = Some((x * CELL + 4 - self.cam.0, y * CELL - 8 - self.cam.1, txt.clone(), 30));
+            }
+        }
+        if t == 30 {
+            self.units[u].pose = None;
+            self.cast_fx.clear();
+        }
+        if t >= 30 {
+            let mut fading = false;
+            for un in &mut self.units {
+                if un.visible && un.hp <= 0 {
+                    fading = true;
+                    un.fade = un.fade.saturating_sub(1);
+                    if un.fade == 0 {
+                        un.visible = false;
+                    }
+                }
+            }
+            return !fading;
+        }
+        false
+    }
+
+    /// 예상 물리 피해 (난수·명중 빼고)
+    fn est_damage(&self, a: usize, d: usize) -> i32 {
+        let atk = self.val(a, 0);
+        let def = self.val(d, 1);
+        let mut dmg = self.units[a].level.max(1) as u32 + 25;
+        if atk < def {
+            dmg = dmg.saturating_sub((def - atk) >> 1).max(1);
+        } else {
+            dmg += (atk - def) >> 1;
+        }
+        let (ga, gd) = (self.group(a), self.group(d));
+        if ga == 1 && gd == 3 {
+            dmg = dmg * 3 / 5;
+        } else if (ga == 1 && (gd == 2 || gd == 5)) || (matches!(ga, 2 | 4 | 5) && matches!(gd, 3 | 0x10 | 0x11)) {
+            dmg = dmg * 3 / 2;
+        }
+        (dmg as i32).min(self.units[d].hp) * self.hit_rate(a, d) as i32 / 100
+    }
+
+    /// 책략 예상 점수 (from 칸에서 cell 에 쓸 때)
+    fn est_strategy(&self, u: usize, sid: u8, from: (i32, i32), cell: (i32, i32)) -> i32 {
+        let Some(st) = self.strat(sid) else { return 0 };
+        if cell.0 < 0 || cell.1 < 0 || cell.0 >= self.cols || cell.1 >= self.rows {
+            return 0;
+        }
+        let in_range = cell == from && (st.target == 1 || st.range == 11) || Self::range_offsets(st.range).contains(&(cell.0 - from.0, cell.1 - from.1));
+        if !in_range {
+            return 0;
+        }
+        let side = self.units[u].side;
+        let mut score = 0;
+        for (dx, dy) in st.area_offsets() {
+            let Some(t) = self.at(cell.0 + dx, cell.1 + dy) else { continue };
+            if t == u && st.target == 0 {
+                continue;
+            }
+            let hostile = self.units[t].side.hostile(side);
+            match strategy::effect(sid) {
+                Effect::Damage(pw) | Effect::Status(_, pw) if hostile && st.target == 0 && strategy::terrain_ok(sid, self.terr(cell.0 + dx, cell.1 + dy)) => {
+                    let (ia, id) = (self.val(u, 2), self.val(t, 2));
+                    let mut v = self.units[u].level.max(1) + 25;
+                    v += (ia as i32 - id as i32) / 3;
+                    let d = (v.max(1) * pw as i32 / 10).min(self.units[t].hp);
+                    let already = matches!(strategy::effect(sid), Effect::Status(bit, _) if self.units[t].status & bit != 0);
+                    if !already {
+                        score += (d * self.strat_rate_for(u, t, sid) as i32 / 100) * 10 + if d >= self.units[t].hp { 500 } else { 0 } + 20;
+                    }
+                }
+                Effect::Heal(big) if !hostile && st.target == 1 => {
+                    let lost = self.units[t].max_hp - self.units[t].hp;
+                    if lost * 10 > self.units[t].max_hp * 3 {
+                        let i = self.val(u, 2) as i32;
+                        score += (if big { i / 2 + 70 } else { i / 10 + 40 }).min(lost) * 12;
+                    }
+                }
+                Effect::Cure if !hostile && self.units[t].status != 0 => score += 200,
+                _ => {}
+            }
+        }
+        score
+    }
+
+    /// 차례 시작: 상태이상 (독 피해, 회복 확률 — 원작 FUN_0043e8e6)
+    pub fn start_side(&mut self, side: Side) {
+        let idx: Vec<usize> = self.alive(side).collect();
+        for i in idx {
+            let luck = self.val(i, 4);
+            let cure = (luck / 3).clamp(10, 60);
+            let un = &mut self.units[i];
+            if un.status & status::POISON != 0 {
+                let d = (un.max_hp / 10).max(1).min(un.hp - 1).max(0);
+                un.hp -= d;
+            }
+            for bit in [status::POISON, status::CONFUSE, status::PARALYZE, status::SEAL] {
+                if self.units[i].status & bit != 0 && (self.rand(100) as u32) < cure {
+                    self.units[i].status &= !bit;
+                }
+            }
+            // 능력 상태는 차례마다 보통 쪽으로 한 칸
+            for k in 0..5 {
+                let r = self.rand(3);
+                let st = &mut self.units[i].state[k];
+                if *st > 3 && r == 0 {
+                    *st -= 1;
+                } else if *st < 3 && r == 0 {
+                    *st += 1;
+                }
+            }
+        }
     }
 
     /// 지형 표 행 = 병종 (원작 FUN_00407bc0)
@@ -759,8 +1116,8 @@ impl Battle {
                 }
             }
             Phase::Menu { unit, from } => {
-                let (u, ux, uy) = (unit, self.units[unit].x, self.units[unit].y);
-                let has_target = !self.targets_from(u, (ux, uy)).is_empty();
+                let u = unit;
+                let items = self.menu_items(u);
                 if cancel {
                     let un = &mut self.units[u];
                     un.x = from.0;
@@ -768,34 +1125,120 @@ impl Battle {
                     un.px = (from.0 * CELL) as f32;
                     un.py = (from.1 * CELL) as f32;
                     self.phase = Phase::PlayerIdle;
-                } else if let Some((mx, my)) = inp.mouse.filter(|_| tapped.is_some()) {
-                    let (bx, by) = self.menu_pos(u);
-                    let item = if mx >= bx && mx < bx + 120 && my >= by { (my - by) / 30 } else { -1 };
-                    match item {
-                        0 if has_target => {
-                            let cells = self.attack_cells(u, (ux, uy));
-                            self.phase = Phase::Targeting { unit: u, from, cells };
+                } else if tapped.is_some() {
+                    let pick = match inp.mouse {
+                        Some((mx, my)) => {
+                            let (bx, by) = self.menu_pos(u);
+                            if mx >= bx && mx < bx + 120 && my >= by && my < by + items.len() as i32 * 30 {
+                                Some(((my - by) / 30) as usize)
+                            } else {
+                                None
+                            }
                         }
-                        1 | 0 => {
-                            self.units[u].acted = true;
+                        None => Some(0),
+                    };
+                    if let Some(k) = pick {
+                        match items.get(k).map(|s| s.0) {
+                            Some("공격") => {
+                                let cells = self.attack_cells(u, (self.units[u].x, self.units[u].y));
+                                self.phase = Phase::Targeting { unit: u, from, cells };
+                            }
+                            Some("책략") => {
+                                let list = self.known_strategies(u);
+                                self.phase = Phase::StratList { unit: u, from, list };
+                            }
+                            Some("도구") => {
+                                let list = self.tool_list();
+                                self.phase = Phase::ToolList { unit: u, from, list };
+                            }
+                            Some("대기") => {
+                                self.units[u].acted = true;
+                                self.phase = Phase::PlayerIdle;
+                                self.after_player_action();
+                                return true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Phase::StratList { unit, from, list } => {
+                if cancel {
+                    self.phase = Phase::Menu { unit, from };
+                } else if let (Some(_), Some((mx, my))) = (tapped, inp.mouse) {
+                    let (bx, by, w, _) = self.strat_box(list.len());
+                    if mx >= bx && mx < bx + w && my >= by + 8 {
+                        let k = ((my - by - 8) / 22) as usize;
+                        if let Some(&sid) = list.get(k) {
+                            let need = self.strat(sid).map_or(0, |s| s.mp as i32);
+                            if self.units[unit].mp >= need {
+                                let cells = self.strat_cells(unit, sid);
+                                self.phase = Phase::StratTarget { unit, from, sid, cells };
+                            } else {
+                                self.message = Some(("MP가 모자랍니다".into(), 40));
+                            }
+                        }
+                    } else {
+                        self.phase = Phase::Menu { unit, from };
+                    }
+                }
+            }
+            Phase::ToolList { unit, from, list } => {
+                if cancel {
+                    self.phase = Phase::Menu { unit, from };
+                } else if let (Some(_), Some((mx, my))) = (tapped, inp.mouse) {
+                    let (bx, by, w, _) = self.strat_box(list.len());
+                    if mx >= bx && mx < bx + w && my >= by + 8 {
+                        let k = ((my - by - 8) / 22) as usize;
+                        if let Some(&inv) = list.get(k) {
+                            let (x, y) = (self.units[unit].x, self.units[unit].y);
+                            let cells: Vec<(i32, i32)> = [(0, 0), (0, -1), (0, 1), (-1, 0), (1, 0)].iter().map(|(dx, dy)| (x + dx, y + dy)).collect();
+                            self.phase = Phase::ToolTarget { unit, from, inv, cells };
+                        }
+                    } else {
+                        self.phase = Phase::Menu { unit, from };
+                    }
+                }
+            }
+            Phase::ToolTarget { unit, from, inv, cells } => {
+                if cancel {
+                    let list = self.tool_list();
+                    self.phase = Phase::ToolList { unit, from, list };
+                } else if let Some(c) = tapped {
+                    match self.at(c.0, c.1).filter(|&t| cells.contains(&c) && !self.units[t].side.hostile(Side::Player)) {
+                        Some(t) => {
+                            let msg = self.use_tool(inv, t);
+                            let (tx, ty) = (self.units[t].x, self.units[t].y);
+                            self.popup = Some((tx * CELL + 4 - self.cam.0, ty * CELL - 8 - self.cam.1, msg, 30));
+                            self.units[unit].acted = true;
                             self.phase = Phase::PlayerIdle;
                             self.after_player_action();
                             return true;
                         }
-                        _ => {}
-                    }
-                } else if tapped.is_some() {
-                    // 키보드: 공격 가능하면 공격, 아니면 대기
-                    if has_target {
-                        let cells = self.attack_cells(u, (ux, uy));
-                        self.phase = Phase::Targeting { unit: u, from, cells };
-                    } else {
-                        self.units[u].acted = true;
-                        self.phase = Phase::PlayerIdle;
-                        self.after_player_action();
-                        return true;
+                        None => self.message = Some(("대상이 없습니다".into(), 40)),
                     }
                 }
+            }
+            Phase::StratTarget { unit, from, sid, cells } => {
+                if cancel {
+                    let list = self.known_strategies(unit);
+                    self.phase = Phase::StratList { unit, from, list };
+                } else if let Some(c) = tapped {
+                    if cells.contains(&c) && !self.strat_victims(unit, sid, c).is_empty() {
+                        self.phase = Phase::Cast { unit, sid, cell: c, t: 0 };
+                    } else {
+                        self.message = Some(("대상이 없습니다".into(), 40));
+                    }
+                }
+            }
+            Phase::Cast { unit, sid, cell, t } => {
+                if self.cast_step(unit, sid, cell, t) {
+                    self.units[unit].acted = true;
+                    self.phase = Phase::PlayerIdle;
+                    self.after_player_action();
+                    return true;
+                }
+                self.phase = Phase::Cast { unit, sid, cell, t: t + 1 };
             }
             Phase::Targeting { unit, from, cells } => {
                 if cancel {
@@ -819,6 +1262,100 @@ impl Battle {
             _ => {}
         }
         false
+    }
+
+    /// 쓸 수 있는 소모품 (소지품 번호, 같은 종류는 하나만)
+    pub fn tool_list(&self) -> Vec<usize> {
+        let mut seen = Vec::new();
+        let mut out = Vec::new();
+        for (i, &(it, _)) in self.inventory.iter().enumerate() {
+            let t = self.items.get(it as usize * 25 + 17).copied().unwrap_or(0);
+            if t >= 0x3F && !seen.contains(&it) {
+                seen.push(it);
+                out.push(i);
+            }
+        }
+        out
+    }
+
+    /// 소모품 사용 (원작 아이템 종류 0x3f HP, 0x40 MP, 0x41~0x45 상태 치료, 0x46~0x4a 능력 열매, 0x4b 경험, 0x4c 인삼)
+    fn use_tool(&mut self, inv: usize, t: usize) -> String {
+        let Some(&(it, _)) = self.inventory.get(inv) else { return String::new() };
+        self.inventory.remove(inv);
+        let rec = |i: usize| self.items.get(it as usize * 25 + i).copied().unwrap_or(0);
+        let (ty, v) = (rec(17), rec(21) as i32);
+        let jobs = self.jobs.clone();
+        let un = &mut self.units[t];
+        match ty {
+            0x3F => {
+                let h = if v == 0xFF { un.max_hp } else { v }.min(un.max_hp - un.hp);
+                un.hp += h;
+                format!("+{h}")
+            }
+            0x40 => {
+                let m = v.min(un.off.max_mp as i32 - un.mp);
+                un.mp += m;
+                format!("MP+{m}")
+            }
+            0x41 => {
+                un.status &= !status::CONFUSE;
+                "혼란 회복".into()
+            }
+            0x42 => {
+                un.status &= !status::POISON;
+                "해독".into()
+            }
+            0x43 => {
+                un.status &= !status::PARALYZE;
+                "포박 회복".into()
+            }
+            0x44 => {
+                un.status &= !status::SEAL;
+                "봉책 회복".into()
+            }
+            0x45 => {
+                un.status = 0;
+                "모두 회복".into()
+            }
+            0x46..=0x4A => {
+                // 무력·지력·통솔·민첩·운 → 공격·정신·방어·순발·사기
+                let k = [0usize, 2, 1, 3, 4][(ty - 0x46) as usize];
+                un.off.stats[k] = (un.off.stats[k] + v as u16).min(255);
+                format!("{}+{v}", ["공격", "방어", "정신", "순발", "사기"][k])
+            }
+            0x4B => {
+                un.off.gain_exp(&jobs, v as u32);
+                un.level = un.off.level as i32;
+                un.max_hp = un.off.max_hp as i32;
+                format!("경험+{v}")
+            }
+            _ => {
+                un.hp = un.max_hp;
+                un.mp = un.off.max_mp as i32;
+                "완전 회복".into()
+            }
+        }
+    }
+
+    /// 행동 메뉴 항목 (이름, 쓸 수 있나)
+    fn menu_items(&self, u: usize) -> Vec<(&'static str, bool)> {
+        let (x, y) = (self.units[u].x, self.units[u].y);
+        let mut v = vec![("공격", !self.targets_from(u, (x, y)).is_empty())];
+        let strats = self.known_strategies(u);
+        if !strats.is_empty() {
+            v.push(("책략", true));
+        }
+        if self.units[u].side == Side::Player && !self.tool_list().is_empty() {
+            v.push(("도구", true));
+        }
+        v.push(("대기", true));
+        v
+    }
+
+    /// 책략 목록 창 (x, y, 폭, 높이)
+    fn strat_box(&self, n: usize) -> (i32, i32, i32, i32) {
+        let h = n as i32 * 22 + 16;
+        (180, (240 - h / 2).max(30), 280, h)
     }
 
     fn menu_pos(&self, u: usize) -> (i32, i32) {
@@ -919,24 +1456,40 @@ impl Battle {
         let Some(&u) = list.get(idx) else { return (false, true) };
         match stage {
             0 => {
-                // 목표 정하기
+                // 목표 정하기: 갈 수 있는 칸마다 공격/책략의 예상 효과로 점수
                 let cells = self.reachable(u);
-                let mut best: Option<((i32, i32), usize, i32)> = None;
                 let hold = self.units[u].ai == 1;
-                for &c in &cells {
-                    if hold && c != (self.units[u].x, self.units[u].y) {
-                        continue;
-                    }
-                    for t in self.targets_from(u, c) {
-                        let score = 1000 - self.units[t].hp;
-                        if best.is_none_or(|b| score > b.2) {
-                            best = Some((c, t, score));
+                let confused = self.units[u].status & status::CONFUSE != 0;
+                let mut best: Option<((i32, i32), AiPlan, i32)> = None;
+                if !confused {
+                    let strats: Vec<u8> = self.known_strategies(u).into_iter().filter(|&sid| self.strat(sid).is_some_and(|st| st.mp as i32 <= self.units[u].mp)).collect();
+                    for &c in &cells {
+                        if hold && c != (self.units[u].x, self.units[u].y) {
+                            continue;
+                        }
+                        for t in self.targets_from(u, c) {
+                            let d = self.est_damage(u, t);
+                            let score = d * 10 + if d >= self.units[t].hp { 500 } else { 0 };
+                            if best.as_ref().is_none_or(|b| score > b.2) {
+                                best = Some((c, AiPlan::Attack(t), score));
+                            }
+                        }
+                        for &sid in &strats {
+                            let Some(st) = self.strat(sid).cloned() else { continue };
+                            for (dx, dy) in Self::range_offsets(st.range).into_iter().chain(std::iter::once((0, 0))) {
+                                let cell = (c.0 + dx, c.1 + dy);
+                                let score = self.est_strategy(u, sid, c, cell);
+                                if score > 0 && best.as_ref().is_none_or(|b| score > b.2) {
+                                    best = Some((c, AiPlan::Strat(sid, cell), score));
+                                }
+                            }
                         }
                     }
                 }
+                self.ai_plan = best.as_ref().map(|b| b.1.clone());
                 let dest = match best {
                     Some((c, _, _)) => c,
-                    None if hold => (self.units[u].x, self.units[u].y),
+                    None if hold || confused => (self.units[u].x, self.units[u].y),
                     None => {
                         // 가장 가까운 적에게 다가감 (또는 지정 지점)
                         let goal = self.units[u].ai_target.or_else(|| {
@@ -966,17 +1519,42 @@ impl Battle {
             1 => {
                 if self.units[u].path.is_empty() {
                     let (x, y) = (self.units[u].x, self.units[u].y);
-                    let t = self.targets_from(u, (x, y)).into_iter().min_by_key(|&t| self.units[t].hp);
-                    match t {
-                        Some(t) => {
-                            self.phase = Phase::Ai { side, idx, stage: 2 };
-                            self.attack_target = Some((t, 0));
+                    match self.ai_plan.take() {
+                        Some(AiPlan::Strat(sid, cell)) if !self.strat_victims(u, sid, cell).is_empty() => {
+                            self.cast_t = 0;
+                            self.phase = Phase::Ai { side, idx, stage: 3 };
+                            self.ai_plan = Some(AiPlan::Strat(sid, cell));
                         }
-                        None => {
-                            self.phase = Phase::Ai { side, idx: idx + 1, stage: 0 };
-                            return (true, false);
+                        other => {
+                            let t = match other {
+                                Some(AiPlan::Attack(t)) if self.targets_from(u, (x, y)).contains(&t) => Some(t),
+                                _ => self.targets_from(u, (x, y)).into_iter().min_by_key(|&t| self.units[t].hp),
+                            };
+                            match t {
+                                Some(t) if self.units[u].status & status::CONFUSE == 0 => {
+                                    self.phase = Phase::Ai { side, idx, stage: 2 };
+                                    self.attack_target = Some((t, 0));
+                                }
+                                _ => {
+                                    self.phase = Phase::Ai { side, idx: idx + 1, stage: 0 };
+                                    return (true, false);
+                                }
+                            }
                         }
                     }
+                }
+            }
+            3 => {
+                let Some(AiPlan::Strat(sid, cell)) = self.ai_plan.clone() else {
+                    self.phase = Phase::Ai { side, idx: idx + 1, stage: 0 };
+                    return (true, false);
+                };
+                let t = self.cast_t;
+                self.cast_t += 1;
+                if self.cast_step(u, sid, cell, t) {
+                    self.ai_plan = None;
+                    self.phase = Phase::Ai { side, idx: idx + 1, stage: 0 };
+                    return (true, false);
                 }
             }
             _ => {
@@ -1005,7 +1583,9 @@ impl Battle {
         // 범위 표시 (점무늬)
         let (cells, col): (Vec<(i32, i32)>, u8) = match &self.phase {
             Phase::Selected { cells, .. } => (cells.clone(), self.col[0]),
-            Phase::Targeting { cells, .. } => (cells.clone(), self.col[1]),
+            Phase::Targeting { cells, .. } | Phase::StratTarget { cells, .. } => (cells.clone(), self.col[1]),
+            Phase::ToolTarget { cells, .. } => (cells.clone(), self.col[0]),
+            Phase::Cast { .. } => (self.cast_fx.clone(), self.col[5]),
             _ => (Vec::new(), 0),
         };
         for (x, y) in cells {
@@ -1094,7 +1674,7 @@ impl Battle {
         }
         // 선택된 부대 정보
         let sel = match &self.phase {
-            Phase::Selected { unit, .. } | Phase::Menu { unit, .. } | Phase::Targeting { unit, .. } | Phase::Moving { unit, .. } => Some(*unit),
+            Phase::Selected { unit, .. } | Phase::Menu { unit, .. } | Phase::Targeting { unit, .. } | Phase::Moving { unit, .. } | Phase::StratList { unit, .. } | Phase::StratTarget { unit, .. } | Phase::ToolList { unit, .. } | Phase::ToolTarget { unit, .. } => Some(*unit),
             _ => None,
         };
         if let Some(u) = sel {
@@ -1102,10 +1682,33 @@ impl Battle {
         }
         if let Phase::Menu { unit, .. } = &self.phase {
             let (bx, by) = self.menu_pos(*unit);
-            let has = !self.targets_from(*unit, (self.units[*unit].x, self.units[*unit].y)).is_empty();
-            frame_box(scr, bx, by, 120, 64);
-            draw_text(scr, f, bx + 16, by + 8, "공격", if has { story::TEXT } else { 24 });
-            draw_text(scr, f, bx + 16, by + 38, "대기", story::TEXT);
+            let items = self.menu_items(*unit);
+            frame_box(scr, bx, by, 120, items.len() as i32 * 30 + 4);
+            for (k, (name, ok)) in items.iter().enumerate() {
+                draw_text(scr, f, bx + 16, by + 8 + k as i32 * 30, name, if *ok { story::TEXT } else { 24 });
+            }
+        }
+        if let Phase::ToolList { list, .. } = &self.phase {
+            let (bx, by, w, h) = self.strat_box(list.len());
+            frame_box(scr, bx, by, w, h);
+            for (k, &inv) in list.iter().enumerate() {
+                let it = self.inventory[inv].0;
+                let cnt = self.inventory.iter().filter(|x| x.0 == it).count();
+                draw_text(scr, f, bx + 12, by + 8 + k as i32 * 22, &crate::officer::item_name(&self.items, it), story::TEXT);
+                draw_text(scr, f, bx + w - 60, by + 8 + k as i32 * 22, &format!("×{cnt}"), story::TEXT);
+            }
+        }
+        if let Phase::StratList { unit, list, .. } = &self.phase {
+            let (bx, by, w, h) = self.strat_box(list.len());
+            frame_box(scr, bx, by, w, h);
+            let mp = self.units[*unit].mp;
+            for (k, sid) in list.iter().enumerate() {
+                if let Some(st) = self.strat(*sid) {
+                    let col = if mp >= st.mp as i32 { story::TEXT } else { 24 };
+                    draw_text(scr, f, bx + 12, by + 8 + k as i32 * 22, &st.name, col);
+                    draw_text(scr, f, bx + w - 80, by + 8 + k as i32 * 22, &format!("MP {:>2}", st.mp), col);
+                }
+            }
         }
         if let Some((m, _)) = &self.message {
             frame_box(scr, 180, 440, 280, 32);

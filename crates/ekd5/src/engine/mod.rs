@@ -3,8 +3,10 @@
 
 pub mod assets;
 pub mod battle;
+pub mod camp;
 pub mod screen;
 pub mod story;
+pub mod ui;
 
 use crate::eex;
 use crate::font::Font;
@@ -136,8 +138,21 @@ pub struct Engine<A: Assets> {
     /// DATA.E5[0] 원자료, 아이템 표
     pub person_data: Rc<Vec<u8>>,
     /// 불러온 장수 레벨 (자료 적재 뒤 적용)
-    pending_offs: Vec<(usize, u8, u8)>,
+    pending_offs: Vec<(usize, u8, u8, Option<(u8, u8)>, Option<(u8, u8)>, Option<u8>)>,
     pub items: Rc<Vec<u8>>,
+    pub strategies: Rc<Vec<crate::strategy::Strategy>>,
+    /// 돈, 소지 아이템 (아이템, 레벨), 명성(op3a 2)
+    pub gold: i32,
+    pub inventory: Vec<(u8, u8)>,
+    pub fame: i32,
+    /// 본진
+    pub camp: Option<camp::Camp>,
+    pub camp_rule: Option<camp::SortieRule>,
+    camp_pending: bool,
+    /// 출진 고르기
+    pub sortie_ui: Option<camp::SortieUi>,
+    sortie_rule: Option<camp::SortieRule>,
+    sortie_chosen: Option<Vec<usize>>,
     /// 사건 처리 뒤 돌아갈 전투 단계
     resume: Option<battle::Phase>,
     /// 실행할 사건 본문들 (뒤에서부터)
@@ -149,7 +164,7 @@ pub struct Engine<A: Assets> {
     /// 시험용: 아군 강화
     pub cheat: bool,
     /// 전투 시작 시점 저장 (패배 후 다시 하기용)
-    saved: Option<(Vec<bool>, Vec<usize>, HashMap<usize, crate::officer::Officer>)>,
+    saved: Option<(Vec<bool>, Vec<usize>, HashMap<usize, crate::officer::Officer>, Vec<(u8, u8)>, i32)>,
     /// 단계 시작마다 만든 저장 문자열 (웹이 가져감)
     pub save_out: Option<String>,
     unknown: std::collections::BTreeSet<u16>,
@@ -183,6 +198,16 @@ impl<A: Assets> Engine<A> {
             person_data: Rc::new(Vec::new()),
             pending_offs: Vec::new(),
             items: Rc::new(Vec::new()),
+            strategies: Rc::new(Vec::new()),
+            gold: 0,
+            inventory: Vec::new(),
+            fame: 0,
+            camp: None,
+            camp_rule: None,
+            camp_pending: false,
+            sortie_ui: None,
+            sortie_rule: None,
+            sortie_chosen: None,
             resume: None,
             event_queue: Vec::new(),
             end_checked: false,
@@ -243,8 +268,9 @@ impl<A: Assets> Engine<A> {
             }
         }
         if self.jobs.is_empty() {
-            match (self.packs.get(&mut self.assets, "DATA.E5", 3), self.packs.get(&mut self.assets, "DATA.E5", 4), self.packs.get(&mut self.assets, "DATA.E5", 1)) {
-                (Ok(j), Ok(t), Ok(i)) => {
+            match (self.packs.get(&mut self.assets, "DATA.E5", 3), self.packs.get(&mut self.assets, "DATA.E5", 4), self.packs.get(&mut self.assets, "DATA.E5", 1), self.packs.get(&mut self.assets, "DATA.E5", 5)) {
+                (Ok(j), Ok(t), Ok(i), Ok(st)) => {
+                    self.strategies = Rc::new(crate::strategy::parse(&st.unwrap_or_default()));
                     self.jobs = Rc::new(j.unwrap_or_default());
                     self.terrain_tab = Rc::new(t.unwrap_or_default());
                     self.items = Rc::new(i.unwrap_or_default());
@@ -252,11 +278,17 @@ impl<A: Assets> Engine<A> {
                 _ => return false,
             }
         }
-        for (p, lv, ex) in std::mem::take(&mut self.pending_offs) {
+        let has_eq = self.pending_offs.iter().any(|o| o.3.is_some() || o.4.is_some() || o.5.is_some());
+        for (p, lv, ex, w, ar, ac) in std::mem::take(&mut self.pending_offs) {
             if let Some(r) = self.person_data.get(p * 32..p * 32 + 32) {
                 let mut o = crate::officer::Officer::from_data(p, r);
                 o.set_level(&self.jobs, lv);
                 o.exp = ex;
+                if has_eq {
+                    o.weapon = w;
+                    o.armor = ar;
+                    o.acc = ac;
+                }
                 self.officers.insert(p, o);
             }
         }
@@ -267,6 +299,26 @@ impl<A: Assets> Engine<A> {
     fn commit_battle(&mut self) {
         let roster = self.roster.clone();
         if let Scene::Battle(b) = &self.scene {
+            // 전투 중 쓴 도구를 빼고, 보상으로 늘어난 것은 엔진 쪽에 이미 들어 있음
+            let used: Vec<(u8, u8)> = {
+                let mut base = self.inventory.clone();
+                for x in &b.inventory {
+                    if let Some(i) = base.iter().position(|y| y == x) {
+                        base.remove(i);
+                    }
+                }
+                base
+            };
+            let start_inv = self.saved.as_ref().map(|s| s.3.clone()).unwrap_or_default();
+            let mut inv = self.inventory.clone();
+            for u in used {
+                if start_inv.contains(&u) {
+                    if let Some(i) = inv.iter().position(|y| *y == u) {
+                        inv.remove(i);
+                    }
+                }
+            }
+            self.inventory = inv;
             for u in &b.units {
                 if u.side == battle::Side::Player && roster.contains(&u.person) {
                     self.officers.insert(u.person, u.off.clone());
@@ -349,6 +401,33 @@ impl<A: Assets> Engine<A> {
                 if !self.load_battle_map() {
                     return;
                 }
+                if self.autoplay {
+                    // 시험: 출진은 기본 선택, 본진은 바로 출진
+                    if let Some(ui) = self.sortie_ui.take() {
+                        self.sortie_chosen = Some(ui.chosen);
+                    }
+                    if let Some(c) = self.camp.take() {
+                        if let Some(body) = c.depart {
+                            if let Some(vm) = self.vm.as_mut() {
+                                vm.section = c.section;
+                                vm.ends.clear();
+                                vm.pc = body;
+                                if vm.enter_body(true).is_ok() {
+                                    vm.running = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                if self.sortie_ui.is_some() {
+                    if let Some(ch) = self.update_sortie() {
+                        self.sortie_chosen = Some(ch);
+                    }
+                    return;
+                }
+                if self.camp.is_some() && self.update_camp() {
+                    return;
+                }
                 self.update_scene();
                 self.run_script();
                 self.update_battle();
@@ -379,6 +458,8 @@ impl<A: Assets> Engine<A> {
                     false
                 }
                 Some(s) => {
+                    self.sortie_chosen = None;
+                    self.sortie_rule = None;
                     self.event_queue.clear();
                     self.resume = None;
                     self.end_checked = false;
@@ -387,16 +468,20 @@ impl<A: Assets> Engine<A> {
                     let mut vm = Vm::new(Rc::new(s));
                     if n % 2 == 1 {
                         match &self.saved {
-                            Some((f, r, o)) => {
+                            Some((f, r, o, inv, g)) => {
                                 self.flags = f.clone();
                                 self.roster = r.clone();
                                 self.officers = o.clone();
+                                self.inventory = inv.clone();
+                                self.gold = *g;
                             }
-                            None => self.saved = Some((self.flags.clone(), self.roster.clone(), self.officers.clone())),
+                            None => self.saved = Some((self.flags.clone(), self.roster.clone(), self.officers.clone(), self.inventory.clone(), self.gold)),
                         }
                         let mut b = battle::Battle::new((n / 2) as usize, self.jobs.clone(), self.terrain_tab.clone());
                         b.cheat = self.cheat;
                         b.items = self.items.clone();
+                        b.strategies = self.strategies.clone();
+                        b.inventory = self.inventory.clone();
                         self.scene = Scene::Battle(Box::new(b));
                     } else if !matches!(self.scene, Scene::Story(_)) {
                         self.scene = Scene::Story(Box::default());
@@ -552,7 +637,21 @@ impl<A: Assets> Engine<A> {
         if !vm.running && self.error.is_none() && self.stage % 2 == 1 && self.wait == Wait::None {
             // 전투: 절 0(배치·도입) 끝 → 턴 시작. 절 1 사건 본문 끝 → 하던 단계로. 절 2(끝) → 다음 단계
             if vm.section == 0 {
-                let roster = if self.roster.is_empty() { vec![0] } else { self.roster.clone() };
+                let need_pick = self.battle().is_some_and(|b| !b.started && b.slots.get(1).is_some_and(|&s| s != (0, 0)));
+                if need_pick && self.sortie_chosen.is_none() {
+                    let rule = self.sortie_rule.clone().unwrap_or(camp::SortieRule { max: 12, forced: vec![], excluded: vec![] });
+                    let n = if self.roster.is_empty() { 1 } else { self.roster.len() };
+                    if n > rule.max || n > 1 {
+                        self.vm = Some(vm);
+                        self.open_sortie(rule);
+                        return;
+                    }
+                }
+                let roster = match &self.sortie_chosen {
+                    Some(c) => c.clone(),
+                    None if self.roster.is_empty() => vec![0],
+                    None => self.roster.clone(),
+                };
                 let offs: Vec<crate::officer::Officer> = roster.iter().map(|&p| self.officer(p)).collect();
                 if let Some(b) = self.battle() {
                     if !b.started {
@@ -589,6 +688,18 @@ impl<A: Assets> Engine<A> {
                 self.vm = Some(vm);
                 return;
             }
+        }
+        if self.camp.is_some() {
+            self.vm = Some(vm);
+            return;
+        }
+        if !vm.running && self.error.is_none() && self.wait == Wait::None && self.camp_pending && vm.section + 1 < vm.sections() {
+            // 본진 (op06 1) — 다음 절은 선택지 블록들
+            self.camp_pending = false;
+            let next = vm.section + 1;
+            self.vm = Some(vm);
+            self.open_camp(next);
+            return;
         }
         if !vm.running && self.error.is_none() && self.wait == Wait::None {
             // 이야기(R_)는 절을 차례로 (원작 FUN_00412978: 최상위 끝 → 다음 절)
@@ -837,6 +948,70 @@ impl<A: Assets> Engine<A> {
                 if let Scene::Story(st) = &mut self.scene {
                     st.card = Some(format!("제{}장  {}", a(0), t));
                     self.wait = Wait::Ticks(75);
+                }
+            }
+            0x06 => {
+                // 본진: 1 = 열기 (출진 수, 반드시 출진 ×5, 불가 ×5), 0 = 닫기
+                if a(0) == 1 {
+                    let list: Vec<i32> = args[2..].iter().map(|x| x.i()).collect();
+                    self.camp_rule = Some(camp::SortieRule::from_args(a(1), &list));
+                    self.camp_pending = true;
+                } else {
+                    self.camp = None;
+                    self.camp_pending = false;
+                }
+            }
+            0x4A => {
+                // 출진 규칙 (전투)
+                let list: Vec<i32> = args[1..].iter().map(|x| x.i()).collect();
+                self.sortie_rule = Some(camp::SortieRule::from_args(a(0), &list));
+            }
+            0x3A => {
+                // 돈 (0: 설정/더하기/빼기) · 명성 게이지 (2)
+                let (kind, how, v) = (a(0), a(1), a(2));
+                match kind {
+                    0 => {
+                        self.gold = match how {
+                            0 => v,
+                            1 => self.gold + v,
+                            _ => (self.gold - v).max(0),
+                        }
+                        .min(999_999)
+                    }
+                    2 => {
+                        self.fame = match how {
+                            0 => v,
+                            1 => (self.fame + v).min(100),
+                            _ => (self.fame - v).max(0),
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            0x3D => {
+                // 아이템 얻기
+                let it = a(0);
+                if (0..0x68).contains(&it) {
+                    self.inventory.push((it as u8, 1));
+                    let n = crate::officer::item_name(&self.items, it as u8);
+                    if let Some(b) = self.battle() {
+                        b.message = Some((format!("{n}을(를) 손에 넣었다!"), 90));
+                    }
+                }
+            }
+            0x59 => {
+                // 전투 보상: 돈 (조조 레벨×100 + 700 + 인자), 아이템 셋
+                let lv = self.officer(0).level as i32;
+                let money = lv * 100 + 700 + a(0);
+                self.gold = (self.gold + money).min(999_999);
+                for k in [1, 3, 5] {
+                    let it = a(k);
+                    if (0..0x68).contains(&it) {
+                        self.inventory.push((it as u8, 1));
+                    }
+                }
+                if let Some(b) = self.battle() {
+                    b.message = Some((format!("보상금 {money}"), 90));
                 }
             }
             0x3B => {
@@ -1253,6 +1428,16 @@ impl<A: Assets> Engine<A> {
             return;
         }
         let inp = self.input.clone();
+        let autoplay = self.autoplay;
+        let casts: Vec<String> = match self.battle() {
+            Some(b) => b.cast_log.drain(..).collect(),
+            None => return,
+        };
+        if autoplay {
+            for n in casts {
+                self.log.push(format!("책략 {n}"));
+            }
+        }
         let Some(b) = self.battle() else { return };
         if !b.started {
             return;
@@ -1277,11 +1462,13 @@ impl<A: Assets> Engine<A> {
                 }
                 if t == 1 {
                     check = true;
+                    b.start_side(side);
                 }
                 if t >= 36 {
                     if side == battle::Side::Player {
                         for u in &mut b.units {
-                            u.acted = false;
+                            // 혼란이면 행동 못함
+                            u.acted = u.status & crate::strategy::status::CONFUSE != 0;
                         }
                         b.phase = battle::Phase::PlayerIdle;
                         let t = b.turn;
@@ -1419,6 +1606,8 @@ impl<A: Assets> Engine<A> {
                 }
             }
         }
+        self.render_camp();
+        let scr = &mut self.screen;
         if let Some(e) = &self.error {
             if let Some(f) = &self.font {
                 scr.fill(0, 0, 640, 20, 0);
@@ -1432,14 +1621,22 @@ impl<A: Assets> Engine<A> {
     pub fn snapshot(&self) -> String {
         let flags: Vec<String> = self.flags.iter().enumerate().filter(|(_, &f)| f).map(|(i, _)| i.to_string()).collect();
         let roster: Vec<String> = self.roster.iter().map(|r| r.to_string()).collect();
-        let offs: Vec<String> = self.officers.values().map(|o| format!("{}:{}:{}", o.person, o.level, o.exp)).collect();
-        format!("2;{};{};{};{}", self.stage, flags.join(","), roster.join(","), offs.join(","))
+        let offs: Vec<String> = self
+            .officers
+            .values()
+            .map(|o| {
+                let it = |x: Option<(u8, u8)>| x.map_or("255.0".into(), |(i, l)| format!("{i}.{l}"));
+                format!("{}:{}:{}:{}:{}:{}", o.person, o.level, o.exp, it(o.weapon), it(o.armor), o.acc.unwrap_or(255))
+            })
+            .collect();
+        let inv: Vec<String> = self.inventory.iter().map(|(i, l)| format!("{i}.{l}")).collect();
+        format!("3;{};{};{};{};{};{};{}", self.stage, flags.join(","), roster.join(","), offs.join(","), self.gold, inv.join(","), self.fame)
     }
 
     /// 불러오기 (제목 화면에서 시작하면 그 단계부터)
     pub fn restore(&mut self, s: &str) -> bool {
         let f: Vec<&str> = s.split(';').collect();
-        if f.len() < 4 || (f[0] != "1" && f[0] != "2") {
+        if f.len() < 4 || !matches!(f[0], "1" | "2" | "3") {
             return false;
         }
         let Ok(stage) = f[1].parse() else { return false };
@@ -1453,10 +1650,24 @@ impl<A: Assets> Engine<A> {
         self.roster = f[3].split(',').filter_map(|v| v.parse().ok()).collect();
         self.pending_offs = f.get(4).map_or(Vec::new(), |o| {
             o.split(',').filter_map(|e| {
-                let v: Vec<u32> = e.split(':').filter_map(|x| x.parse().ok()).collect();
-                (v.len() == 3).then(|| (v[0] as usize, v[1] as u8, v[2] as u8))
+                let v: Vec<&str> = e.split(':').collect();
+                let n = |i: usize| v.get(i).and_then(|x| x.parse::<u32>().ok());
+                let eq = |i: usize| -> Option<(u8, u8)> {
+                    let (a, b) = v.get(i)?.split_once('.')?;
+                    let a: u8 = a.parse().ok()?;
+                    (a != 255).then_some((a, b.parse().ok()?))
+                };
+                Some((n(0)? as usize, n(1)? as u8, n(2)? as u8, eq(3), eq(4), n(5).filter(|&x| x != 255).map(|x| x as u8)))
             }).collect()
         });
+        self.gold = f.get(5).and_then(|g| g.parse().ok()).unwrap_or(0);
+        self.inventory = f.get(6).map_or(Vec::new(), |s| {
+            s.split(',').filter_map(|e| {
+                let (a, b) = e.split_once('.')?;
+                Some((a.parse().ok()?, b.parse().ok()?))
+            }).collect()
+        });
+        self.fame = f.get(7).and_then(|g| g.parse().ok()).unwrap_or(0);
         true
     }
 

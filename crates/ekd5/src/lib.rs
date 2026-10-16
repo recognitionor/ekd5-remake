@@ -5,4 +5,5 @@ pub mod officer;
 pub mod engine;
 pub mod ls12;
 pub mod palette;
+pub mod strategy;
 pub mod vm;
