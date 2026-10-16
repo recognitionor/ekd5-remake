@@ -6,6 +6,7 @@ pub mod battle;
 pub mod camp;
 pub mod duel;
 pub mod fx;
+pub mod icons;
 pub mod tutor;
 pub mod screen;
 pub mod story;
@@ -118,6 +119,8 @@ pub enum Wait {
     Key,
     /// 동영상 (웹이 다 보여주면 movie_done)
     Movie,
+    /// 맵 연출 (op6b) 끝날 때까지
+    Fx,
 }
 
 pub struct Engine<A: Assets> {
@@ -172,6 +175,9 @@ pub struct Engine<A: Assets> {
     /// 웹이 저장할 공통 기록
     pub common_out: Option<String>,
     pub tutor: Option<tutor::Tutor>,
+    /// 아이콘 (ICONS.BIN)
+    pub icons: Rc<icons::Icons>,
+    icons_loaded: bool,
     /// 동영상을 보여줄 수 있는 환경 (웹)
     pub movies: bool,
     logo_shown: bool,
@@ -241,6 +247,8 @@ impl<A: Assets> Engine<A> {
             book: vec![false; 0x68],
             common_out: None,
             tutor: None,
+            icons: Rc::new(icons::Icons::default()),
+            icons_loaded: false,
             movies: false,
             logo_shown: false,
             camp: None,
@@ -300,6 +308,14 @@ impl<A: Assets> Engine<A> {
                         .collect();
                 }
             }
+        }
+        if !self.icons_loaded {
+            match self.assets.get("ICONS.BIN") {
+                Asset::Pending => return false,
+                Asset::Ready(d) => self.icons = Rc::new(icons::Icons::parse(&d)),
+                Asset::Missing => {}
+            }
+            self.icons_loaded = true;
         }
         if self.screen.window_tex.is_none() {
             match self.assets.get("MARK.E5") {
@@ -552,6 +568,7 @@ impl<A: Assets> Engine<A> {
                         }
                         let mut b = battle::Battle::new((n / 2) as usize, self.jobs.clone(), self.terrain_tab.clone());
                         b.cheat = self.cheat;
+                        b.icons = self.icons.clone();
                         b.items = self.items.clone();
                         b.strategies = self.strategies.clone();
                         b.inventory = self.inventory.clone();
@@ -665,6 +682,27 @@ impl<A: Assets> Engine<A> {
         st.update();
         match self.wait.clone() {
             Wait::Movie => {}
+            Wait::Fx => {
+                if let Scene::Battle(b) = &mut self.scene {
+                    if b.fx_req.is_none() {
+                        let done = match b.fx.as_mut() {
+                            Some(f) => {
+                                if f.sound_now() {
+                                    self.sounds.push(Sound::Effect(format!("SE_M_{:02}.WAV", f.sound)));
+                                }
+                                f.advance()
+                            }
+                            None => true,
+                        };
+                        if done {
+                            b.fx = None;
+                            self.wait = Wait::None;
+                        }
+                    }
+                } else {
+                    self.wait = Wait::None;
+                }
+            }
             Wait::Ticks(n) => {
                 self.wait = if n <= 1 { Wait::None } else { Wait::Ticks(n - 1) };
             }
@@ -1270,6 +1308,19 @@ impl<A: Assets> Engine<A> {
                 if let Scene::Story(st) = &mut self.scene {
                     let pid = a(1) as usize;
                     st.actors.retain(|x| x.id != pid);
+                }
+            }
+            0x6B => {
+                // 맵 연출 (원작 FUN_0041645a): x, y, 연출 번호 (100 미만 MEFF, 이상 MCALL), 조용히
+                let (x, y, id) = (a(0), a(1), a(2));
+                if let Some(b) = self.battle() {
+                    if a(3) == 0 || a(3) == 0xFFFF {
+                        b.focus(x, y);
+                    }
+                    if id < 200 {
+                        b.fx_req = Some((id as u8, vec![(x * battle::CELL + battle::CELL / 2, y * battle::CELL + battle::CELL / 2)]));
+                        self.wait = Wait::Fx;
+                    }
                 }
             }
             0x5A => {

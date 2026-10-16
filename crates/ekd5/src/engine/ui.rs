@@ -1,6 +1,6 @@
 //! 공용 목록 창 (본진 메뉴, 상점, 장비, 출진 선택). 탭/방향키/결정·취소.
 
-use super::screen::Screen;
+use super::screen::{Pic, Screen};
 use super::story::{draw_text, frame_box, NAME, TEXT};
 use super::{key, Input};
 use crate::font::Font;
@@ -18,6 +18,8 @@ pub struct ListBox {
     pub visible: usize,
     /// 아래에 붙는 도움말
     pub footer: String,
+    /// 줄마다 아이콘 (원작 ImageList)
+    pub icons: Vec<Option<std::rc::Rc<Pic>>>,
 }
 
 pub const ROW: i32 = 24;
@@ -31,7 +33,7 @@ pub enum Pick {
 
 impl ListBox {
     pub fn new(title: &str, w: i32) -> Self {
-        Self { title: title.into(), rows: Vec::new(), sel: 0, top: 0, x: 320 - w / 2, y: 60, w, visible: 12, footer: String::new() }
+        Self { title: title.into(), rows: Vec::new(), sel: 0, top: 0, x: 320 - w / 2, y: 60, w, visible: 12, footer: String::new(), icons: Vec::new() }
     }
 
     pub fn push(&mut self, l: impl Into<String>, r: impl Into<String>, ok: bool) {
@@ -105,6 +107,9 @@ impl ListBox {
                 scr.fill(self.x + 6, y - 2, self.w - 12, ROW - 2, hi);
             }
             let col = if *ok { TEXT } else { 24 };
+            if let Some(Some(p)) = self.icons.get(i) {
+                scr.blit(p, self.x + 8, y + (ROW - 2 - p.h as i32) / 2 - 1, Some(0));
+            }
             if *chk {
                 draw_text(scr, f, self.x + 10, y + 2, "●", NAME);
             }

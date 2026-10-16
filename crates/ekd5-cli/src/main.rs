@@ -66,6 +66,57 @@ fn tutor_text(exe: &[u8]) -> String {
     out
 }
 
+/// PE 리소스의 비트맵(8비트 DIB)들을 번호 순으로: (가로, 세로, 팔레트 RGB 768, 위에서부터 픽셀)
+fn dll_bitmaps(d: &[u8]) -> Vec<(usize, usize, Vec<u8>, Vec<u8>)> {
+    let u16at = |o: usize| u16::from_le_bytes([d[o], d[o + 1]]) as usize;
+    let u32at = |o: usize| u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]) as usize;
+    let pe = u32at(0x3c);
+    let (n, opt) = (u16at(pe + 6), u16at(pe + 20));
+    let rsrc = u32at(pe + 24 + 96 + 16);
+    let secs: Vec<(usize, usize, usize)> = (0..n).map(|i| {
+        let o = pe + 24 + opt + i * 40;
+        (u32at(o + 12), u32at(o + 8).max(u32at(o + 16)), u32at(o + 20))
+    }).collect();
+    let off = |va: usize| secs.iter().find(|&&(v, sz, _)| va >= v && va < v + sz).map(|&(v, _, ro)| ro + va - v);
+    let Some(base) = off(rsrc) else { return Vec::new() };
+    let mut out = Vec::new();
+    // 종류 → 번호 → 언어 → 자료
+    let entries = |o: usize| -> Vec<(usize, usize)> { (0..u16at(o + 12) + u16at(o + 14)).map(|k| (u32at(o + 16 + k * 8), u32at(o + 20 + k * 8))).collect() };
+    for (ty, t_off) in entries(base) {
+        if ty != 2 || t_off & 0x8000_0000 == 0 {
+            continue;
+        }
+        let mut ids = entries(base + (t_off & 0x7fff_ffff));
+        ids.sort();
+        for (_, i_off) in ids {
+            let langs = entries(base + (i_off & 0x7fff_ffff));
+            let Some(&(_, l_off)) = langs.first() else { continue };
+            let (drva, dsz) = (u32at(base + l_off), u32at(base + l_off + 4));
+            let Some(o) = off(drva) else { continue };
+            let b = &d[o..o + dsz];
+            let (w, h) = (u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as usize, i32::from_le_bytes([b[8], b[9], b[10], b[11]]));
+            let used = u32::from_le_bytes([b[32], b[33], b[34], b[35]]) as usize;
+            let nc = if used == 0 { 256 } else { used };
+            let mut pal = vec![0u8; 768];
+            for c in 0..nc.min(256) {
+                let q = &b[40 + c * 4..44 + c * 4];
+                pal[c * 3..c * 3 + 3].copy_from_slice(&[q[2], q[1], q[0]]);
+            }
+            let (ha, stride) = (h.unsigned_abs() as usize, (w + 3) & !3);
+            let src = &b[40 + nc * 4..];
+            let mut px = vec![0u8; w * ha];
+            for y in 0..ha {
+                let sy = if h > 0 { ha - 1 - y } else { y };
+                if let Some(row) = src.get(sy * stride..sy * stride + w) {
+                    px[y * w..y * w + w].copy_from_slice(row);
+                }
+            }
+            out.push((w, ha, pal, px));
+        }
+    }
+    out
+}
+
 /// 원본 폴더에서 게임 데이터 파일만 복사 (대문자 이름) + index.txt
 fn extract(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).unwrap();
@@ -79,6 +130,20 @@ fn extract(src: &Path, dst: &Path) {
             names.push(up);
         }
     }
+    // 아이콘 DLL 의 비트맵 → ICONS.BIN (원작 ItemIcon/MgcIcon/CmdIcon/MapAtr.dll)
+    let mut icons = b"ICON".to_vec();
+    for dll in ["ITEMICON.DLL", "MGCICON.DLL", "CMDICON.DLL", "MAPATR.DLL"] {
+        let bmps = fs::read(src.join(dll)).map(|d| dll_bitmaps(&d)).unwrap_or_default();
+        icons.extend((bmps.len() as u16).to_le_bytes());
+        for (w, h, pal, px) in bmps {
+            icons.extend((w as u16).to_le_bytes());
+            icons.extend((h as u16).to_le_bytes());
+            icons.extend(pal);
+            icons.extend(px);
+        }
+    }
+    fs::write(dst.join("ICONS.BIN"), icons).unwrap();
+    names.push("ICONS.BIN".into());
     // 실행 파일 속 튜토리얼 대사 (op10, 관상가 노인) → TUTOR.TXT
     if let Ok(exe) = fs::read(src.join("EKD5.EXE")) {
         fs::write(dst.join("TUTOR.TXT"), tutor_text(&exe)).unwrap();

@@ -90,3 +90,9 @@ impl Screen {
         &self.rgba
     }
 }
+
+impl std::fmt::Debug for Pic {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Pic({}×{})", self.w, self.h)
+    }
+}

@@ -164,6 +164,7 @@ pub struct Battle {
     cast_end: Option<u32>,
     /// 낼 효과음 (엔진이 가져감)
     pub sounds: Vec<String>,
+    pub icons: Rc<super::icons::Icons>,
     ai_plan: Option<AiPlan>,
     cast_t: u32,
     /// 시험 기록용
@@ -304,6 +305,7 @@ impl Battle {
             cast_applied: false,
             cast_end: None,
             sounds: Vec::new(),
+            icons: Rc::new(Default::default()),
             ai_plan: None,
             cast_t: 0,
             cast_log: Vec::new(),
@@ -761,6 +763,19 @@ impl Battle {
             return Vec::new();
         }
         let mut v: Vec<u8> = self.strategies.iter().filter(|s| s.known(un.job, un.level as u8)).map(|s| s.id).collect();
+        // 둔갑천서('3'): 상하좌우에 붙은 부대가 아는 책략도 씀 (원작 FUN_0043fef3 / FUN_00467a14)
+        if self.sp(u, 0x33).is_some() {
+            for (dx, dy) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
+                if let Some(o) = self.at(un.x + dx, un.y + dy) {
+                    let (j, l) = (self.units[o].job, self.units[o].level as u8);
+                    for st in self.strategies.iter().filter(|s| s.known(j, l)) {
+                        if !v.contains(&st.id) {
+                            v.push(st.id);
+                        }
+                    }
+                }
+            }
+        }
         // 보옥('2') 은 특수치 번호의 책략을 쓸 수 있게 함 (원작 FUN_00422439)
         if let Some(id) = self.sp(u, 0x32) {
             if !v.contains(&id) && self.strat(id).is_some() {
@@ -2250,7 +2265,12 @@ impl Battle {
             let items = self.menu_items(*unit);
             frame_box(scr, bx, by, 120, items.len() as i32 * 30 + 4);
             for (k, (name, ok)) in items.iter().enumerate() {
-                draw_text(scr, f, bx + 16, by + 8 + k as i32 * 30, name, if *ok { story::TEXT } else { 24 });
+                // 명령 아이콘 (원작 CmdIcon.dll: 공격·책략·도구·대기)
+                let ci = ["공격", "책략", "도구", "대기"].iter().position(|x| x == name);
+                if let Some(p) = ci.and_then(|i| self.icons.pic(super::icons::COMMAND, i, &scr.pal)) {
+                    scr.blit(&p, bx + 10, by + 8 + k as i32 * 30, Some(0));
+                }
+                draw_text(scr, f, bx + 32, by + 8 + k as i32 * 30, name, if *ok { story::TEXT } else { 24 });
             }
         }
         if let Phase::ToolList { list, .. } = &self.phase {
@@ -2259,7 +2279,10 @@ impl Battle {
             for (k, &inv) in list.iter().enumerate() {
                 let it = self.inventory[inv].0;
                 let cnt = self.inventory.iter().filter(|x| x.0 == it).count();
-                draw_text(scr, f, bx + 12, by + 8 + k as i32 * 22, &crate::officer::item_name(&self.items, it), story::TEXT);
+                if let Some(p) = self.icons.item(&self.items, it, &scr.pal) {
+                    scr.blit(&p, bx + 10, by + 6 + k as i32 * 22, Some(0));
+                }
+                draw_text(scr, f, bx + 30, by + 8 + k as i32 * 22, &crate::officer::item_name(&self.items, it), story::TEXT);
                 draw_text(scr, f, bx + w - 60, by + 8 + k as i32 * 22, &format!("×{cnt}"), story::TEXT);
             }
         }
@@ -2271,7 +2294,11 @@ impl Battle {
                 if let Some(st) = self.strat(*sid) {
                     let need = self.strat_mp(*unit, *sid);
                     let col = if mp >= need { story::TEXT } else { 24 };
-                    draw_text(scr, f, bx + 12, by + 8 + k as i32 * 22, &st.name, col);
+                    // 책략 아이콘 (원작 MgcIcon.dll, 계통 번호)
+                    if let Some(p) = self.icons.pic(super::icons::MAGIC, st.cat as usize * 2, &scr.pal) {
+                        scr.blit(&p, bx + 10, by + 6 + k as i32 * 22, Some(0));
+                    }
+                    draw_text(scr, f, bx + 30, by + 8 + k as i32 * 22, &st.name, col);
                     draw_text(scr, f, bx + w - 80, by + 8 + k as i32 * 22, &format!("MP {:>2}", need), col);
                 }
             }
@@ -2323,9 +2350,16 @@ impl Battle {
 
     fn draw_unit_box(&self, scr: &mut Screen, f: &Font, u: usize) {
         let un = &self.units[u];
-        frame_box(scr, 0, 432, 300, 48);
-        draw_text(scr, f, 8, 438, &format!("Lv{} HP {}/{}", un.level, un.hp.max(0), un.max_hp), story::TEXT);
+        // 지형 그림 (원작 MapAtr.dll, 지형 번호) 과 지형 효과
+        frame_box(scr, 0, 412, 380, 68);
+        let t = self.terr(un.x, un.y);
+        if let Some(p) = self.icons.pic(super::icons::TERRAIN, t as usize, &scr.pal) {
+            scr.blit(&p, 8, 422, None);
+        }
+        let eff = self.terrain_bonus(un.job, un.x, un.y);
+        draw_text(scr, f, 64, 418, &format!("Lv{}  HP {}/{}  MP {}/{}", un.level, un.hp.max(0), un.max_hp, un.mp.max(0), un.off.max_mp), story::TEXT);
         let v = |k: u8| un.off.value(&self.items, k);
-        draw_text(scr, f, 8, 458, &format!("공{} 방{} 정{} 순{} 사{}", v(0), v(1), v(2), v(3), v(4)), story::TEXT);
+        draw_text(scr, f, 64, 438, &format!("공{} 방{} 정{} 순{} 사{}", v(0), v(1), v(2), v(3), v(4)), story::TEXT);
+        draw_text(scr, f, 64, 458, &format!("지형 효과 {eff}%"), story::TEXT);
     }
 }

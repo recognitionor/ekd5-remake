@@ -239,6 +239,8 @@ impl<A: Assets> Engine<A> {
                             idx.push(i);
                         }
                     }
+                    let ids: Vec<Option<u8>> = idx.iter().map(|&i| self.inventory.get(i).map(|x| x.0)).collect();
+                    self.item_icons(&mut b, &ids);
                     camp.view = CampView::EquipPick(b, p, k as u8, idx);
                 }
                 Pick::Cancel => {
@@ -365,6 +367,7 @@ impl<A: Assets> Engine<A> {
             ids.push(id);
         }
         l.footer = "누르면 하나 삽니다".into();
+        self.item_icons(&mut l, &ids.iter().map(|&i| Some(i)).collect::<Vec<_>>());
         (l, ids)
     }
 
@@ -377,20 +380,31 @@ impl<A: Assets> Engine<A> {
         if self.inventory.is_empty() {
             l.push("(없음)", "", false);
         }
+        let ids: Vec<Option<u8>> = self.inventory.iter().map(|x| Some(x.0)).collect();
+        self.item_icons(&mut l, &ids);
         l
+    }
+
+    /// 목록 줄마다 아이템 아이콘
+    fn item_icons(&self, l: &mut ListBox, ids: &[Option<u8>]) {
+        l.icons = ids.iter().map(|id| id.and_then(|i| self.icons.item(&self.items, i, &self.screen.pal))).collect();
     }
 
     /// 보물도감 (원작 "지금까지 발견한 보물: n / m", 회차 공통)
     fn book_box(&self) -> ListBox {
         let (got, all) = self.book_count();
         let mut l = ListBox::new(&format!("보물도감   지금까지 발견한 보물: {got:2} / {all:2}"), 460);
+        let mut ids = Vec::new();
         for id in (0..0x68u8).filter(|&i| self.is_treasure(i)) {
             if self.book.get(id as usize).copied().unwrap_or(false) {
                 l.push(item_name(&self.items, id), "", true);
+                ids.push(Some(id));
             } else {
                 l.push("？？？", "", false);
+                ids.push(None);
             }
         }
+        self.item_icons(&mut l, &ids);
         l
     }
 
