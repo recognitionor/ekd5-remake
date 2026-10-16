@@ -124,6 +124,15 @@ pub extern "C" fn frame() -> *const u8 {
     with(|app| app.engine.render().as_ptr())
 }
 
+/// 회차 공통 기록 (엔딩·보물도감) 불러오기
+/// # Safety
+/// 유효한 UTF-8 포인터
+#[no_mangle]
+pub unsafe extern "C" fn set_common(ptr: *const u8, len: usize) {
+    let s = str_at(ptr, len);
+    with(|app| app.engine.set_common(&s))
+}
+
 /// 동영상 재생 가능 알림 / 끝남
 #[no_mangle]
 pub extern "C" fn enable_movies() {
@@ -155,6 +164,9 @@ pub extern "C" fn take_events() -> *const u8 {
                 Sound::Ending(n) => lines.push(format!("{{\"ending\":{n}}}")),
                 Sound::Music(n) => lines.push(format!("{{\"music\":{}}}", n.unwrap_or(-1))),
             }
+        }
+        if let Some(c) = app.engine.common_out.take() {
+            lines.push(format!("{{\"common\":{c:?}}}"));
         }
         if let Some(sv) = app.engine.save_out.take() {
             lines.push(format!("{{\"save\":{sv:?}}}"));

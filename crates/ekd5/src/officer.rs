@@ -189,4 +189,24 @@ impl Officer {
             self.gear_exp[slot as usize] = 0;
         }
     }
+
+    /// 장비 특수 효과 (원작 FUN_00407df9 / FUN_00407ee2): 무기·방어구는 특수 무기(종류 홀수, 0x12 미만)일 때
+    /// +18 특수 종류가 code 면 +22 특수치, 보조는 +17 종류가 code 면 +21 기본치. 없으면 None
+    pub fn special(&self, items: &[u8], code: u8) -> Option<u8> {
+        let rec = |id: u8| items.get(id as usize * 25..id as usize * 25 + 25);
+        let mut v = None;
+        for (id, _) in [self.weapon, self.armor].into_iter().flatten() {
+            if let Some(r) = rec(id) {
+                if r[17] < 0x12 && r[17] & 1 == 1 && r[18] == code {
+                    v = Some(r[22]);
+                }
+            }
+        }
+        if let Some(r) = self.acc.and_then(rec) {
+            if r[17] == code {
+                v = Some(r[21]);
+            }
+        }
+        v
+    }
 }

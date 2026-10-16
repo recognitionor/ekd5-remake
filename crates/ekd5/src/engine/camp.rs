@@ -58,7 +58,7 @@ pub struct SortieUi {
 fn menu_box() -> ListBox {
     let mut m = ListBox::new("본진", 220);
     m.y = 120;
-    for t in ["대화", "장비", "상점", "도구 보기", "출진"] {
+    for t in ["대화", "장비", "상점", "도구 보기", "보물도감", "출진"] {
         m.push(t, "", true);
     }
     m
@@ -195,7 +195,8 @@ impl<A: Assets> Engine<A> {
                     camp.view = CampView::ShopKind(l);
                 }
                 Pick::Row(3) => camp.view = CampView::Items(self.items_box()),
-                Pick::Row(4) => {
+                Pick::Row(4) => camp.view = CampView::Items(self.book_box()),
+                Pick::Row(5) => {
                     if let Some(body) = camp.depart {
                         let s = camp.section;
                         camp.view = CampView::Running;
@@ -375,6 +376,20 @@ impl<A: Assets> Engine<A> {
         }
         if self.inventory.is_empty() {
             l.push("(없음)", "", false);
+        }
+        l
+    }
+
+    /// 보물도감 (원작 "지금까지 발견한 보물: n / m", 회차 공통)
+    fn book_box(&self) -> ListBox {
+        let (got, all) = self.book_count();
+        let mut l = ListBox::new(&format!("보물도감   지금까지 발견한 보물: {got:2} / {all:2}"), 460);
+        for id in (0..0x68u8).filter(|&i| self.is_treasure(i)) {
+            if self.book.get(id as usize).copied().unwrap_or(false) {
+                l.push(item_name(&self.items, id), "", true);
+            } else {
+                l.push("？？？", "", false);
+            }
         }
         l
     }

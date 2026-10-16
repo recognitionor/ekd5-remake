@@ -6,6 +6,7 @@ pub mod battle;
 pub mod camp;
 pub mod duel;
 pub mod fx;
+pub mod tutor;
 pub mod screen;
 pub mod story;
 pub mod ui;
@@ -165,6 +166,12 @@ pub struct Engine<A: Assets> {
     pub chapter: u8,
     /// 인물 그림 바꾸기 (원작 op35, 장수 기록 +2)
     pub sprite_over: std::collections::BTreeMap<usize, u16>,
+    /// 회차 공통 기록 (원작 SVCMN.E5S): 본 엔딩 비트, 보물도감
+    pub endings: u8,
+    pub book: Vec<bool>,
+    /// 웹이 저장할 공통 기록
+    pub common_out: Option<String>,
+    pub tutor: Option<tutor::Tutor>,
     /// 동영상을 보여줄 수 있는 환경 (웹)
     pub movies: bool,
     logo_shown: bool,
@@ -230,6 +237,10 @@ impl<A: Assets> Engine<A> {
             face_state: 0,
             chapter: 0,
             sprite_over: Default::default(),
+            endings: 0,
+            book: vec![false; 0x68],
+            common_out: None,
+            tutor: None,
             movies: false,
             logo_shown: false,
             camp: None,
@@ -525,6 +536,7 @@ impl<A: Assets> Engine<A> {
                     self.resume = None;
                     self.end_checked = false;
                     self.log.push(format!("단계 {n}: {name}"));
+                    self.note_treasures();
                     self.save_out = Some(self.snapshot());
                     let mut vm = Vm::new(Rc::new(s));
                     if n % 2 == 1 {
@@ -693,6 +705,13 @@ impl<A: Assets> Engine<A> {
     }
 
     fn run_script(&mut self) {
+        // 관상가 노인 (op10) 진행 중이면 스크립트 멈춤
+        if self.tutor.is_some() {
+            if self.wait == Wait::None {
+                self.tutor_tick();
+            }
+            return;
+        }
         let Some(mut vm) = self.vm.take() else { return };
         if self.wait == Wait::None && self.enter_after_choice {
             self.enter_after_choice = false;
@@ -1344,9 +1363,21 @@ impl<A: Assets> Engine<A> {
                     return Ok(false);
                 }
             }
+            0x10 => {
+                // 첫 전투의 관상가 노인 (원작 FUN_00417d1d → FUN_004354f9)
+                if self.start_tutor().is_err() {
+                    vm.pc = at;
+                }
+                return Ok(false);
+            }
             0x0F => {
                 // 엔딩 (원작 FUN_00417cc6: 엔딩 번호를 SVCMN.E5S 에 기록 → END.AVI → 제목)
                 self.log.push(format!("엔딩 {}", a(0)));
+                if (0..3).contains(&a(0)) {
+                    self.endings |= 1 << a(0);
+                }
+                self.note_treasures();
+                self.common_out = Some(tutor::common_string(self.endings, &self.book));
                 self.sounds.push(Sound::Ending(a(0)));
                 self.sounds.push(Sound::Music(None));
                 self.sounds.push(Sound::EffectStop);

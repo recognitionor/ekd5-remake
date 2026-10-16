@@ -482,25 +482,51 @@ impl Battle {
         self.terrain_tab.get(mt * 60 + (self.terr(x, y) as usize).min(29)).map_or(100, |&v| v as i32 * 10)
     }
 
+    /// 장비 특수 효과 값 (없으면 None)
+    fn sp(&self, u: usize, code: u8) -> Option<u8> {
+        self.units[u].off.special(&self.items, code)
+    }
+
+    /// (x, y) 가 u 에게 ZOC (상하좌우에 적) 인가 — 적토마('!')는 무시
+    fn zoc(&self, u: usize, x: i32, y: i32) -> bool {
+        if self.sp(u, 0x21).is_some() {
+            return false;
+        }
+        let side = self.units[u].side;
+        [(0, 1), (0, -1), (1, 0), (-1, 0)].iter().any(|&(dx, dy)| self.at(x + dx, y + dy).is_some_and(|o| self.units[o].side.hostile(side)))
+    }
+
+    /// 이동 비용 (적로 '"' 는 갈 수 있는 지형이면 모두 1, 원작 FUN_00441930)
+    fn move_cost_of(&self, u: usize, x: i32, y: i32) -> Option<i32> {
+        let c = self.move_cost(self.units[u].job, x, y)?;
+        Some(if self.sp(u, 0x22).is_some() { 1 } else { c })
+    }
+
     /// 이동 가능한 칸들 (적이 막음)
     pub fn reachable(&self, ui: usize) -> Vec<(i32, i32)> {
         let u = &self.units[ui];
         if u.x < 0 || u.y < 0 || u.x >= self.cols || u.y >= self.rows {
             return Vec::new();
         }
-        let mp = if u.status & status::PARALYZE != 0 { 0 } else { self.job_byte(u.job, 0) as i32 };
+        // 이동력 = 직업 + 이동 장비 (바람바퀴 등, 능력 종류 7)
+        let mp = if u.status & status::PARALYZE != 0 { 0 } else { self.job_byte(u.job, 0) as i32 + u.off.equip_bonus(&self.items, 7) as i32 };
+        let start = (u.x, u.y);
         let mut best = vec![i32::MAX; (self.cols * self.rows) as usize];
         let mut q = VecDeque::new();
         best[(u.y * self.cols + u.x) as usize] = 0;
         q.push_back((u.x, u.y));
         while let Some((x, y)) = q.pop_front() {
             let c = best[(y * self.cols + x) as usize];
+            // 적 옆 칸(ZOC)에서는 더 못 감 (원작 FUN_00439ef9, 적토마 '!' 는 예외)
+            if (x, y) != start && self.zoc(ui, x, y) {
+                continue;
+            }
             for (dx, dy) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
                 let (nx, ny) = (x + dx, y + dy);
                 if nx < 0 || ny < 0 || nx >= self.cols || ny >= self.rows {
                     continue;
                 }
-                let Some(cost) = self.move_cost(u.job, nx, ny) else { continue };
+                let Some(cost) = self.move_cost_of(ui, nx, ny) else { continue };
                 if let Some(o) = self.at(nx, ny) {
                     if self.units[o].side.hostile(u.side) {
                         continue;
@@ -561,6 +587,9 @@ impl Battle {
         while let Some(p) = q.pop_front() {
             if p == to {
                 break;
+            }
+            if p != (u.x, u.y) && self.zoc(ui, p.0, p.1) {
+                continue;
             }
             for (dx, dy) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
                 let n = (p.0 + dx, p.1 + dy);
@@ -661,7 +690,36 @@ impl Battle {
     }
 
     fn range_kind(&self, ui: usize) -> u8 {
-        self.job_byte(self.units[ui].job, 1)
+        // 몰우전('*') 은 공격 범위를 특수치로 (원작 FUN_00441a1f)
+        self.sp(ui, 0x2A).unwrap_or_else(|| self.job_byte(self.units[ui].job, 1))
+    }
+
+    /// 물리 공격이 함께 맞히는 범위 종류 (원작 FUN_00407c08: 직업 0x10·0x11 → 1, 0x2B → 4, 사모 '+' → 특수치)
+    fn splash_kind(&self, u: usize) -> u8 {
+        match self.units[u].job {
+            0x10 | 0x11 => 1,
+            0x2B => 4,
+            _ => self.sp(u, 0x2B).unwrap_or(0),
+        }
+    }
+
+    /// 효과 범위 칸 (원작 FUN_00437ea6): 0 한 칸, 1 십자, 2 3×3, 3 3×3+거리2 십자, 4 방향으로 한 칸 더, 5 방향으로 5칸 더, 6 = 3
+    pub fn area_cells(kind: u8, c: (i32, i32), dir: (i32, i32)) -> Vec<(i32, i32)> {
+        let n4 = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+        let n8 = [(0, -1), (1, 0), (0, 1), (-1, 0), (1, -1), (1, 1), (-1, 1), (-1, -1)];
+        let mut v = vec![c];
+        match kind {
+            1 => v.extend(n4.iter().map(|d| (c.0 + d.0, c.1 + d.1))),
+            2 => v.extend(n8.iter().map(|d| (c.0 + d.0, c.1 + d.1))),
+            3 | 6 => {
+                v.extend(n8.iter().map(|d| (c.0 + d.0, c.1 + d.1)));
+                v.extend([(2, 0), (-2, 0), (0, 2), (0, -2)].iter().map(|d| (c.0 + d.0, c.1 + d.1)));
+            }
+            4 => v.push((c.0 + dir.0, c.1 + dir.1)),
+            5 => v.extend((1..=5).map(|k| (c.0 + dir.0 * k, c.1 + dir.1 * k))),
+            _ => {}
+        }
+        v
     }
 
     fn attack_cells(&self, ui: usize, from: (i32, i32)) -> Vec<(i32, i32)> {
@@ -702,7 +760,23 @@ impl Battle {
         if un.status & status::SEAL != 0 {
             return Vec::new();
         }
-        self.strategies.iter().filter(|s| s.known(un.job, un.level as u8)).map(|s| s.id).collect()
+        let mut v: Vec<u8> = self.strategies.iter().filter(|s| s.known(un.job, un.level as u8)).map(|s| s.id).collect();
+        // 보옥('2') 은 특수치 번호의 책략을 쓸 수 있게 함 (원작 FUN_00422439)
+        if let Some(id) = self.sp(u, 0x32) {
+            if !v.contains(&id) && self.strat(id).is_some() {
+                v.push(id);
+            }
+        }
+        v
+    }
+
+    /// 책략 MP (백우선 '1' 은 특수치로 나눔, 원작 FUN_004255a5)
+    pub fn strat_mp(&self, u: usize, sid: u8) -> i32 {
+        let m = self.strat(sid).map_or(0, |s| s.mp as i32);
+        match self.sp(u, 0x31) {
+            Some(v) if v > 0 => m / v as i32,
+            _ => m,
+        }
     }
 
     fn strat(&self, sid: u8) -> Option<&Strategy> {
@@ -748,7 +822,19 @@ impl Battle {
             9 | 21 => {
                 if self.units[d].person < 0x1A || self.targets.contains(&self.units[d].person) { 0 } else { base / if sid == 9 { 3 } else { 2 } }
             }
-            _ => base * strategy::rate_scale(sid) / 100,
+            _ => {
+                // 칠성검('4') 더하기, 백은방패('6')·풍신방패('7') 빼기 (원작 FUN_0043d84f)
+                let mut r = base;
+                if let Some(v) = self.sp(a, 0x34) {
+                    r = (r + v as u32).min(100);
+                }
+                for code in [0x36, 0x37] {
+                    if let Some(v) = self.sp(d, code) {
+                        r = r.saturating_sub(v as u32);
+                    }
+                }
+                r * strategy::rate_scale(sid) / 100
+            }
         }
     }
 
@@ -766,7 +852,7 @@ impl Battle {
     }
 
     /// 책략 피해 (원작 FUN_0043e0ba)
-    fn strat_damage(&mut self, a: usize, d: usize, pw: u32) -> i32 {
+    fn strat_damage(&mut self, a: usize, d: usize, pw: u32, cat: u8) -> i32 {
         let (ia, id) = (self.val(a, 2), self.val(d, 2));
         let mut v = self.units[a].level.max(1) as u32 + 25;
         if ia < id {
@@ -779,6 +865,20 @@ impl Battle {
             0x27 | 0x2A | 0x2B => v = v * 11 / 10,
             0x31 | 0x32 => v = v * 13 / 10,
             _ => {}
+        }
+        // 오화신염선('/') 불 계통, 파초선('0') 바람 계통 +특수치 %, 백은갑옷(';') −특수치 % (원작 FUN_0043e0ba)
+        if cat == 0 {
+            if let Some(p) = self.sp(a, 0x2F) {
+                v += v * p as u32 / 100;
+            }
+        }
+        if cat == 2 {
+            if let Some(p) = self.sp(a, 0x30) {
+                v += v * p as u32 / 100;
+            }
+        }
+        if let Some(p) = self.sp(d, 0x3B) {
+            v -= v * p as u32 / 100;
         }
         let r = self.rand(7) as u32;
         v = if r < 3 { v.saturating_sub(r) } else { v - 2 + r };
@@ -812,7 +912,7 @@ impl Battle {
     fn apply_strategy(&mut self, u: usize, sid: u8, cell: (i32, i32)) -> Vec<((i32, i32), String)> {
         let mut out = Vec::new();
         let Some(st) = self.strat(sid).cloned() else { return out };
-        self.units[u].mp = (self.units[u].mp - st.mp as i32).max(0);
+        self.units[u].mp = (self.units[u].mp - self.strat_mp(u, sid)).max(0);
         let jobs = self.jobs.clone();
         let victims = self.strat_victims(u, sid, cell);
         // 시전자 무기 경험치 (정신 무기만): 대상 레벨이 낮으면 2, 아니면 3
@@ -837,7 +937,7 @@ impl Battle {
             let mut dmg = 0;
             let text = match strategy::effect(sid) {
                 Effect::Damage(pw) => {
-                    dmg = self.strat_damage(u, t, pw);
+                    dmg = self.strat_damage(u, t, pw, st.cat);
                     format!("{dmg}")
                 }
                 Effect::Instant => {
@@ -845,13 +945,13 @@ impl Battle {
                     format!("{dmg}")
                 }
                 Effect::MpDamage(pw) => {
-                    let m = (self.strat_damage(u, t, pw)).min(self.units[t].mp);
+                    let m = (self.strat_damage(u, t, pw, st.cat)).min(self.units[t].mp);
                     self.units[t].mp -= m;
                     format!("MP-{m}")
                 }
                 Effect::Status(bit, pw) => {
                     if pw > 0 {
-                        dmg = self.strat_damage(u, t, pw);
+                        dmg = self.strat_damage(u, t, pw, st.cat);
                     }
                     self.units[t].status |= bit;
                     let name = match bit {
@@ -1066,7 +1166,8 @@ impl Battle {
         let idx: Vec<usize> = self.alive(side).collect();
         for i in idx {
             let luck = self.val(i, 4);
-            let cure = (luck / 3).clamp(10, 60);
+            // 태평청령서(0x14) 는 상태이상이 반드시 풀림 (원작 FUN_0043e848)
+            let cure = if self.sp(i, 0x14).is_some() { 100 } else { (luck / 3).clamp(10, 60) };
             let un = &mut self.units[i];
             if un.status & status::POISON != 0 {
                 let d = (un.max_hp / 10).max(1).min(un.hp - 1).max(0);
@@ -1077,15 +1178,59 @@ impl Battle {
                     self.units[i].status &= !bit;
                 }
             }
-            // 능력 상태는 차례마다 보통 쪽으로 한 칸
+            // 능력 상태 복귀 (원작 FUN_0043ea85): 0·1 → 한 칸 오름, 5 → 한 칸 내림,
+            // 4 → 사기에 따른 확률(사기 51 미만 60−사기 %, 그 외 10 %)로 보통, 2 → 20 % 로 보통
+            let morale = self.val(i, 4) as i32;
+            let up_chance = if morale < 51 { (60 - morale).max(0) } else { 10 };
             for k in 0..5 {
-                let r = self.rand(3);
+                let r = self.rand(100);
                 let st = &mut self.units[i].state[k];
-                if *st > 3 && r == 0 {
-                    *st -= 1;
-                } else if *st < 3 && r == 0 {
-                    *st += 1;
+                match *st {
+                    0 | 1 => *st += 1,
+                    4 if r < up_chance => *st = 3,
+                    2 if r < 20 => *st = 3,
+                    5.. => *st -= 1,
+                    _ => {}
                 }
+            }
+            // 지형 회복 (원작 FUN_0043eeed / FUN_0043f1c1): 지형 0x12 25 %, 0x13·0x14·0x16 20 %, 0x15 15 %
+            let (x, y) = (self.units[i].x, self.units[i].y);
+            let pct = match self.terr(x, y) {
+                0x12 => 25,
+                0x13 | 0x14 | 0x16 => 20,
+                0x15 => 15,
+                _ => 0,
+            };
+            let max_hp = self.units[i].max_hp;
+            let mut heal = max_hp * pct / 100;
+            // 청낭서(0x12): 최대 HP / 특수치, 태평요술서(0x13): MP + 특수치
+            if let Some(v) = self.sp(i, 0x12).filter(|&v| v > 0) {
+                heal += max_hp / v as i32;
+            }
+            let mp = self.sp(i, 0x13).map_or(0, |v| v as i32);
+            // 손자병법서(0x15)·육도(0x16)·삼략(0x17): 기본치×특수치/10 만큼 경험치·무기·방어구 경험치 (조조군만)
+            if self.units[i].side == Side::Player {
+                let items = self.items.clone();
+                let base = self.units[i].off.gear_base(&items);
+                if let Some(v) = self.sp(i, 0x15) {
+                    let jobs = self.jobs.clone();
+                    self.units[i].off.gain_exp(&jobs, base * v as u32 / 10);
+                }
+                if let Some(v) = self.sp(i, 0x16) {
+                    self.gear_exp(i, 0, v as u32);
+                }
+                if let Some(v) = self.sp(i, 0x17) {
+                    self.gear_exp(i, 1, v as u32);
+                }
+            }
+            let un = &mut self.units[i];
+            let heal = heal.min(un.max_hp - un.hp).max(0);
+            let mp = mp.min(un.off.max_mp as i32 - un.mp).max(0);
+            un.hp += heal;
+            un.mp += mp;
+            if heal > 0 || mp > 0 {
+                let t = if heal > 0 { format!("+{heal}") } else { format!("MP+{mp}") };
+                self.popup = Some((x * CELL + 4 - self.cam.0, y * CELL - 8 - self.cam.1, t, 30));
             }
         }
     }
@@ -1120,8 +1265,18 @@ impl Battle {
                 if gd == 3 || gd == 0x11 || gd == 0x10 {
                     dmg = dmg * 3 >> 1;
                 }
+                // 기마갑옷('=') 은 특수치 % 만큼 줄임
+                if let Some(v) = self.sp(d, 0x3D) {
+                    dmg -= dmg * v as u32 / 100;
+                }
             }
             _ => {}
+        }
+        // 청공검('-') 은 그룹 3 상대에게 특수치 % 더
+        if gd == 3 {
+            if let Some(v) = self.sp(a, 0x2D) {
+                dmg += dmg * v as u32 / 100;
+            }
         }
         if counter {
             dmg = (dmg * 3 >> 2).max(1);
@@ -1150,6 +1305,26 @@ impl Battle {
 
     /// 명중률 (원작 FUN_0043d61d, 순발력 비교)
     fn hit_rate(&self, a: usize, d: usize) -> u32 {
+        // 혼란한 상대는 반드시 맞음, 거울갑옷('8') 은 원거리(그룹 2·4·5) 공격을 안 맞음
+        if self.units[d].status & status::CONFUSE != 0 {
+            return 100;
+        }
+        if self.sp(d, 0x38).is_some() && matches!(self.group(a), 2 | 4 | 5) {
+            return 0;
+        }
+        let mut r = self.hit_rate_base(a, d);
+        if let Some(v) = self.sp(a, 0x27) {
+            r = (r + v as u32).min(100);
+        }
+        for code in [0x35, 0x37] {
+            if let Some(v) = self.sp(d, code) {
+                r = r.saturating_sub(v as u32);
+            }
+        }
+        r
+    }
+
+    fn hit_rate_base(&self, a: usize, d: usize) -> u32 {
         let (x, y) = (self.val(a, 3), self.val(d, 3).max(1));
         if x >= y * 2 {
             100
@@ -1162,33 +1337,95 @@ impl Battle {
         }
     }
 
-    /// 공격 한 번 결과 (명중, 치명타 ×1.5, 연속 공격, 반격)
+    /// 공격 한 번 결과 (명중, 치명타 ×1.5, 연속 공격, 범위 공격, 반격 — 원작 FUN_00406163 / FUN_004066fa)
     fn resolve(&mut self, a: usize, d: usize) {
         self.strikes.clear();
-        let mut hp_d = self.units[d].hp;
-        let mut hp_a = self.units[a].hp;
-        let strike = |b: &mut Self, x: usize, y: usize, counter: bool, crit_ok: bool, hp: &mut i32| {
+        let mut hp: std::collections::HashMap<usize, i32> = self.units.iter().enumerate().map(|(i, u)| (i, u.hp)).collect();
+        let strike = |b: &mut Self, x: usize, y: usize, counter: bool, crit_ok: bool, second: bool, hp: &mut std::collections::HashMap<usize, i32>| {
             let hit = (b.rand(100) as u32) < b.hit_rate(x, y) || b.cheat && b.units[x].side != Side::Enemy;
             if !hit {
                 b.strikes.push_back((x, y, None, false));
                 return;
             }
-            let crit = crit_ok && (b.rand(100) as u32) < Self::ratio_curve(b.val(x, 4), b.val(y, 4));
+            // 옥새(')') 는 치명타 확실
+            let rate = if b.sp(x, 0x29).is_some() { 100 } else { Self::ratio_curve(b.val(x, 4), b.val(y, 4)) };
+            let crit = crit_ok && (b.rand(100) as u32) < rate;
             let mut dmg = b.damage(x, y, counter);
             if crit {
-                dmg = dmg * 3 / 2;
+                // 황금갑옷('9') 은 치명타를 막음
+                dmg = if b.sp(y, 0x39).is_some() { 0 } else { dmg * 3 / 2 };
             }
-            let dmg = dmg.min(*hp).max(0);
-            *hp -= dmg;
+            // 연환갑옷(':') 은 연속 공격을 막음
+            if second && b.sp(y, 0x3A).is_some() {
+                dmg = 0;
+            }
+            let h = hp.entry(y).or_insert(0);
+            let dmg = dmg.min(*h).max(0);
+            // 용린갑옷('<') 은 MP 로 받음 → 체력은 그대로
+            if !(b.sp(y, 0x3C).is_some() && b.units[y].mp > 0) {
+                *h -= dmg;
+            }
             b.strikes.push_back((x, y, Some(dmg), crit));
         };
-        strike(self, a, d, false, true, &mut hp_d);
-        if hp_d > 0 && (self.rand(100) as u32) < Self::ratio_curve(self.val(a, 3), self.val(d, 3)) {
-            strike(self, a, d, false, false, &mut hp_d);
+        strike(self, a, d, false, true, false, &mut hp);
+        if hp[&d] > 0 && (self.rand(100) as u32) < Self::ratio_curve(self.val(a, 3), self.val(d, 3)) {
+            strike(self, a, d, false, false, true, &mut hp);
         }
+        // 범위 공격: 둘레의 적도 한 번씩
         let (ax, ay, dx, dy) = (self.units[a].x, self.units[a].y, self.units[d].x, self.units[d].y);
-        if hp_d > 0 && self.in_range(d, (dx, dy), (ax, ay)) {
-            strike(self, d, a, true, false, &mut hp_a);
+        let kind = self.splash_kind(a);
+        if kind != 0 {
+            let side = self.units[a].side;
+            for c in Self::area_cells(kind, (dx, dy), ((dx - ax).signum(), (dy - ay).signum())).into_iter().skip(1) {
+                if let Some(t) = self.at(c.0, c.1).filter(|&t| t != d && self.units[t].side.hostile(side)) {
+                    strike(self, a, t, false, false, false, &mut hp);
+                }
+            }
+        }
+        // 반격: 혼란이 아니고, 공격자가 청룡언월도(',') 가 아니면. 자웅일대검('(') 은 두 번
+        let can_counter = |b: &Self, hp: &std::collections::HashMap<usize, i32>| {
+            hp[&d] > 0 && hp[&a] > 0 && b.units[d].status & status::CONFUSE == 0 && b.sp(a, 0x2C).is_none() && b.in_range(d, (dx, dy), (ax, ay))
+        };
+        if can_counter(self, &hp) {
+            strike(self, d, a, true, false, false, &mut hp);
+            if self.sp(d, 0x28).is_some() && can_counter(self, &hp) {
+                strike(self, d, a, true, false, false, &mut hp);
+            }
+        }
+    }
+
+    /// 맞은 뒤 장비·직업 효과 (원작 FUN_00405be9): 유성추·금화관포·여포궁·이광궁 = 혼란·독·포박·봉책,
+    /// 직업 0x32/0x31/0x2A 는 60 % 로 혼란/독/포박. 콩주머니('>') 는 회복의 콩으로 30 회복
+    fn after_hit(&mut self, x: usize, y: usize) {
+        if self.units[y].hp <= 0 {
+            return;
+        }
+        for (code, bit) in [(0x23u8, status::CONFUSE), (0x24, status::POISON), (0x25, status::PARALYZE), (0x26, status::SEAL)] {
+            if self.sp(x, code).is_some() {
+                self.units[y].status |= bit;
+            }
+        }
+        let job_bit = match self.units[x].job {
+            0x32 => Some(status::CONFUSE),
+            0x31 => Some(status::POISON),
+            0x2A => Some(status::PARALYZE),
+            _ => None,
+        };
+        if let Some(bit) = job_bit {
+            if self.rand(100) < 60 {
+                self.units[y].status |= bit;
+            }
+        }
+        if self.sp(y, 0x3E).is_some() && self.units[y].hp < self.units[y].max_hp {
+            let free = self.units[y].side != Side::Player;
+            let have = self.inventory.iter().position(|it| it.0 == 87);
+            if free || have.is_some() {
+                if let (false, Some(k)) = (free, have) {
+                    self.inventory.remove(k);
+                }
+                let un = &mut self.units[y];
+                un.hp = (un.hp + 30).min(un.max_hp);
+            }
         }
     }
 
@@ -1398,7 +1635,7 @@ impl Battle {
                     if mx >= bx && mx < bx + w && my >= by + 8 {
                         let k = ((my - by - 8) / 22) as usize;
                         if let Some(&sid) = list.get(k) {
-                            let need = self.strat(sid).map_or(0, |s| s.mp as i32);
+                            let need = self.strat_mp(unit, sid);
                             if self.units[unit].mp >= need {
                                 let cells = self.strat_cells(unit, sid);
                                 self.phase = Phase::StratTarget { unit, from, sid, cells };
@@ -1632,9 +1869,19 @@ impl Battle {
                 self.sounds.push(format!("SE{:02}.WAV", if dmg.is_some() { 35 } else { 30 } + crit as u32));
                 let text = match dmg {
                     None => "빗나감".to_string(),
+                    Some(v) if self.sp(y, 0x3C).is_some() && self.units[y].mp > 0 => {
+                        // 용린갑옷: MP 로 받음
+                        let m = v.min(self.units[y].mp);
+                        self.units[y].mp -= m;
+                        self.units[y].pose = Some(9);
+                        format!("MP-{m}")
+                    }
                     Some(v) => {
                         self.units[y].hp -= v;
                         self.units[y].pose = Some(9);
+                        if v > 0 {
+                            self.after_hit(x, y);
+                        }
                         if self.units[y].hp <= 0 {
                             self.killed_by = Some(x);
                             // 퇴각 소리 (원작 FUN_004438a5)
@@ -1665,10 +1912,20 @@ impl Battle {
                 self.strike_t = 0;
                 if self.units[y].hp <= 0 {
                     self.units[y].fade = 15;
-                    self.strikes.clear();
+                    self.strikes.retain(|s| s.0 != y && s.1 != y);
                 }
             }
             return false;
+        }
+        // 방천화극('.'): 쓰러뜨리면 사거리 안 다른 적을 이어서 (원작 FUN_0043cbeb)
+        if self.killed_by == Some(a) && self.units[a].hp > 0 && self.sp(a, 0x2E).is_some() {
+            let from = (self.units[a].x, self.units[a].y);
+            if let Some(n) = self.targets_from(a, from).into_iter().find(|&t| self.units[t].hp > 0) {
+                self.killed_by = None;
+                self.resolve(a, n);
+                self.strike_t = 0;
+                return false;
+            }
         }
         // 퇴각 사라짐
         let mut fading = false;
@@ -1723,7 +1980,7 @@ impl Battle {
                 let confused = self.units[u].status & status::CONFUSE != 0;
                 let mut best: Option<((i32, i32), AiPlan, i32)> = None;
                 if !confused && !no_attack {
-                    let strats: Vec<u8> = self.known_strategies(u).into_iter().filter(|&sid| self.strat(sid).is_some_and(|st| st.mp as i32 <= self.units[u].mp)).collect();
+                    let strats: Vec<u8> = self.known_strategies(u).into_iter().filter(|&sid| self.strat(sid).is_some() && self.strat_mp(u, sid) <= self.units[u].mp).collect();
                     for &c in &cells {
                         if hold && c != (self.units[u].x, self.units[u].y) {
                             continue;
@@ -2012,9 +2269,10 @@ impl Battle {
             let mp = self.units[*unit].mp;
             for (k, sid) in list.iter().enumerate() {
                 if let Some(st) = self.strat(*sid) {
-                    let col = if mp >= st.mp as i32 { story::TEXT } else { 24 };
+                    let need = self.strat_mp(*unit, *sid);
+                    let col = if mp >= need { story::TEXT } else { 24 };
                     draw_text(scr, f, bx + 12, by + 8 + k as i32 * 22, &st.name, col);
-                    draw_text(scr, f, bx + w - 80, by + 8 + k as i32 * 22, &format!("MP {:>2}", st.mp), col);
+                    draw_text(scr, f, bx + w - 80, by + 8 + k as i32 * 22, &format!("MP {:>2}", need), col);
                 }
             }
         }

@@ -102,6 +102,9 @@
     } catch (_) {}
   });
 
+  // ---------- 회차 공통 기록 (엔딩·보물도감) ----------
+  try { const c = localStorage.getItem("ekd5-common"); if (c) withStr(c, (p, n) => w.set_common(p, n)); } catch (_) {}
+
   // ---------- 이어하기 ----------
   let save = null;
   try { save = localStorage.getItem("ekd5-save"); } catch (_) {}
@@ -164,6 +167,7 @@
       else if ("loop" in e) setLoop(e.loop);
       else if ("music" in e) setMusic(e.music);
       else if ("movie" in e) playMovie(e.movie);
+      else if ("common" in e) { try { localStorage.setItem("ekd5-common", e.common); } catch (_) {} }
       else if ("ending" in e) { try { const k = "ekd5-endings", v = new Set((localStorage.getItem(k) || "").split(",").filter(Boolean)); v.add(String(e.ending)); localStorage.setItem(k, [...v].join(",")); } catch (_) {} }
       else if ("save" in e) { try { if (e.save) localStorage.setItem("ekd5-save", e.save); else localStorage.removeItem("ekd5-save"); } catch (_) {} }
       else if ("log" in e) console.log("[ekd5]", e.log);
