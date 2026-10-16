@@ -323,6 +323,9 @@ impl<A: Assets> Engine<A> {
             _ => o.acc.map(|i| (i, 1)),
         };
         let new = if inv_idx == usize::MAX { None } else { Some(self.inventory.remove(inv_idx)) };
+        if slot < 2 {
+            o.gear_exp[slot as usize] = 0;
+        }
         match slot {
             0 => o.weapon = new,
             1 => o.armor = new,

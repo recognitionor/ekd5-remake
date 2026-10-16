@@ -61,7 +61,10 @@ pub struct Unit {
     pub status: u8,
     pub acted: bool,
     pub visible: bool,
+    /// 스크립트 AI (원작 표 0x498bf8): 0 적극 공격, 1 범위 안만 공격, 2 제자리 고수, 3 장수 공격, 4 지점으로, 5 장수 따라가기, 6 지점으로 도주
     pub ai: u8,
+    /// AI 3·5 의 대상 장수
+    pub ai_person: Option<usize>,
     pub ai_target: Option<(i32, i32)>,
     pub sprite: Option<Rc<Pic>>,
     pub sprite_idx: usize,
@@ -133,6 +136,16 @@ pub struct Battle {
     strike_t: u32,
     killed_by: Option<usize>,
     cast_fx: Vec<(i32, i32)>,
+    /// 맵 물체 (op58): (x, y, 종류, 원래 지형). 종류 0 불, 1 짚더미, 2 타는 짚더미, 4.. 성문 등 (GATE.E5)
+    pub objs: Vec<(i32, i32, u8, u8)>,
+    /// 칸별 겹침 그림 종류 (0xFF 없음, 원작 지도 +8000)
+    pub overlay: Vec<u8>,
+    /// 겹침 그림 (MARK.E5: 불 4장, 짚더미 2장, 타는 짚더미 2장)
+    pub mark_tiles: Vec<Pic>,
+    /// 덮어 그릴 GATE.E5 그림 (번호, x, y) — 엔진이 읽어 붙임
+    pub gate_queue: Vec<(usize, i32, i32)>,
+    /// 목표 구역 표시 (op5b: x1, y1, x2, y2)
+    pub goal_zone: Option<(i32, i32, i32, i32)>,
     ai_plan: Option<AiPlan>,
     cast_t: u32,
     /// 시험 기록용
@@ -245,6 +258,11 @@ impl Battle {
             strike_t: 0,
             killed_by: None,
             cast_fx: Vec::new(),
+            objs: Vec::new(),
+            overlay: Vec::new(),
+            mark_tiles: Vec::new(),
+            gate_queue: Vec::new(),
+            goal_zone: None,
             ai_plan: None,
             cast_t: 0,
             cast_log: Vec::new(),
@@ -260,7 +278,80 @@ impl Battle {
         self.cols = hex[0] as i32 * 16 / CELL;
         self.rows = hex[1] as i32 * 16 / CELL;
         self.terrain = hex[2..].to_vec();
+        self.overlay = vec![0xFF; (self.cols * self.rows) as usize];
         self.map = Some(untile_map(img, self.cols as usize, self.rows as usize));
+    }
+
+    /// 물체 놓기 (원작 FUN_00458120): 지형을 바꾸고 원래 지형을 기억. 종류 0 → 지형 0x1A, 1·2 → 0x1B.
+    /// 반환: 바로 옆에 이미 성문이 있는지 (두 칸짜리 성문의 둘째 칸)
+    pub fn place_obj(&mut self, kind: u8, terr: u8, x: i32, y: i32) -> bool {
+        if x < 0 || y < 0 || x >= self.cols || y >= self.rows || self.objs.iter().any(|o| (o.0, o.1, o.2) == (x, y, kind)) {
+            return false;
+        }
+        let terr = match kind {
+            0 => 0x1A,
+            1 | 2 => 0x1B,
+            _ => terr,
+        };
+        let i = (y * self.cols + x) as usize;
+        let old = self.terrain.get(i).copied().unwrap_or(0);
+        self.objs.push((x, y, kind, old));
+        let near = terr == 0x11 && [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dy)| self.terr_at(x + dx, y + dy) == Some(0x11));
+        if let Some(t) = self.terrain.get_mut(i) {
+            *t = terr;
+        }
+        if kind < 4 {
+            self.overlay[i] = kind;
+        } else {
+            self.gate_queue.push((kind as usize * 2 - 8, x, y));
+        }
+        near
+    }
+
+    /// 물체 치우기 (원작 FUN_004587a1): 원래 지형으로. 반환: 치운 것이 성문이었나
+    pub fn remove_obj(&mut self, kind: u8, x: i32, y: i32) -> bool {
+        let Some(k) = self.objs.iter().position(|o| (o.0, o.1, o.2) == (x, y, kind)) else { return false };
+        let (_, _, _, old) = self.objs.remove(k);
+        let i = (y * self.cols + x) as usize;
+        let was_gate = self.terrain.get(i) == Some(&0x11);
+        if let Some(t) = self.terrain.get_mut(i) {
+            *t = old;
+        }
+        if kind < 4 {
+            self.overlay[i] = 0xFF;
+        } else {
+            self.gate_queue.push((kind as usize * 2 - 7, x, y));
+        }
+        was_gate
+    }
+
+    fn terr_at(&self, x: i32, y: i32) -> Option<u8> {
+        if x < 0 || y < 0 || x >= self.cols || y >= self.rows {
+            return None;
+        }
+        self.terrain.get((y * self.cols + x) as usize).copied()
+    }
+
+    /// GATE.E5 그림 (3×3 칸, 칸마다 48×48) 을 (x, y) 둘레에 덮어 그림
+    pub fn patch_gate(&mut self, d: &[u8], x: i32, y: i32) {
+        let (cols, rows) = (self.cols, self.rows);
+        let Some(m) = self.map.as_mut() else { return };
+        let mut k = 0;
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let (tx, ty) = (x + dx, y + dy);
+                if tx >= 0 && ty >= 0 && tx < cols && ty < rows {
+                    for yy in 0..48 {
+                        let s = k * 2304 + yy * 48;
+                        let o = (ty as usize * 48 + yy) * m.w + tx as usize * 48;
+                        if let Some(src) = d.get(s..s + 48) {
+                            m.px[o..o + 48].copy_from_slice(src);
+                        }
+                    }
+                }
+                k += 1;
+            }
+        }
     }
 
     fn job_byte(&self, job: u8, i: usize) -> u8 {
@@ -289,6 +380,7 @@ impl Battle {
             visible: true,
             ai: 0,
             ai_target: None,
+            ai_person: None,
             sprite: None,
             sprite_idx: sprite_index(person, off.job, side),
             pose: None,
@@ -317,10 +409,6 @@ impl Battle {
     fn move_cost(&self, job: u8, x: i32, y: i32) -> Option<i32> {
         let mt = Self::move_row(job);
         let t = self.terr(x, y) as usize;
-        // 성문(0x11)은 원작 표에서 모두 막힘이지만 성 안 적과 싸울 수 없게 되므로 지나갈 수 있게 둔다 (원작의 성문 개방 처리 미분석)
-        if t == 0x11 {
-            return Some(1);
-        }
         match self.terrain_tab.get(mt * 60 + 30 + t.min(29)) {
             Some(&0xFF) | None => None,
             Some(&c) => Some(c as i32),
@@ -639,13 +727,39 @@ impl Battle {
         (v.max(1) as i32).min(self.units[d].hp.max(0))
     }
 
+    /// 장비 경험치 (원작 FUN_00403cdd / FUN_00403de5 / FUN_00423923 / FUN_00423a3b): 기본치 × k / 10
+    fn gear_exp(&mut self, who: usize, slot: usize, k: u32) {
+        if self.units[who].side != Side::Player || k == 0 {
+            return;
+        }
+        let items = self.items.clone();
+        let e = self.units[who].off.gear_base(&items) * k / 10;
+        if self.units[who].off.gain_gear_exp(&items, slot, e) {
+            let lv = if slot == 0 { self.units[who].off.weapon } else { self.units[who].off.armor }.map_or(0, |w| w.1);
+            let m = format!("{} 레벨 업! Lv{lv}", if slot == 0 { "무기" } else { "방어구" });
+            self.cast_log.push(format!("@{m}"));
+            self.message = Some((m, 60));
+        }
+    }
+
+    fn weapon_stat(&self, u: usize) -> Option<u8> {
+        self.units[u].off.weapon.and_then(|(id, _)| crate::officer::item_stat(&self.items, id))
+    }
+
     /// 책략 효과 적용. 반환: 표시 글 (칸, 글)
     fn apply_strategy(&mut self, u: usize, sid: u8, cell: (i32, i32)) -> Vec<((i32, i32), String)> {
         let mut out = Vec::new();
         let Some(st) = self.strat(sid).cloned() else { return out };
         self.units[u].mp = (self.units[u].mp - st.mp as i32).max(0);
         let jobs = self.jobs.clone();
-        for t in self.strat_victims(u, sid, cell) {
+        let victims = self.strat_victims(u, sid, cell);
+        // 시전자 무기 경험치 (정신 무기만): 대상 레벨이 낮으면 2, 아니면 3
+        if self.weapon_stat(u) == Some(2) {
+            let lu = self.units[u].level;
+            let k = if st.target < 2 && !victims.is_empty() && victims.iter().all(|&t| self.units[t].level < lu) { 2 } else { 3 };
+            self.gear_exp(u, 0, k);
+        }
+        for t in victims {
             let pos = (self.units[t].x, self.units[t].y);
             let hostile = st.target == 0;
             let terr = self.terr(pos.0, pos.1);
@@ -716,6 +830,11 @@ impl Battle {
                 self.units[t].hp -= dmg;
                 if self.units[t].hp <= 0 {
                     self.units[t].fade = 15;
+                }
+                if hostile {
+                    // 맞은 쪽 방어구 경험치: 시전자 레벨이 낮으면 3, 아니면 4
+                    let k = if self.units[u].level < self.units[t].level { 3 } else { 4 };
+                    self.gear_exp(t, 1, k);
                 }
                 let e = Self::exp_for(self.units[u].level, self.units[t].level, self.units[t].hp <= 0);
                 self.units[u].off.gain_exp(&jobs, e);
@@ -1388,6 +1507,12 @@ impl Battle {
             }
             if st == 8 {
                 let (vx, vy) = (self.units[y].x, self.units[y].y);
+                // 장비 경험치: 공격자 무기 (공격 무기만, 빗나감 1 / 상대 레벨이 낮으면 2 / 3), 맞은 쪽 방어구 (빗나감 1 / 공격자 레벨이 낮으면 3 / 4)
+                let (lx, ly) = (self.units[x].level, self.units[y].level);
+                if self.weapon_stat(x) == Some(0) {
+                    self.gear_exp(x, 0, if dmg.is_none() { 1 } else if ly < lx { 2 } else { 3 });
+                }
+                self.gear_exp(y, 1, if dmg.is_none() { 1 } else if lx < ly { 3 } else { 4 });
                 let text = match dmg {
                     None => "빗나감".to_string(),
                     Some(v) => {
@@ -1458,10 +1583,26 @@ impl Battle {
             0 => {
                 // 목표 정하기: 갈 수 있는 칸마다 공격/책략의 예상 효과로 점수
                 let cells = self.reachable(u);
-                let hold = self.units[u].ai == 1;
+                let ai = self.units[u].ai;
+                let hold = ai == 2;
+                // 따라가기·도주 (원작 내부 방식 4) 는 공격하지 않음
+                let no_attack = matches!(ai, 5 | 6);
+                // 시험 자동 진행: 목표 구역이 있으면 조조군은 그쪽으로, 조조는 싸우지 않고 감
+                let zone_goal = if self.units[u].side == Side::Player {
+                    self.goal_zone.map(|(x1, y1, x2, y2)| {
+                        let (ux, uy) = (self.units[u].x, self.units[u].y);
+                        (ux.clamp(x1.min(x2), x1.max(x2)), uy.clamp(y1.min(y2), y1.max(y2)))
+                    })
+                } else {
+                    None
+                };
+                // 시험 자동 진행: 조조가 다치면 적에게서 멀어짐
+                let cao_retreat = self.units[u].side == Side::Player && self.units[u].person == 0 && self.units[u].hp * 2 < self.units[u].max_hp;
+                let no_attack = no_attack || cao_retreat || (zone_goal.is_some() && self.units[u].person == 0);
+                let person_goal = zone_goal.or(self.units[u].ai_person.and_then(|p| self.units.iter().find(|o| o.person == p && o.visible && o.hp > 0)).map(|o| (o.x, o.y)));
                 let confused = self.units[u].status & status::CONFUSE != 0;
                 let mut best: Option<((i32, i32), AiPlan, i32)> = None;
-                if !confused {
+                if !confused && !no_attack {
                     let strats: Vec<u8> = self.known_strategies(u).into_iter().filter(|&sid| self.strat(sid).is_some_and(|st| st.mp as i32 <= self.units[u].mp)).collect();
                     for &c in &cells {
                         if hold && c != (self.units[u].x, self.units[u].y) {
@@ -1469,7 +1610,8 @@ impl Battle {
                         }
                         for t in self.targets_from(u, c) {
                             let d = self.est_damage(u, t);
-                            let score = d * 10 + if d >= self.units[t].hp { 500 } else { 0 };
+                            let focus = ai == 3 && self.units[u].ai_person == Some(self.units[t].person);
+                            let score = d * 10 + if d >= self.units[t].hp { 500 } else { 0 } + if focus { 1000 } else { 0 };
                             if best.as_ref().is_none_or(|b| score > b.2) {
                                 best = Some((c, AiPlan::Attack(t), score));
                             }
@@ -1489,10 +1631,16 @@ impl Battle {
                 self.ai_plan = best.as_ref().map(|b| b.1.clone());
                 let dest = match best {
                     Some((c, _, _)) => c,
-                    None if hold || confused => (self.units[u].x, self.units[u].y),
+                    None if cao_retreat && zone_goal.is_none() => {
+                        let s = self.units[u].side;
+                        let foes: Vec<(i32, i32)> = self.units.iter().filter(|o| o.visible && o.hp > 0 && o.side.hostile(s)).map(|o| (o.x, o.y)).collect();
+                        *cells.iter().max_by_key(|c| foes.iter().map(|f| (f.0 - c.0).abs() + (f.1 - c.1).abs()).min().unwrap_or(0)).unwrap_or(&(self.units[u].x, self.units[u].y))
+                    }
+                    // 범위 안만 공격 (1) 은 칠 상대가 없으면 기다림
+                    None if hold || confused || ai == 1 => (self.units[u].x, self.units[u].y),
                     None => {
-                        // 가장 가까운 적에게 다가감 (또는 지정 지점)
-                        let goal = self.units[u].ai_target.or_else(|| {
+                        // 가장 가까운 적에게 다가감 (또는 지정 장수·지점)
+                        let goal = person_goal.or(self.units[u].ai_target).or_else(|| {
                             let (ux, uy) = (self.units[u].x, self.units[u].y);
                             let s = self.units[u].side;
                             self.units.iter().filter(|o| o.visible && o.hp > 0 && o.side.hostile(s)).map(|o| (o.x, o.y)).min_by_key(|&(x, y)| (x - ux).abs() + (y - uy).abs())
@@ -1579,6 +1727,34 @@ impl Battle {
         scr.clear(0);
         if let Some(m) = &self.map {
             scr.blit_rect(m, self.cam.0, self.cam.1, 640, 480, 0, 0, None);
+        }
+        // 겹침 그림 (원작 FUN_00454724: 불 4장, 짚더미·타는 짚더미 2장씩)
+        if self.mark_tiles.len() >= 8 {
+            for (i, &k) in self.overlay.iter().enumerate() {
+                let idx = match k {
+                    0 => (tick / 4 % 4) as usize,
+                    1 => 4 + (tick / 8 % 2) as usize,
+                    2 => 6 + (tick / 4 % 2) as usize,
+                    _ => continue,
+                };
+                let (x, y) = (i as i32 % self.cols, i as i32 / self.cols);
+                scr.blit(&self.mark_tiles[idx], x * CELL - self.cam.0, y * CELL - self.cam.1, Some(0));
+            }
+        }
+        // 목표 구역 (깜빡이는 노란 테두리)
+        if let Some((x1, y1, x2, y2)) = self.goal_zone {
+            if (tick / 15) % 2 == 0 {
+                let c = self.col[5];
+                for y in y1..=y2 {
+                    for x in x1..=x2 {
+                        let (sx, sy) = (x * CELL - self.cam.0, y * CELL - self.cam.1);
+                        scr.fill(sx + 2, sy + 2, CELL - 4, 2, c);
+                        scr.fill(sx + 2, sy + CELL - 4, CELL - 4, 2, c);
+                        scr.fill(sx + 2, sy + 2, 2, CELL - 4, c);
+                        scr.fill(sx + CELL - 4, sy + 2, 2, CELL - 4, c);
+                    }
+                }
+            }
         }
         // 범위 표시 (점무늬)
         let (cells, col): (Vec<(i32, i32)>, u8) = match &self.phase {

@@ -138,7 +138,7 @@ pub struct Engine<A: Assets> {
     /// DATA.E5[0] 원자료, 아이템 표
     pub person_data: Rc<Vec<u8>>,
     /// 불러온 장수 레벨 (자료 적재 뒤 적용)
-    pending_offs: Vec<(usize, u8, u8, Option<(u8, u8)>, Option<(u8, u8)>, Option<u8>)>,
+    pending_offs: Vec<(usize, u8, u8, Option<(u8, u8)>, Option<(u8, u8)>, Option<u8>, [u8; 2])>,
     pub items: Rc<Vec<u8>>,
     pub strategies: Rc<Vec<crate::strategy::Strategy>>,
     /// 돈, 소지 아이템 (아이템, 레벨), 명성(op3a 2)
@@ -279,7 +279,7 @@ impl<A: Assets> Engine<A> {
             }
         }
         let has_eq = self.pending_offs.iter().any(|o| o.3.is_some() || o.4.is_some() || o.5.is_some());
-        for (p, lv, ex, w, ar, ac) in std::mem::take(&mut self.pending_offs) {
+        for (p, lv, ex, w, ar, ac, ge) in std::mem::take(&mut self.pending_offs) {
             if let Some(r) = self.person_data.get(p * 32..p * 32 + 32) {
                 let mut o = crate::officer::Officer::from_data(p, r);
                 o.set_level(&self.jobs, lv);
@@ -288,6 +288,7 @@ impl<A: Assets> Engine<A> {
                     o.weapon = w;
                     o.armor = ar;
                     o.acc = ac;
+                    o.gear_exp = ge;
                 }
                 self.officers.insert(p, o);
             }
@@ -1028,6 +1029,45 @@ impl<A: Assets> Engine<A> {
                     b.message = Some((t.to_string(), 90));
                 }
             }
+            0x58 => {
+                // 맵 물체 (원작 FUN_00418af1): 종류, 0 놓기/1 치우기, 지형, x, y, 화면 이동, 조용히
+                let (kind, rm, terr, x, y, look, quiet) = (a(0) as u8, a(1), a(2) as u8, a(3), a(4), a(5), a(6) != 0);
+                let mut se = None;
+                self.log.push(format!("물체 {kind} {} ({x},{y})", if rm == 0 { "놓기" } else { "치우기" }));
+                if let Some(b) = self.battle() {
+                    if look != 0 && !quiet {
+                        b.focus(x, y);
+                    }
+                    if rm == 0 {
+                        let near = b.place_obj(kind, terr, x, y);
+                        se = match (kind, terr) {
+                            (0 | 2, _) => Some(0x13),
+                            (4.., 0x0C) => Some(0x10),
+                            (4.., 0x0F) => Some(0x0F),
+                            (4.., 0x11) if !near => Some(0x12),
+                            _ => None,
+                        };
+                    } else if b.remove_obj(kind, x, y) {
+                        se = Some(0x12);
+                    }
+                }
+                if !quiet {
+                    if let Some(n) = se {
+                        self.sounds.push(Sound::Effect(format!("SE{n:02}.WAV")));
+                    }
+                    if kind >= 4 {
+                        self.wait = Wait::Ticks(15);
+                    }
+                }
+            }
+            0x5B => {
+                // 목표 구역 표시 (원작 FUN_004190c1): x1, y1, x2, y2, 끄기
+                let show = matches!(a(4), 0 | 0xFFFF);
+                let z = (a(0), a(1), a(2), a(3));
+                if let Some(b) = self.battle() {
+                    b.goal_zone = show.then_some(z);
+                }
+            }
             0x5C => {
                 if let Some(b) = self.battle() {
                     b.targets.push(a(0) as usize);
@@ -1070,6 +1110,31 @@ impl<A: Assets> Engine<A> {
                 palette::nearest(p, [0, 0, 0]),
             ];
         }
+        // 겹침 그림 (MARK.E5)
+        if b.mark_tiles.is_empty() {
+            match self.assets.get("MARK.E5") {
+                Asset::Pending => return false,
+                Asset::Ready(d) => {
+                    b.mark_tiles = [0x8BC0, 0x94C0, 0x9DC0, 0xA6C0, 0xAFC0, 0xB8C0, 0x1B2E0, 0x1BBE0]
+                        .iter()
+                        .map(|&o| Pic::new(48, 48, d.get(o..o + 2304).map(|t| t.to_vec()).unwrap_or_default()))
+                        .collect();
+                }
+                Asset::Missing => b.mark_tiles = vec![Pic::new(48, 48, Vec::new()); 8],
+            }
+        }
+        // 성문 그림 (GATE.E5)
+        while let Some(&(idx, x, y)) = b.gate_queue.first() {
+            match self.packs.get(&mut self.assets, "GATE.E5", idx) {
+                Err(Pending) => return false,
+                Ok(d) => {
+                    if let Some(d) = d {
+                        b.patch_gate(&d, x, y);
+                    }
+                    b.gate_queue.remove(0);
+                }
+            }
+        }
         // 부대 그림
         for i in 0..b.units.len() {
             if b.units[i].sprite.is_none() {
@@ -1097,7 +1162,6 @@ impl<A: Assets> Engine<A> {
                 args.chunks(n).map(|r| r[0].i() as usize).filter(|&p| p < persons.len()).collect()
             }
             0x4C => roster.clone(),
-            0x4E => vec![a(1) as usize],
             _ => vec![],
         };
         for p in want {
@@ -1139,9 +1203,12 @@ impl<A: Assets> Engine<A> {
                     }
                     let mut u = b.make_unit(o, side, x, y);
                     u.visible = !hidden;
-                    u.ai = if ai == 0xFFFF { 0 } else { ai as u8 };
+                    u.ai = if ai == 0xFFFF { 1 } else { ai as u8 };
                     if matches!(u.ai, 4 | 6) {
                         u.ai_target = Some((tx, ty));
+                    }
+                    if matches!(u.ai, 3 | 5) {
+                        u.ai_person = Some(if op == 0x46 { r[8].i() } else { r[9].i() } as usize);
                     }
                     b.units.retain(|o| o.person != pid as usize);
                     b.units.push(u);
@@ -1194,27 +1261,35 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x4E => {
-                // 새 부대 등장 (종류, 인물, x, y, …)
-                let pid = a(1) as usize;
-                if pid < persons.len() {
-                    match b.unit_of(pid) {
-                        Some(u) => {
-                            let un = &mut b.units[u];
-                            un.visible = true;
-                            if (a(2), a(3)) != (0, 0) {
-                                un.x = a(2);
-                                un.y = a(3);
-                                un.px = (un.x * battle::CELL) as f32;
-                                un.py = (un.y * battle::CELL) as f32;
-                            }
+                // AI 바꾸기 (원작 FUN_00416aeb): 0 = 인물 하나, 그 외 = 영역 (x1,y1)-(x2,y2) 안의 진영 부대.
+                // 진영: 0 조조군 1 우군 2·3 적 4 아군 전체 5 적 전체 6 모두. 이어서 AI 종류, 대상 인물, 대상 x, y
+                let (mode, pid, ai, tp, tx, ty) = (a(0), a(1), a(7), a(8), a(9), a(10));
+                let (x1, y1, x2, y2, side) = (a(2), a(3), a(4), a(5), a(6));
+                let pick: Vec<usize> = (0..b.units.len())
+                    .filter(|&i| {
+                        let u = &b.units[i];
+                        if !u.visible || u.hp <= 0 {
+                            return false;
                         }
-                        None => {
-                            if let Some(mut o) = offs.get(&pid).cloned() {
-                                o.set_level(&jobs, avg as u8);
-                                let u = b.make_unit(o, battle::Side::Enemy, a(2), a(3));
-                                b.units.push(u);
-                            }
+                        if mode == 0 || mode == 0xFFFF {
+                            return u.person == pid as usize;
                         }
+                        let in_side = match side {
+                            0 => u.side == battle::Side::Player,
+                            1 => u.side == battle::Side::Ally,
+                            2 | 3 | 5 => u.side == battle::Side::Enemy,
+                            4 => u.side != battle::Side::Enemy,
+                            _ => true,
+                        };
+                        in_side && (x1..=x2).contains(&u.x) && (y1..=y2).contains(&u.y)
+                    })
+                    .collect();
+                if ai < 7 {
+                    for i in pick {
+                        let u = &mut b.units[i];
+                        u.ai = ai as u8;
+                        u.ai_target = matches!(ai, 4 | 6).then_some((tx, ty));
+                        u.ai_person = matches!(ai, 3 | 5).then_some(tp as usize);
                     }
                 }
             }
@@ -1435,7 +1510,10 @@ impl<A: Assets> Engine<A> {
         };
         if autoplay {
             for n in casts {
-                self.log.push(format!("책략 {n}"));
+                self.log.push(match n.strip_prefix('@') {
+                    Some(m) => m.to_string(),
+                    None => format!("책략 {n}"),
+                });
             }
         }
         let Some(b) = self.battle() else { return };
@@ -1626,7 +1704,7 @@ impl<A: Assets> Engine<A> {
             .values()
             .map(|o| {
                 let it = |x: Option<(u8, u8)>| x.map_or("255.0".into(), |(i, l)| format!("{i}.{l}"));
-                format!("{}:{}:{}:{}:{}:{}", o.person, o.level, o.exp, it(o.weapon), it(o.armor), o.acc.unwrap_or(255))
+                format!("{}:{}:{}:{}:{}:{}:{}:{}", o.person, o.level, o.exp, it(o.weapon), it(o.armor), o.acc.unwrap_or(255), o.gear_exp[0], o.gear_exp[1])
             })
             .collect();
         let inv: Vec<String> = self.inventory.iter().map(|(i, l)| format!("{i}.{l}")).collect();
@@ -1657,7 +1735,7 @@ impl<A: Assets> Engine<A> {
                     let a: u8 = a.parse().ok()?;
                     (a != 255).then_some((a, b.parse().ok()?))
                 };
-                Some((n(0)? as usize, n(1)? as u8, n(2)? as u8, eq(3), eq(4), n(5).filter(|&x| x != 255).map(|x| x as u8)))
+                Some((n(0)? as usize, n(1)? as u8, n(2)? as u8, eq(3), eq(4), n(5).filter(|&x| x != 255).map(|x| x as u8), [n(6).unwrap_or(0) as u8, n(7).unwrap_or(0) as u8]))
             }).collect()
         });
         self.gold = f.get(5).and_then(|g| g.parse().ok()).unwrap_or(0);

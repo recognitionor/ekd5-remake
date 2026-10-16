@@ -20,6 +20,8 @@ pub struct Officer {
     pub weapon: Option<(u8, u8)>,
     pub armor: Option<(u8, u8)>,
     pub acc: Option<u8>,
+    /// 무기·방어구 경험치 (원작 +0x30, +0x33)
+    pub gear_exp: [u8; 2],
 }
 
 /// 아이템 능력 종류 (원작 FUN_00406bba): 0 공격 1 방어 2 정신 3 순발 4 사기 5 HP 6 MP 7 이동 8 기타
@@ -63,6 +65,7 @@ impl Officer {
             weapon: item(g(29)),
             armor: item(g(30)),
             acc: if g(31) == 0xFF { None } else { Some(g(31)) },
+            gear_exp: [0; 2],
         }
     }
 
@@ -135,5 +138,35 @@ impl Officer {
         }
         self.exp = if self.level >= 50 { 0 } else { total as u8 };
         ups
+    }
+
+    /// 장비 경험치 기본치 (원작 FUN_0040765d): 보조 장비 '기타' 값, 최소 10
+    pub fn gear_base(&self, items: &[u8]) -> u32 {
+        (self.equip_bonus(items, 8) as u32).max(10)
+    }
+
+    /// 장비 최대 레벨 (원작 FUN_004086c6 / FUN_0040cbf1): 무기·방어구 중 종류가 홀수면 9, 아니면 3
+    pub fn gear_max(items: &[u8], id: u8) -> u8 {
+        let k = items.get(id as usize * 25 + 17).copied().unwrap_or(0);
+        if k < 0x12 && k & 1 == 1 { 9 } else { 3 }
+    }
+
+    /// 무기(0)·방어구(1) 경험치 더하기 (원작 FUN_004086c6: 100 마다 레벨업). 반환: 레벨이 올랐나
+    pub fn gain_gear_exp(&mut self, items: &[u8], slot: usize, e: u32) -> bool {
+        let g = if slot == 0 { &mut self.weapon } else { &mut self.armor };
+        let Some((id, lv)) = g.as_mut() else { return false };
+        let cap = Self::gear_max(items, *id);
+        if *lv >= cap || e == 0 {
+            return false;
+        }
+        let mut total = self.gear_exp[slot] as u32 + e;
+        let mut up = false;
+        while total >= 100 && *lv < cap {
+            total -= 100;
+            *lv += 1;
+            up = true;
+        }
+        self.gear_exp[slot] = if *lv >= cap { 0 } else { total as u8 };
+        up
     }
 }
