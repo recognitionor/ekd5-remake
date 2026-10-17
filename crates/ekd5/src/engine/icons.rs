@@ -1,5 +1,5 @@
 //! 아이콘 (원작 ItemIcon/MgcIcon/CmdIcon/MapAtr.dll 비트맵, 추출 때 data/ICONS.BIN 으로 묶음).
-//! 묶음: 0 아이템 (그림 번호 k → 작은 2k / 큰 2k+1), 1 책략, 2 명령, 3 지형(48×48). 색 0 = 투명.
+//! 묶음: 0 아이템 (그림 번호 k → 작은 2k / 큰 2k+1), 1 책략, 2 명령, 3 지형(48×48), 4 본진 단추 (EKD5.EXE 0x155 출진·0x156 매각·0x157 구입·0x158 장비). 색 0 = 투명.
 
 use super::screen::Pic;
 use crate::palette::{nearest, Palette};
@@ -11,6 +11,7 @@ pub const ITEM: u8 = 0;
 pub const MAGIC: u8 = 1;
 pub const COMMAND: u8 = 2;
 pub const TERRAIN: u8 = 3;
+pub const CAMP: u8 = 4;
 
 struct Img {
     w: usize,
@@ -34,7 +35,10 @@ impl Icons {
         }
         let mut o = 4;
         let u16at = |o: usize| d.get(o..o + 2).map_or(0, |b| u16::from_le_bytes([b[0], b[1]]) as usize);
-        for _ in 0..4 {
+        for _ in 0..5 {
+            if o + 2 > d.len() {
+                break;
+            }
             let n = u16at(o);
             o += 2;
             let mut g = Vec::new();
@@ -63,12 +67,14 @@ impl Icons {
         if let Some(p) = cache.1.get(&(group, idx)) {
             return Some(p.clone());
         }
+        // 본진 단추는 불투명 (색 0 도 그림)
+        let opaque = group == CAMP;
         let mut map = [0u8; 256];
-        for (c, m) in map.iter_mut().enumerate().skip(1) {
+        for (c, m) in map.iter_mut().enumerate().skip(if opaque { 0 } else { 1 }) {
             let q = img.pal.get(c * 3..c * 3 + 3).unwrap_or(&[0, 0, 0]);
             *m = nearest(pal, [q[0], q[1], q[2]]).max(1);
         }
-        let px: Vec<u8> = img.px.iter().map(|&c| if c == 0 { 0 } else { map[c as usize] }).collect();
+        let px: Vec<u8> = img.px.iter().map(|&c| if c == 0 && !opaque { 0 } else { map[c as usize] }).collect();
         let p = Rc::new(Pic::new(img.w, img.h, px));
         cache.1.insert((group, idx), p.clone());
         Some(p)

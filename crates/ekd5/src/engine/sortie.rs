@@ -11,7 +11,7 @@
 use super::camp::SortieRule;
 use super::screen::{Pic, Screen};
 use super::story::{draw_text, frame_box};
-use super::{key, Assets, Engine, Pending, Scene};
+use super::{key, Assets, Engine, Pending};
 use crate::palette::nearest;
 use std::collections::HashMap;
 
@@ -43,18 +43,50 @@ pub struct SortieUi {
     bg: Option<Vec<Pic>>,
     sprites: HashMap<usize, Pic>,
     faces: HashMap<usize, Pic>,
+    /// 본진에서 열었으면 출진 블록 (본문, 절)
+    pub depart: Option<(usize, usize)>,
 }
 
 impl<A: Assets> Engine<A> {
-    /// 출진 고르기 열기 (원작 FUN_0041aac4: 반드시 출진 장수를 앞에, 나머지 합류 장수)
-    pub fn open_sortie(&mut self, rule: SortieRule) {
+    /// 출진 후보와 반드시 출진 수 (원작 FUN_0041aac4): 조조는 불가 목록에 없으면 반드시 출진,
+    /// 반드시 출진 목록 중 합류한 장수, 그다음 불가가 아닌 합류 장수. 최대 = max(규칙 최대, 반드시 수)
+    fn sortie_candidates(&self, rule: &SortieRule) -> (Vec<usize>, usize, usize) {
         let roster = if self.roster.is_empty() { vec![0] } else { self.roster.clone() };
-        let mut pids: Vec<usize> = roster.into_iter().filter(|p| !rule.excluded.contains(p)).collect();
-        pids.sort_by_key(|p| if *p == 0 { 0 } else if rule.forced.contains(p) { 1 } else { 2 });
-        let forced = pids.iter().filter(|&&p| p == 0 || rule.forced.contains(&p)).count();
+        let mut pids = Vec::new();
+        if !rule.excluded.contains(&0) && roster.contains(&0) {
+            pids.push(0);
+        }
+        for &p in &rule.forced {
+            if roster.contains(&p) && !pids.contains(&p) {
+                pids.push(p);
+            }
+        }
+        let forced = pids.len();
+        for &p in &roster {
+            if !pids.contains(&p) && !rule.excluded.contains(&p) {
+                pids.push(p);
+            }
+        }
+        (pids, forced, rule.max.max(forced))
+    }
+
+    /// 고르지 않고 정하기 (시험 자동 진행·화면 없이): 반드시 출진 + 앞에서부터 최대까지
+    pub fn auto_sortie(&self, rule: &SortieRule) -> Vec<usize> {
+        let (pids, _, max) = self.sortie_candidates(rule);
+        pids.into_iter().take(max).collect()
+    }
+
+    /// 출진 고르기 열기. 고를 것이 없으면 (반드시 출진 = 최대) 바로 Some(출진 장수)
+    /// depart = 본진 출진 블록 (본문, 절): 결정하면 실행, 취소하면 본진으로 (원작 FUN_0041aac4 가 거짓 → 본진 그대로)
+    pub fn open_sortie(&mut self, rule: SortieRule, depart: Option<(usize, usize)>) -> Option<Vec<usize>> {
+        let (pids, forced, max) = self.sortie_candidates(&rule);
+        if forced >= max {
+            return Some(pids[..forced].to_vec());
+        }
         let chosen: Vec<usize> = pids[..forced].to_vec();
         let mut rule = rule;
-        rule.max = rule.max.max(forced).min(15);
+        // 후보가 최대보다 적으면 후보 수가 최대 (FUN_0045e119)
+        rule.max = max.min(pids.len()).min(15);
         let mut ui = SortieUi {
             order: (0..pids.len()).collect(),
             pids,
@@ -68,9 +100,11 @@ impl<A: Assets> Engine<A> {
             bg: None,
             sprites: HashMap::new(),
             faces: HashMap::new(),
+            depart,
         };
         self.sort_sortie(&mut ui);
         self.sortie_ui = Some(ui);
+        None
     }
 
     /// 정렬 (원작 FUN_0045fe9c → FUN_0045ddc3 삽입 정렬, 큰 값 먼저)
@@ -154,8 +188,8 @@ impl<A: Assets> Engine<A> {
         }
     }
 
-    /// 출진 고르기 입력. 끝나면 Some(고른 장수들)
-    pub fn update_sortie(&mut self) -> Option<Vec<usize>> {
+    /// 출진 고르기 입력. 결정 Some(Some(고른 장수들)), 취소 Some(None) (본진에서 연 것만)
+    pub fn update_sortie(&mut self) -> Option<Option<Vec<usize>>> {
         let mut ui = self.sortie_ui.take()?;
         let _ = self.load_sortie(&mut ui);
         let inp = self.input.clone();
@@ -173,6 +207,7 @@ impl<A: Assets> Engine<A> {
             }
         }
         let mut done = None;
+        let mut cancelled = false;
         let mut act = |eng: &mut Self, ui: &mut SortieUi, target: usize| {
             if target < n {
                 eng.toggle_sortie(ui, ui.order[target]);
@@ -182,9 +217,12 @@ impl<A: Assets> Engine<A> {
                     done = Some(ui.chosen.clone());
                 }
             } else {
-                // 취소 (원작 FUN_0045f7f4: 고른 것 비움) — 반드시 출진은 남김
+                // 취소 (원작 FUN_0045f7f4: 고른 것 비우고 닫음 → 본진). 본진 밖에서 연 것은 고른 것만 비움
                 ui.chosen.truncate(ui.forced);
                 eng.sounds.push(super::Sound::Effect("SE01.WAV".into()));
+                if ui.depart.is_some() {
+                    cancelled = true;
+                }
             }
         };
         if inp.click {
@@ -251,7 +289,10 @@ impl<A: Assets> Engine<A> {
             }
         }
         if done.is_some() {
-            return done;
+            return Some(done);
+        }
+        if cancelled {
+            return Some(None);
         }
         self.sortie_ui = Some(ui);
         None
@@ -261,10 +302,7 @@ impl<A: Assets> Engine<A> {
         let Some(ui) = self.sortie_ui.as_ref() else { return };
         let Some(f) = self.font.as_ref() else { return };
         let Some(bg) = &ui.bg else { return };
-        let mark: Vec<u8> = match &self.scene {
-            Scene::Battle(b) => b.mark.to_vec(),
-            _ => Vec::new(),
-        };
+        let mark = self.mark_data.clone();
         let items = self.items.clone();
         let jobs = self.jobs.clone();
         let scr = &mut self.screen;

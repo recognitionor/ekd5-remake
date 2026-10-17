@@ -103,7 +103,7 @@ fn tutor_text(exe: &[u8]) -> String {
 }
 
 /// PE 리소스의 비트맵(8비트 DIB)들을 번호 순으로: (가로, 세로, 팔레트 RGB 768, 위에서부터 픽셀)
-fn dll_bitmaps(d: &[u8]) -> Vec<(usize, usize, Vec<u8>, Vec<u8>)> {
+fn dll_bitmaps(d: &[u8]) -> Vec<(usize, usize, usize, Vec<u8>, Vec<u8>)> {
     let u16at = |o: usize| u16::from_le_bytes([d[o], d[o + 1]]) as usize;
     let u32at = |o: usize| u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]) as usize;
     let pe = u32at(0x3c);
@@ -124,7 +124,7 @@ fn dll_bitmaps(d: &[u8]) -> Vec<(usize, usize, Vec<u8>, Vec<u8>)> {
         }
         let mut ids = entries(base + (t_off & 0x7fff_ffff));
         ids.sort();
-        for (_, i_off) in ids {
+        for (id, i_off) in ids {
             let langs = entries(base + (i_off & 0x7fff_ffff));
             let Some(&(_, l_off)) = langs.first() else { continue };
             let (drva, dsz) = (u32at(base + l_off), u32at(base + l_off + 4));
@@ -147,7 +147,7 @@ fn dll_bitmaps(d: &[u8]) -> Vec<(usize, usize, Vec<u8>, Vec<u8>)> {
                     px[y * w..y * w + w].copy_from_slice(row);
                 }
             }
-            out.push((w, ha, pal, px));
+            out.push((id, w, ha, pal, px));
         }
     }
     out
@@ -171,12 +171,21 @@ fn extract(src: &Path, dst: &Path) {
     for dll in ["ITEMICON.DLL", "MGCICON.DLL", "CMDICON.DLL", "MAPATR.DLL"] {
         let bmps = fs::read(src.join(dll)).map(|d| dll_bitmaps(&d)).unwrap_or_default();
         icons.extend((bmps.len() as u16).to_le_bytes());
-        for (w, h, pal, px) in bmps {
+        for (_, w, h, pal, px) in bmps {
             icons.extend((w as u16).to_le_bytes());
             icons.extend((h as u16).to_le_bytes());
             icons.extend(pal);
             icons.extend(px);
         }
+    }
+    // 묶음 4: 본진 단추 (실행 파일 비트맵 0x155 출진, 0x156 매각, 0x157 구입, 0x158 장비 — 원작 FUN_0041c2b2)
+    let camp: Vec<_> = fs::read(src.join("EKD5.EXE")).map(|d| dll_bitmaps(&d)).unwrap_or_default().into_iter().filter(|b| (0x155..=0x158).contains(&b.0)).collect();
+    icons.extend((camp.len() as u16).to_le_bytes());
+    for (_, w, h, pal, px) in camp {
+        icons.extend((w as u16).to_le_bytes());
+        icons.extend((h as u16).to_le_bytes());
+        icons.extend(pal);
+        icons.extend(px);
     }
     fs::write(dst.join("ICONS.BIN"), icons).unwrap();
     names.push("ICONS.BIN".into());

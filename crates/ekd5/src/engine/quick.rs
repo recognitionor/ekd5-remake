@@ -71,7 +71,7 @@ impl<A: Assets> Engine<A> {
             return false;
         }
         if let Some(c) = &self.camp {
-            return matches!(c.view, super::camp::CampView::Menu(_));
+            return matches!(c.view, super::camp::CampView::Menu(_) | super::camp::CampView::Field);
         }
         let running = self.vm.as_ref().is_some_and(|v| v.running);
         match &self.scene {

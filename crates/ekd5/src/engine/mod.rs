@@ -208,11 +208,19 @@ pub struct Engine<A: Assets> {
     pub camp: Option<camp::Camp>,
     pub camp_rule: Option<camp::SortieRule>,
     camp_pending: bool,
+    /// 웹 메뉴 단추: 본진 보조 메뉴 열기
+    pub camp_menu: bool,
+    /// MARK.E5 (막대 무늬 등, 전투 밖에서도)
+    pub mark_data: Rc<Vec<u8>>,
     /// 출진 고르기
     pub sortie_ui: Option<sortie::SortieUi>,
     /// 출진 화면 정렬 (원작 전역 DAT_00498c30 / DAT_00498c3c)
     sortie_sort: (u8, u8),
     sortie_rule: Option<camp::SortieRule>,
+    /// 원작 DAT_004bb164 (op06 이 정한 출진 최대, op4a 는 이것을 씀)
+    sortie_max: usize,
+    /// 마지막으로 연 본진의 출진 규칙 (본진 출진 단추를 안 거친 경우용)
+    last_camp_rule: Option<camp::SortieRule>,
     sortie_chosen: Option<Vec<usize>>,
     /// 사건 처리 뒤 돌아갈 전투 단계
     resume: Option<battle::Phase>,
@@ -289,9 +297,13 @@ impl<A: Assets> Engine<A> {
             camp: None,
             camp_rule: None,
             camp_pending: false,
+            camp_menu: false,
+            mark_data: Rc::new(Vec::new()),
             sortie_ui: None,
             sortie_sort: (1, 2),
             sortie_rule: None,
+            sortie_max: 0,
+            last_camp_rule: None,
             sortie_chosen: None,
             resume: None,
             event_queue: Vec::new(),
@@ -365,7 +377,10 @@ impl<A: Assets> Engine<A> {
         if self.screen.window_tex.is_none() {
             match self.assets.get("MARK.E5") {
                 Asset::Pending => return false,
-                Asset::Ready(d) => self.screen.window_tex = d.get(0x18DC0..0x18DC0 + 32 * 48).map(|t| Pic::new(32, 48, t.to_vec())),
+                Asset::Ready(d) => {
+                    self.screen.window_tex = d.get(0x18DC0..0x18DC0 + 32 * 48).map(|t| Pic::new(32, 48, t.to_vec()));
+                    self.mark_data = d.clone();
+                }
                 Asset::Missing => self.screen.window_tex = Some(Pic::new(32, 48, vec![30; 32 * 48])),
             }
         }
@@ -594,6 +609,9 @@ impl<A: Assets> Engine<A> {
                         self.sortie_chosen = Some(ch);
                     }
                     if let Some(c) = self.camp.take() {
+                        if self.sortie_chosen.is_none() {
+                            self.sortie_chosen = Some(self.auto_sortie(&c.rule));
+                        }
                         if let Some(body) = c.depart {
                             if let Some(vm) = self.vm.as_mut() {
                                 vm.section = c.section;
@@ -607,8 +625,18 @@ impl<A: Assets> Engine<A> {
                     }
                 }
                 if self.sortie_ui.is_some() {
-                    if let Some(ch) = self.update_sortie() {
-                        self.sortie_chosen = Some(ch);
+                    let depart = self.sortie_ui.as_ref().and_then(|u| u.depart);
+                    match self.update_sortie() {
+                        Some(Some(ch)) => {
+                            self.sortie_chosen = Some(ch);
+                            // 본진 출진: 출진 블록 실행
+                            if let Some((body, section)) = depart {
+                                self.camp = None;
+                                self.run_camp_block(body, section);
+                            }
+                        }
+                        Some(None) => {}
+                        None => {}
                     }
                     return;
                 }
@@ -649,7 +677,10 @@ impl<A: Assets> Engine<A> {
                     false
                 }
                 Some(s) => {
-                    self.sortie_chosen = None;
+                    // 본진(이야기 단계)에서 고른 출진 장수는 다음 전투 단계까지 둠
+                    if n % 2 == 0 {
+                        self.sortie_chosen = None;
+                    }
                     self.sortie_rule = None;
                     self.event_queue.clear();
                     self.resume = None;
@@ -906,12 +937,14 @@ impl<A: Assets> Engine<A> {
             if vm.section == 0 {
                 let need_pick = self.battle().is_some_and(|b| !b.started && b.slots.get(1).is_some_and(|&s| s != (0, 0)));
                 if need_pick && self.sortie_chosen.is_none() {
-                    let rule = self.sortie_rule.clone().unwrap_or(camp::SortieRule { max: 12, forced: vec![], excluded: vec![] });
-                    let n = if self.roster.is_empty() { 1 } else { self.roster.len() };
-                    if n > rule.max || n > 1 {
-                        self.vm = Some(vm);
-                        self.open_sortie(rule);
-                        return;
+                    // 원작은 본진 출진 단추나 op4a 에서 고름. 둘 다 안 거쳤으면 여기서
+                    let rule = self.sortie_rule.clone().or_else(|| self.last_camp_rule.clone()).unwrap_or(camp::SortieRule { max: 12, forced: vec![], excluded: vec![] });
+                    match self.open_sortie(rule, None) {
+                        Some(ch) => self.sortie_chosen = Some(ch),
+                        None => {
+                            self.vm = Some(vm);
+                            return;
+                        }
                     }
                 }
                 let roster = match &self.sortie_chosen {
@@ -1247,10 +1280,12 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x06 => {
-                // 본진: 1 = 열기 (출진 수, 반드시 출진 ×5, 불가 ×5), 0 = 닫기
+                // 본진: 1 = 열기, 0 = 닫기. 출진 규칙 (최대, 반드시 ×5, 불가 ×5) 은 어느 쪽이든 정함 (원작 FUN_00417f55)
+                let list: Vec<i32> = args[2..].iter().map(|x| x.i()).collect();
+                let rule = camp::SortieRule::from_args(a(1), &list);
+                self.sortie_max = rule.max;
                 if a(0) == 1 {
-                    let list: Vec<i32> = args[2..].iter().map(|x| x.i()).collect();
-                    self.camp_rule = Some(camp::SortieRule::from_args(a(1), &list));
+                    self.camp_rule = Some(rule);
                     self.camp_pending = true;
                 } else {
                     self.camp = None;
@@ -1258,9 +1293,11 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x4A => {
-                // 출진 규칙 (전투)
+                // 출진 규칙 (전투, 원작 FUN_004181a2): 반드시·불가만 바꾸고 최대는 op06 이 정한 것
                 let list: Vec<i32> = args[1..].iter().map(|x| x.i()).collect();
-                self.sortie_rule = Some(camp::SortieRule::from_args(a(0), &list));
+                let mut rule = camp::SortieRule::from_args(a(0), &list);
+                rule.max = self.sortie_max;
+                self.sortie_rule = Some(rule);
             }
             0x3A => {
                 // 돈 (0: 설정/더하기/빼기) · 명성 게이지 (2)
@@ -2710,7 +2747,9 @@ impl<A: Assets> Engine<A> {
 
     /// 전투 메뉴 열기 (웹 버튼)
     pub fn open_menu(&mut self) {
-        if let Scene::Battle(b) = &mut self.scene {
+        if self.camp.is_some() {
+            self.camp_menu = true;
+        } else if let Scene::Battle(b) = &mut self.scene {
             b.open_menu = true;
         }
     }
