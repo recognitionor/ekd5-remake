@@ -883,7 +883,8 @@ impl Battle {
 
     /// 책략 성공률 (원작 FUN_0043d84f: (정신+사기) 비교 곡선 × 책략별 배율, 포박된 대상은 100)
     fn strat_rate_for(&self, a: usize, d: usize, sid: u8) -> u32 {
-        if self.units[d].status & status::PARALYZE != 0 && sid != 9 && sid != 21 {
+        // 포박·혼란 상대에게는 반드시 성공 (원작 FUN_0043d84f, 해일·현혹 제외)
+        if self.units[d].status & (status::PARALYZE | status::CONFUSE) != 0 && sid != 9 && sid != 21 {
             return 100;
         }
         let base = self.strat_rate(a, d);
@@ -1264,22 +1265,29 @@ impl Battle {
     pub fn start_side(&mut self, side: Side) {
         let idx: Vec<usize> = self.alive(side).collect();
         for i in idx {
-            let luck = self.val(i, 4);
-            // 태평청령서(0x14) 는 상태이상이 반드시 풀림 (원작 FUN_0043e848)
-            let cure = if self.sp(i, 0x14).is_some() { 100 } else { (luck / 3).clamp(10, 60) };
-            let un = &mut self.units[i];
-            if un.status & status::POISON != 0 {
-                let d = (un.max_hp / 10).max(1).min(un.hp - 1).max(0);
-                un.hp -= d;
-            }
-            for bit in [status::POISON, status::CONFUSE, status::PARALYZE, status::SEAL] {
-                if self.units[i].status & bit != 0 && (self.rand(100) as u32) < cure {
+            // 상태이상 회복 (원작 FUN_0043e8e6): 확률 = 기본 사기 (태평청령서 0x14 면 100).
+            // 포박·봉책·독은 그 확률, 혼란은 max(10, 사기−15) (100 이면 확실)
+            let cure = if self.sp(i, 0x14).is_some() { 100 } else { self.units[i].off.base[4] as i32 };
+            for bit in [status::PARALYZE, status::SEAL, status::CONFUSE, status::POISON] {
+                if self.units[i].status & bit == 0 {
+                    continue;
+                }
+                let c = if bit == status::CONFUSE && cure != 100 { (cure - 15).max(10) } else { cure };
+                if self.rand(100) < c {
                     self.units[i].status &= !bit;
                 }
             }
+            // 독 피해 (원작 FUN_0044ffb8): 최대 HP/10 (최소 1), 1 은 남김
+            let un = &mut self.units[i];
+            if un.status & status::POISON != 0 && un.hp > 1 {
+                let d = (un.max_hp / 10).max(1).min(un.hp - 1);
+                un.hp -= d;
+                let (x, y) = (un.x, un.y);
+                self.popup = Some((x * CELL + 4 - self.cam.0, y * CELL - 8 - self.cam.1, format!("독 -{d}"), 30));
+            }
             // 능력 상태 복귀 (원작 FUN_0043ea85): 0·1 → 한 칸 오름, 5 → 한 칸 내림,
             // 4 → 사기에 따른 확률(사기 51 미만 60−사기 %, 그 외 10 %)로 보통, 2 → 20 % 로 보통
-            let morale = self.val(i, 4) as i32;
+            let morale = self.units[i].off.base[4] as i32;
             let up_chance = if morale < 51 { (60 - morale).max(0) } else { 10 };
             for k in 0..5 {
                 let r = self.rand(100);
@@ -1722,6 +1730,12 @@ impl Battle {
     }
 
     pub fn update_player(&mut self, inp: &Input) -> bool {
+        // 혼란한 조조군 부대는 조작 불가 (원작 FUN_00450130)
+        for i in self.alive(Side::Player).collect::<Vec<_>>() {
+            if self.units[i].status & status::CONFUSE != 0 {
+                self.units[i].acted = true;
+            }
+        }
         // 조작할 조조군 부대가 없으면 (첫 전투 1턴처럼 아직 도착 전) 차례를 자동으로 넘김
         if matches!(self.phase, Phase::PlayerIdle) && !self.alive(Side::Player).any(|i| !self.units[i].acted) {
             self.end_player_turn();
@@ -1882,7 +1896,7 @@ impl Battle {
                     let list = self.tool_list();
                     self.phase = Phase::ToolList { unit, from, list };
                 } else if let Some(c) = tapped {
-                    match self.at(c.0, c.1).filter(|&t| cells.contains(&c) && !self.units[t].side.hostile(Side::Player)) {
+                    match self.at(c.0, c.1).filter(|&t| cells.contains(&c) && !self.units[t].side.hostile(Side::Player) && self.tool_ok(inv, t)) {
                         Some(t) => {
                             let msg = self.use_tool(inv, t);
                             let (tx, ty) = (self.units[t].x, self.units[t].y);
@@ -1956,6 +1970,21 @@ impl Battle {
     }
 
     /// 소모품 사용 (원작 아이템 종류 0x3f HP, 0x40 MP, 0x41~0x45 상태 치료, 0x46~0x4a 능력 열매, 0x4b 경험, 0x4c 인삼)
+    /// 도구를 그 부대에 쓸 수 있나 (원작 FUN_0041ea39: 약은 해당 상태일 때만)
+    fn tool_ok(&self, inv: usize, t: usize) -> bool {
+        let Some(&(it, _)) = self.inventory.get(inv) else { return false };
+        let ty = self.items.get(it as usize * 25 + 17).copied().unwrap_or(0);
+        let st = self.units[t].status;
+        match ty {
+            0x41 => st & status::CONFUSE != 0,
+            0x42 => st & status::POISON != 0,
+            0x43 => st & status::PARALYZE != 0,
+            0x44 => st & status::SEAL != 0,
+            0x45 => st != 0,
+            _ => true,
+        }
+    }
+
     fn use_tool(&mut self, inv: usize, t: usize) -> String {
         let Some(&(it, _)) = self.inventory.get(inv) else { return String::new() };
         self.inventory.remove(inv);
@@ -2387,6 +2416,22 @@ impl Battle {
                 }
             }
         }
+        // 색 바꾸기 표 (원작 FUN_00432a30 어둡게: 각 채널 −4 / FUN_00432aee 독: 빨강·파랑 −6, 초록 그대로; 4비트 단위)
+        let tint = |pal: &crate::palette::Palette, dr: u8, dg: u8, db: u8| -> Vec<u8> {
+            (0..256usize)
+                .map(|c| {
+                    if c == 0 {
+                        return 0u8;
+                    }
+                    let q = pal[c];
+                    crate::palette::nearest(pal, [q[0].saturating_sub(dr * 16), q[1].saturating_sub(dg * 16), q[2].saturating_sub(db * 16)])
+                })
+                .collect()
+        };
+        let dark_lut = tint(&scr.pal, 4, 4, 4);
+        let poison_lut = tint(&scr.pal, 6, 0, 6);
+        let mark_phase = matches!(self.phase, Phase::PlayerIdle | Phase::Selected { .. } | Phase::Menu { .. } | Phase::Targeting { .. } | Phase::Moving { .. });
+        let mut icons_at: Vec<(i32, i32, u8)> = Vec::new();
         // 부대
         let mut order: Vec<usize> = (0..self.units.len()).filter(|&i| self.units[i].visible).collect();
         order.sort_by(|&a, &b| self.units[a].py.partial_cmp(&self.units[b].py).unwrap_or(std::cmp::Ordering::Equal));
@@ -2430,6 +2475,9 @@ impl Battle {
             // 사망: 무릎 꿇은 그림 (원작 UNIT_MOV +0x5100)
             let frame = if matches!(u.leave, Some((2, _))) { 9 } else { frame };
             let (sx, sy) = (u.px as i32 - self.cam.0, u.py as i32 - self.cam.1);
+            // 행동 끝 = 어둡게, 독 = 4틱 중 2틱 초록빛 (원작 FUN_00440c8f)
+            let lut_dark = u.acted && u.side == Side::Player && u.hp > 0 && mark_phase;
+            let lut_poison = u.status & status::POISON != 0 && (tick / 4) % 4 > 1;
             // 공격 동작 (UNIT_ATK) · 맞음 (UNIT_SPC 3)
             let striking = self.strikes.front().is_some_and(|s| s.0 == i);
             if let (Some(6), true, Some(atk)) = (u.pose, striking, &u.atk) {
@@ -2505,19 +2553,27 @@ impl Battle {
                         let sxp = if flip { 47 - xx } else { xx };
                         let c = sp.px[((frame * 48 + yy) as usize) * 48 + sxp as usize];
                         if c != 0 {
+                            let c = if lut_dark { dark_lut[c as usize] } else if lut_poison { poison_lut[c as usize] } else { c };
                             scr.fill(sx + xx, sy + yy, 1, 1, c);
                         }
                     }
                 }
             }
-            if u.acted && u.side == Side::Player && matches!(self.phase, Phase::PlayerIdle | Phase::Selected { .. } | Phase::Menu { .. } | Phase::Targeting { .. } | Phase::Moving { .. }) {
-                // 행동 끝 표시: 어두운 점
-                for yy in (0..48).step_by(2) {
-                    for xx in (0..48).step_by(2) {
-                        scr.fill(sx + xx + (yy / 2) % 2, sy + yy, 1, 1, 31);
-                    }
-                }
+            if u.status & (status::CONFUSE | status::SEAL | status::PARALYZE) != 0 {
+                icons_at.push((sx, sy, u.status));
             }
+        }
+        // 상태 아이콘 16×16 (원작 FUN_00440c8f: 혼란 0x19FC0, 봉책 0x1A0C0, 포박 0x1A1C0) — 머리 위, 번갈아 좌우
+        let blink = (tick / 16) as usize;
+        for (sx, sy, st) in icons_at {
+            let list: Vec<usize> = [(status::CONFUSE, 0x19FC0usize), (status::SEAL, 0x1A0C0), (status::PARALYZE, 0x1A1C0)]
+                .into_iter()
+                .filter(|(b, _)| st & b != 0)
+                .map(|x| x.1)
+                .collect();
+            let k = blink % list.len();
+            let x = if list.len() == 1 { sx + 4 + (blink & 1) as i32 * 24 } else if k & 1 == 0 { sx + 28 } else { sx + 4 };
+            self.mark_pic(scr, list[k], 16, 16, x, sy);
         }
         // 커서
         let (cx, cy) = (self.cursor.0 * CELL - self.cam.0, self.cursor.1 * CELL - self.cam.1);
