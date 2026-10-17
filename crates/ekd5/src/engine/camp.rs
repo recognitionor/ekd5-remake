@@ -46,15 +46,6 @@ pub struct Camp {
     pub talks: Vec<(usize, usize)>,
 }
 
-/// 출진 고르기 화면
-#[derive(Clone, Debug)]
-pub struct SortieUi {
-    pub list: ListBox,
-    pub pids: Vec<usize>,
-    pub chosen: Vec<usize>,
-    pub rule: SortieRule,
-}
-
 fn menu_box() -> ListBox {
     let mut m = ListBox::new("본진", 220);
     m.y = 120;
@@ -408,68 +399,6 @@ impl<A: Assets> Engine<A> {
         l
     }
 
-    /// 출진 고르기 열기
-    pub fn open_sortie(&mut self, rule: SortieRule) {
-        let roster = if self.roster.is_empty() { vec![0] } else { self.roster.clone() };
-        let mut pids: Vec<usize> = roster.into_iter().filter(|p| !rule.excluded.contains(p)).collect();
-        // 조조와 반드시 출진은 앞에
-        pids.sort_by_key(|p| if *p == 0 { 0 } else if rule.forced.contains(p) { 1 } else { 2 });
-        let mut chosen: Vec<usize> = pids.iter().copied().filter(|p| *p == 0 || rule.forced.contains(p)).collect();
-        for &p in &pids {
-            if chosen.len() >= rule.max {
-                break;
-            }
-            if !chosen.contains(&p) {
-                chosen.push(p);
-            }
-        }
-        let list = ListBox::new("", 340);
-        let mut ui = SortieUi { list, pids, chosen, rule };
-        self.refresh_sortie(&mut ui);
-        self.sortie_ui = Some(ui);
-    }
-
-    fn refresh_sortie(&mut self, ui: &mut SortieUi) {
-        let (sel, top) = (ui.list.sel, ui.list.top);
-        let mut l = ListBox::new(&format!("출진 장수  {}/{}", ui.chosen.len(), ui.rule.max), 340);
-        l.y = 40;
-        l.visible = 14;
-        l.push("▶ 출진한다", "", true);
-        for &p in &ui.pids {
-            let o = self.officer(p);
-            let n = self.persons.get(p).map(|x| x.name.clone()).unwrap_or_default();
-            let fixed = p == 0 || ui.rule.forced.contains(&p);
-            l.rows.push((n, format!("Lv{}{}", o.level, if fixed { " 필수" } else { "" }), true, ui.chosen.contains(&p)));
-        }
-        l.sel = sel;
-        l.top = top;
-        ui.list = l;
-    }
-
-    /// 출진 고르기 입력. 끝나면 Some(고른 장수들)
-    pub fn update_sortie(&mut self) -> Option<Vec<usize>> {
-        let mut ui = self.sortie_ui.take()?;
-        let inp = self.input.clone();
-        match ui.list.update(&inp, inp.pressed & key::DECIDE != 0) {
-            Pick::Row(0) => return Some(ui.chosen),
-            Pick::Row(k) => {
-                let p = ui.pids[k - 1];
-                let fixed = p == 0 || ui.rule.forced.contains(&p);
-                if ui.chosen.contains(&p) {
-                    if !fixed {
-                        ui.chosen.retain(|&x| x != p);
-                    }
-                } else if ui.chosen.len() < ui.rule.max {
-                    ui.chosen.push(p);
-                }
-                self.refresh_sortie(&mut ui);
-            }
-            _ => {}
-        }
-        self.sortie_ui = Some(ui);
-        None
-    }
-
     pub fn render_camp(&mut self) {
         let Some(f) = self.font.as_ref() else { return };
         let hi = if let Scene::Battle(b) = &self.scene { b.col[0] } else { crate::palette::nearest(&self.screen.pal, [208, 176, 112]) };
@@ -494,9 +423,6 @@ impl<A: Assets> Engine<A> {
                 l.render(scr, f, hi);
                 super::story::draw_text(scr, f, 20, 452, &format!("소지금 {}", self.gold), super::story::TEXT);
             }
-        }
-        if let Some(s) = &self.sortie_ui {
-            s.list.render(scr, f, hi);
         }
     }
 }

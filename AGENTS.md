@@ -9,7 +9,7 @@
 - `python3 -I scripts/extract-cd.py <CD.ccd> data` (CD 음악 트랙 2~22 → BGMnn.m4a(afconvert), 설치본에 없는 MCALL09.. 등, AVI → mp4(ffmpeg))
 
 ## 구조
-- `crates/ekd5`: ls12(Ls12 해제), palette(B,R,G 4비트), font(ALL_FONT.16P/ANKFONT.DAT), eex(컨테이너), vm(인자 해석·블록), officer(능력·레벨업·장비·장비 경험치·기본 장비), strategy(책략 표·공식), engine/{mod, story, battle, camp(본진·출진·보물도감), duel(일기토), fx(책략·맵 연출 MEFF/MCALL), icons(DLL 아이콘), tutor(관상가 노인·회차 기록), ui, screen, assets}
+- `crates/ekd5`: ls12(Ls12 해제), palette(B,R,G 4비트), font(ALL_FONT.16P/ANKFONT.DAT), eex(컨테이너), vm(인자 해석·블록), officer(능력·레벨업·장비·장비 경험치·기본 장비), strategy(책략 표·공식), engine/{mod, story, battle, camp(본진·보물도감), sortie(출진 장수 선택 = 원작 대화상자 236, U_SELECT.E5), duel(일기토), fx(책략·맵 연출 MEFF/MCALL), icons(DLL 아이콘), tutor(관상가 노인·회차 기록), ui, screen, assets}
 - `crates/ekd5-cli`: `ekd5 extract <원본> data`, `ekd5 shots data <out> <틱> [간격]` (EKD5_STAGE, EKD5_AUTO, EKD5_PRESS, EKD5_TAPS, EKD5_AUTOPLAY, EKD5_CHEAT, EKD5_AUTO_END, EKD5_DUMP(턴마다 부대 위치), EKD5_FLAGS, EKD5_SNAP(단계마다 저장 문자열), EKD5_RESTORE)
 - 빌드: cargo 는 PATH 에 없을 수 있음 → `~/.cargo/bin/cargo`
 - `crates/ekd5-web` + `web/ekd5.js`: WASM 글루 (진행 자동 저장 → localStorage `ekd5-save`)
@@ -28,6 +28,9 @@
 - 본진(대화·장비·상점·도구·보물도감·출진), 출진 선택, 돈/명성(게이지)/보상, 엔딩 3종(op0f)·회차 공통 기록(엔딩·보물도감, localStorage ekd5-common)
 - 스크립트: 단계 이동 op11(갈림길·가상 모드·엔딩), 명성 비교 op37, 성문·불·짚더미 op58/op21, AI 7종·op4e, 증원 op55, 일기토, 부대 대사 op15, 얼굴 상태 op20·장 op67, 그림 바꾸기 op35, 턴 제한 op5d, 작전개시 op5a, 맵 연출 op6b, 관상가 튜토리얼 op10(+회차 보상)
 - 소리: BGM(CD 트랙=op24 인자+2), 효과음 SEnn/SE_M/SE_E·반복(op23), 전투·메뉴 효과음, 동영상 LOGO/OPEN/END
+- 웹 효과음은 Web Audio (파일마다 한 번 받아 풀어 두고 재사용). 잠금 함수가 data/ 를 브라우저에 하루 보관(private, max-age=86400)
+- 대화창 자리: 이야기는 말하는 인물 그림 위끝 > 220 이면 위(y=56) 아니면 아래(y=318) (FUN_0042b0c8), 전투는 말하는 부대 칸 옆 말풍선 + 화살표 MARK 0x194C0/0x193C0 (FUN_0042efde)
+- 이동 범위: 팔레트 0x3C 바둑판, 칸 테두리 없음 (FUN_00453d9d). MARK 0x15C0 테두리 칸은 책략 범위(FUN_00453ead)
 - 아이콘: 아이템(+20), 책략(계통), 명령, 지형(정보창)
 - 자동 진행 검사(치트): 전 단계 → 엔딩 → 2회차까지 오류 없음
 
@@ -40,4 +43,5 @@
 - 일기토 동작 16종 그림 근사, 책략 연출의 반투명은 점무늬, 겹 그림(마스크) 미사용
 - op08(모드 값)·op0e/op49(전투 끝 상태)·op02(표지)는 화면 동작 없음
 - 상태이상: 차례 시작 일괄 해제 조건(FUN_0043f218) 미분석
+- 출진 화면: 9pt 윈도 글꼴 대신 16px 글꼴이라 오른쪽 장수 정보 배치는 근사, 취소는 고른 것 비우기(반드시 출진은 남기고 창 유지, 원작은 모두 비우고 창을 닫음 — 그 뒤 처리 미분석)
 - 패배하면 같은 전투 다시 (원작은 게임 오버 → 불러오기)

@@ -10,6 +10,7 @@ pub mod icons;
 pub mod quick;
 pub mod tutor;
 pub mod screen;
+pub mod sortie;
 pub mod story;
 pub mod ui;
 
@@ -208,7 +209,9 @@ pub struct Engine<A: Assets> {
     pub camp_rule: Option<camp::SortieRule>,
     camp_pending: bool,
     /// 출진 고르기
-    pub sortie_ui: Option<camp::SortieUi>,
+    pub sortie_ui: Option<sortie::SortieUi>,
+    /// 출진 화면 정렬 (원작 전역 DAT_00498c30 / DAT_00498c3c)
+    sortie_sort: (u8, u8),
     sortie_rule: Option<camp::SortieRule>,
     sortie_chosen: Option<Vec<usize>>,
     /// 사건 처리 뒤 돌아갈 전투 단계
@@ -287,6 +290,7 @@ impl<A: Assets> Engine<A> {
             camp_rule: None,
             camp_pending: false,
             sortie_ui: None,
+            sortie_sort: (1, 2),
             sortie_rule: None,
             sortie_chosen: None,
             resume: None,
@@ -581,7 +585,13 @@ impl<A: Assets> Engine<A> {
                 if self.autoplay {
                     // 시험: 출진은 기본 선택, 본진은 바로 출진
                     if let Some(ui) = self.sortie_ui.take() {
-                        self.sortie_chosen = Some(ui.chosen);
+                        let mut ch = ui.chosen.clone();
+                        for &p in &ui.pids {
+                            if ch.len() < ui.rule.max && !ch.contains(&p) {
+                                ch.push(p);
+                            }
+                        }
+                        self.sortie_chosen = Some(ch);
                     }
                     if let Some(c) = self.camp.take() {
                         if let Some(body) = c.depart {
@@ -2600,6 +2610,7 @@ impl<A: Assets> Engine<A> {
             }
         }
         self.render_camp();
+        self.render_sortie();
         let scr = &mut self.screen;
         if let Some(e) = &self.error {
             if let Some(f) = &self.font {
