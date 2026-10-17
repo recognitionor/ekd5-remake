@@ -1942,8 +1942,16 @@ impl<A: Assets> Engine<A> {
                 // 동작 (원작 FUN_00418539 → FUN_0045976f): 인물, 동작 0..11 (0 = 보통). 소리: 6·7 SE07, 8 SE06, 그 외 SE08
                 if let Some(u) = b.unit_of(a(0) as usize) {
                     let m = a(1);
+                    // 걸리는 틱 (원작 대기 수): 9 = 2장 × 6번 × 8, 6·7 공격 4장, 8·10·12 짧은 반복, 그 외 한 장
+                    let dur = match m {
+                        9 => 48,
+                        6 | 7 => 16,
+                        8 | 10 | 12 => 16,
+                        11 => 1,
+                        _ => 8,
+                    };
                     b.units[u].pose = None;
-                    b.units[u].motion = (1..=11).contains(&m).then_some(m as u8);
+                    b.units[u].motion = (1..=12).contains(&m).then_some((m as u8, dur));
                     let se = match m {
                         0 => None,
                         6 | 7 => Some("SE07.WAV"),
@@ -1952,6 +1960,11 @@ impl<A: Assets> Engine<A> {
                     };
                     if let Some(se) = se {
                         b.sounds.push(se.into());
+                    }
+                    // 앞뒤 대기 (인자 3·4, 동작 0·11 제외)
+                    if m != 0 && m != 11 {
+                        let w = dur + if a(2) != 0 { 8 } else { 0 } + if a(3) != 0 { 8 } else { 0 };
+                        self.wait = Wait::Ticks(w);
                     }
                 }
             }
