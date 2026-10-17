@@ -203,6 +203,8 @@ pub struct Battle {
     dmg_queue: VecDeque<DmgWin>,
     /// 책략 연출 중 대상 칸에 남는 숫자 (부대, 양) — 원작 FUN_0042459c → FUN_00451ad1
     cast_nums: Vec<(usize, i32)>,
+    /// 차례로 재생할 상태 변화 연출 (MEFF 번호, 중심) — 원작 FUN_0045ca55 → FUN_0044080f
+    pub fx_queue: VecDeque<(u8, Vec<(i32, i32)>)>,
     /// 직업 이름 (JOBS.TXT)
     pub job_names: Rc<Vec<String>>,
     /// 이번 공격 전 공격자 경험치 (부대, 경험치, 레벨)
@@ -356,6 +358,7 @@ impl Battle {
             dmg_win: None,
             dmg_queue: VecDeque::new(),
             cast_nums: Vec::new(),
+            fx_queue: VecDeque::new(),
             job_names: Rc::new(Vec::new()),
             atk_exp: None,
             ai_plan: None,
@@ -1262,6 +1265,44 @@ impl Battle {
     }
 
     /// 차례 시작: 상태이상 (독 피해, 회복 확률 — 원작 FUN_0043e8e6)
+    /// 상태 변화 연출 줄 세우기 (원작 FUN_0044080f: 혼란 48 독 49 포박 50 봉책 51 회복 44,
+    /// 능력 내림 공·정 39 방 40 순 41 사 42 / 올림 34 35 34 36 37)
+    pub fn queue_status_fx(&mut self, u: usize, id: u8) {
+        let un = &self.units[u];
+        if !un.visible {
+            return;
+        }
+        self.fx_queue.push_back((id, vec![(un.x * CELL + CELL / 2, un.y * CELL + CELL / 2)]));
+    }
+
+    /// 줄 선 연출 하나 시작 (원작 FUN_0044080f: 그 부대 쪽으로 화면 이동 → 재생). 없으면 false
+    pub fn next_status_fx(&mut self) -> bool {
+        let Some((id, c)) = self.fx_queue.pop_front() else { return false };
+        if let Some(&(x, y)) = c.first() {
+            if x < self.cam.0 + 48 || x > self.cam.0 + 592 || y < self.cam.1 + 48 || y > self.cam.1 + 432 {
+                self.focus(x / CELL, y / CELL);
+            }
+        }
+        self.fx_req = Some((id, c));
+        true
+    }
+
+    /// 상태이상 걸기 연출 번호 (원작: 2→50, 4→51, 8→48, 0x10→49, 높은 비트 우선)
+    pub fn status_fx_id(bits: u8) -> Option<u8> {
+        [(0x10u8, 49u8), (8, 48), (4, 51), (2, 50)].into_iter().find(|(b, _)| bits & b != 0).map(|x| x.1)
+    }
+
+    /// 능력 상태 연출 번호 (종류, 올림?)
+    pub fn stat_fx_id(k: u8, up: bool) -> u8 {
+        let (down, upn) = match k {
+            0 | 2 => (39, 34),
+            1 => (40, 35),
+            3 => (41, 36),
+            _ => (42, 37),
+        };
+        if up { upn } else { down }
+    }
+
     pub fn start_side(&mut self, side: Side) {
         let idx: Vec<usize> = self.alive(side).collect();
         for i in idx {
@@ -1275,6 +1316,8 @@ impl Battle {
                 let c = if bit == status::CONFUSE && cure != 100 { (cure - 15).max(10) } else { cure };
                 if self.rand(100) < c {
                     self.units[i].status &= !bit;
+                    // 회복 연출 (원작 FUN_0045ca55(..., 6, 0x80|비트, 1) → MEFF 44)
+                    self.queue_status_fx(i, 44);
                 }
             }
             // 독 피해 (원작 FUN_0044ffb8): 최대 HP/10 (최소 1), 1 은 남김
