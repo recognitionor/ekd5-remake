@@ -18,7 +18,7 @@
     width: min(calc(100vw - var(--bar) - env(safe-area-inset-left) - env(safe-area-inset-right)),
                calc((100vh - 22px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) * 4 / 3)); }
   #bar { width: var(--bar); height: 100%; display: flex; flex-direction: column; justify-content: center; gap: 10px; align-items: center; }
-  #bar button { width: 54px; height: 54px; border-radius: 14px; border: 1px solid var(--btn-bd);
+  #bar button { width: 54px; height: 48px; border-radius: 14px; border: 1px solid var(--btn-bd);
     background: var(--btn-bg); color: var(--fg); font-size: 13px; font-weight: 600; line-height: 1.15; padding: 0; touch-action: manipulation; }
   #bar button:active, #bar button.on { background: rgba(255,255,255,.32); }
   /* 명성 게이지 (원작 상태줄: 가로 200×8, MARK 무늬) */
@@ -26,7 +26,7 @@
   #fame { display: flex; align-items: center; gap: 8px; font-size: 12px; height: 14px; }
   #fameCv { width: 200px; height: 10px; image-rendering: pixelated; background: #000; border: 1px solid var(--btn-bd); }
   #fame.blink #fameCv { opacity: .45; }
-  #bar #cancel { height: 72px; background: rgba(220,80,80,.25); border-color: rgba(255,120,120,.5); }
+  #bar #cancel { height: 60px; background: rgba(220,80,80,.25); border-color: rgba(255,120,120,.5); }
   #movie { display: none; position: fixed; inset: 0; z-index: 10; width: 100%; height: 100%; background: #000; object-fit: contain; }
   #movie.on { display: block; }
   #status { pointer-events: none; position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 15px; text-align: center;
@@ -44,6 +44,7 @@
     <canvas id="screen" width="640" height="480"></canvas>
   </div>
   <div id="bar">
+    <button id="fast">빨리<br>▶▶</button>
     <button id="map">지도</button>
     <button id="cancel">취소</button>
     <button id="skip">넘기기</button>

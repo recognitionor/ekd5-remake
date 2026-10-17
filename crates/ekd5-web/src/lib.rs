@@ -153,6 +153,12 @@ pub extern "C" fn toggle_minimap() -> i32 {
     })
 }
 
+/// 대사 대기 중 (빨리 감기)
+#[no_mangle]
+pub extern "C" fn waiting_text() -> i32 {
+    with(|app| app.engine.waiting_text() as i32)
+}
+
 /// 명성 게이지 색 (out 에 72 바이트)
 #[no_mangle]
 pub extern "C" fn gauge_colors() -> *const u8 {

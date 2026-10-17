@@ -2522,6 +2522,11 @@ impl<A: Assets> Engine<A> {
         out
     }
 
+    /// 대사·자막을 넘기길 기다리는 중인가 (빨리 감기용)
+    pub fn waiting_text(&self) -> bool {
+        matches!(self.wait, Wait::Dialog | Wait::Key)
+    }
+
     /// 웹: 동영상 끝
     pub fn movie_done(&mut self) {
         if self.wait == Wait::Movie {

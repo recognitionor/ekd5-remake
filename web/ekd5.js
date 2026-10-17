@@ -94,6 +94,14 @@
     b.addEventListener("pointerup", up); b.addEventListener("pointercancel", up); b.addEventListener("pointerleave", up);
   }
   holdBtn("cancel", KEY.CANCEL);
+  // 빨리 감기: 4배 속도 + 대사·자막 자동 넘김 (선택지·전투 조작은 그대로)
+  let fast = false, fastTick = 0;
+  try { fast = localStorage.getItem("ekd5-fast") === "1"; } catch (_) {}
+  const fastBtn = document.getElementById("fast");
+  fastBtn.classList.toggle("on", fast);
+  const toggleFast = () => { fast = !fast; fastBtn.classList.toggle("on", fast); try { localStorage.setItem("ekd5-fast", fast ? "1" : "0"); } catch (_) {} };
+  fastBtn.addEventListener("click", (e) => { e.preventDefault(); toggleFast(); });
+  addEventListener("keydown", (e) => { if (e.code === "KeyF") toggleFast(); });
   // 전체 지도 (원작 미니맵 창)
   const mapBtn = document.getElementById("map");
   const toggleMap = () => { const on = w.toggle_minimap(); mapBtn.classList.toggle("on", !!on); };
@@ -141,7 +149,7 @@
   // 채움 0x00 (16 미만이면 0x40), 나머지 0xC0 (85 이상이면 0x40). 바뀔 때 다섯 번에 나눠 깜빡이며 움직임
   const fameEl = document.getElementById("fame"), fameCv = document.getElementById("fameCv"), fameNum = document.getElementById("fameNum");
   const fctx = fameCv.getContext("2d");
-  let fameShown = -1, fameStep = 0, fameDrawn = -2, gcol = null;
+  let fameShown = -1, fameStep = 0, fameDrawn = -2, gcol = null, gcolAge = 0;
   function drawFame(v) {
     if (!gcol || gcol.length < 72) { const p = w.gauge_colors(); const n = w.out_len(); if (n >= 72) gcol = mem().slice(p, p + 72); else return; }
     const row = (k, y) => `rgb(${gcol[k * 24 + y * 3]},${gcol[k * 24 + y * 3 + 1]},${gcol[k * 24 + y * 3 + 2]})`;
@@ -157,6 +165,8 @@
       if (++fameStep >= 3) { fameStep = 0; fameShown += Math.sign(v - fameShown) * Math.max(1, Math.ceil(Math.abs(v - fameShown) / 5)); }
       fameEl.classList.toggle("blink", Math.floor(performance.now() / 120) % 2 === 0);
     } else fameEl.classList.remove("blink");
+    // 장면마다 팔레트가 바뀌니 색을 가끔 새로 받음
+    if (++gcolAge > 30) { gcolAge = 0; gcol = null; fameDrawn = -2; }
     if (fameDrawn !== fameShown || !gcol) { drawFame(fameShown); fameDrawn = fameShown; }
     fameNum.textContent = fameShown;
   }
@@ -167,7 +177,10 @@
     const pulseBits = pulseTicks > 0 ? pulse : 0;
     if (pulseTicks > 0) pulseTicks--;
     const m = mouse || [0, 0];
-    w.tick(held | pulseBits | ptrDown, m[0], m[1], mouse ? 1 : 0, click);
+    // 빨리 감기 중 대사 대기면 8틱마다 결정 키
+    let auto = 0;
+    if (fast && w.waiting_text()) { if (++fastTick >= 8) { fastTick = 0; auto = KEY.DECIDE; } } else fastTick = 0;
+    w.tick(held | pulseBits | ptrDown | auto, m[0], m[1], mouse ? 1 : 0, click);
     click = 0;
     updateFame(w.fame());
     const req = readOut(w.take_requests());
@@ -189,7 +202,7 @@
   function loop(now) {
     if (started) {
       acc += Math.min(250, now - last);
-      while (acc >= TICK_MS) { step(); acc -= TICK_MS; }
+      while (acc >= TICK_MS) { for (let k = fast ? 4 : 1; k > 0; k--) step(); acc -= TICK_MS; }
       const p = w.frame();
       img.data.set(mem().subarray(p, p + 640 * 480 * 4)); ctx.putImageData(img, 0, 0);
       // 브라우저는 첫 터치 전엔 소리를 못 냄 → 그동안 작은 안내만
