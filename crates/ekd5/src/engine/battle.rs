@@ -15,7 +15,7 @@ use std::rc::Rc;
 
 pub const CELL: i32 = 48;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Side {
     Player,
     Ally,
@@ -37,7 +37,7 @@ impl Side {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Unit {
     pub person: usize,
     pub side: Side,
@@ -67,9 +67,12 @@ pub struct Unit {
     /// AI 3·5 의 대상 장수
     pub ai_person: Option<usize>,
     pub ai_target: Option<(i32, i32)>,
+    #[serde(skip)]
     pub sprite: Option<Rc<Pic>>,
     /// 공격 그림 (UNIT_ATK 64×64×12: 아래 0-3, 위 4-7, 옆 8-11), 특수 (UNIT_SPC 48×48×5: 막기 0-2, 맞음 3, 승리 4)
+    #[serde(skip)]
     pub atk: Option<Rc<Pic>>,
+    #[serde(skip)]
     pub spc: Option<Rc<Pic>>,
     pub sprite_idx: usize,
     pub pose: Option<u8>,
@@ -216,6 +219,8 @@ pub struct Battle {
     pub fx_queue: VecDeque<(u8, Vec<(i32, i32)>, Option<FxEffect>)>,
     /// 지금 재생 중인 연출이 끝나면 적용할 변화
     pub fx_after: Option<FxEffect>,
+    /// 중간 저장에서 되살릴 지형·겹침
+    pub restore_terrain: Option<(Vec<u8>, Vec<u8>)>,
     /// 직업 이름 (JOBS.TXT)
     pub job_names: Rc<Vec<String>>,
     /// 이번 공격 전 공격자 경험치 (부대, 경험치, 레벨)
@@ -371,6 +376,7 @@ impl Battle {
             cast_nums: Vec::new(),
             fx_queue: VecDeque::new(),
             fx_after: None,
+            restore_terrain: None,
             job_names: Rc::new(Vec::new()),
             atk_exp: None,
             ai_plan: None,

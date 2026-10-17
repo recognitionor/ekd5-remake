@@ -4,7 +4,7 @@
 //! DATA.E5[1] 아이템 25바이트: 0..16 이름, +17 종류, +18 특수 종류, +19 가격, +20 그림, +21 기본치, +22 특수치, +23 성장치, +24 구분.
 //! DATA.E5[3] 직업 27바이트: +0 이동력, +1 공격 범위 종류, +2..6 능력 성장 등급, +7 HP 등급, +8 MP 등급, +9.. 장비 가능.
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Officer {
     pub person: usize,
     pub job: u8,

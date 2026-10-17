@@ -118,10 +118,33 @@
   // ---------- 회차 공통 기록 (엔딩·보물도감) ----------
   try { const c = localStorage.getItem("ekd5-common"); if (c) withStr(c, (p, n) => w.set_common(p, n)); } catch (_) {}
 
+  // ---------- 중간 저장 (그 화면 그대로: 전투 중 내 차례·본진 메뉴) ----------
+  const toastEl = document.getElementById("toast");
+  let toastTimer = 0;
+  function toast(t) { toastEl.textContent = t; toastEl.style.display = "block"; clearTimeout(toastTimer); toastTimer = setTimeout(() => toastEl.style.display = "none", 1800); }
+  document.getElementById("save").addEventListener("click", (e) => {
+    e.preventDefault();
+    const s = readOut(w.quick_save());
+    if (!s) { toast("지금은 저장할 수 없습니다 (전투 중 내 차례 · 본진에서 저장)"); return; }
+    try { localStorage.setItem("ekd5-quick", s); localStorage.setItem("ekd5-quick-time", new Date().toLocaleString("ko-KR")); toast("저장했습니다"); }
+    catch (_) { toast("저장 실패 (브라우저 저장소)"); }
+  });
+  let quickDone = false;
+  try {
+    const q = localStorage.getItem("ekd5-quick");
+    if (q) {
+      const when = localStorage.getItem("ekd5-quick-time") || "";
+      let stage = "?"; try { stage = JSON.parse(q).stage; } catch (_) {}
+      if (confirm(`중간 저장(${stage}단계, ${when})에서 이어서 할까요?\n취소를 누르면 다른 저장/처음부터를 고릅니다.`)) {
+        quickDone = !!withStr(q, (p, n) => w.quick_restore(p, n));
+      }
+    }
+  } catch (_) {}
+
   // ---------- 이어하기 ----------
   let save = null;
   try { save = localStorage.getItem("ekd5-save"); } catch (_) {}
-  if (save && !/^[123];0;/.test(save)) {
+  if (!quickDone && save && !/^[123];0;/.test(save)) {
     const stage = save.split(";")[1];
     const ok = confirm(`저장된 진행(${stage}단계)이 있습니다. 이어서 할까요?\n취소를 누르면 처음부터 시작합니다.`);
     if (ok) withStr(save, (p, n) => w.restore(p, n));

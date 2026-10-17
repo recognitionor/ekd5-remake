@@ -7,6 +7,7 @@ pub mod camp;
 pub mod duel;
 pub mod fx;
 pub mod icons;
+pub mod quick;
 pub mod tutor;
 pub mod screen;
 pub mod story;
@@ -183,6 +184,17 @@ pub struct Engine<A: Assets> {
     pub job_names: Rc<Vec<String>>,
     /// 불러 둔 MCALL 번호 (op6b)
     mcall_loaded: Option<u8>,
+    /// 불러올 중간 저장
+    quick: Option<quick::QuickSave>,
+    /// 지금 배경음악 (중간 저장용)
+    music_now: Option<i32>,
+    /// 불러온 뒤 열 본진 절
+    pending_camp: Option<usize>,
+    /// 마지막 이야기 장면 그림 (op27 방식, 값) — 중간 저장용
+    pub last_map: Option<(i32, i32)>,
+    /// 불러온 뒤 다시 그릴 장면 그림
+    pending_map: Option<(i32, i32)>,
+    pending_actors: Vec<(usize, u16, i32, i32, i32, i32)>,
     icons_loaded: bool,
     /// 동영상을 보여줄 수 있는 환경 (웹)
     pub movies: bool,
@@ -257,6 +269,12 @@ impl<A: Assets> Engine<A> {
             minimap_on: false,
             job_names: Rc::new(Vec::new()),
             mcall_loaded: None,
+            quick: None,
+            music_now: None,
+            pending_camp: None,
+            last_map: None,
+            pending_map: None,
+            pending_actors: Vec::new(),
             icons_loaded: false,
             movies: false,
             logo_shown: false,
@@ -528,6 +546,10 @@ impl<A: Assets> Engine<A> {
                     }
                     return;
                 }
+                // 중간 저장에서: 장면 그림·인물 다시 놓기
+                if self.restore_story() {
+                    return;
+                }
                 if self.camp.is_some() && self.update_camp() {
                     return;
                 }
@@ -568,9 +590,11 @@ impl<A: Assets> Engine<A> {
                     self.end_checked = false;
                     self.log.push(format!("단계 {n}: {name}"));
                     self.note_treasures();
-                    self.save_out = Some(self.snapshot());
+                    if self.quick.is_none() {
+                        self.save_out = Some(self.snapshot());
+                    }
                     let mut vm = Vm::new(Rc::new(s));
-                    if n % 2 == 1 {
+                    if n % 2 == 1 && self.quick.is_none() {
                         match &self.saved {
                             Some((f, r, o, inv, g)) => {
                                 self.flags = f.clone();
@@ -593,10 +617,15 @@ impl<A: Assets> Engine<A> {
                     } else if !matches!(self.scene, Scene::Story(_)) {
                         self.scene = Scene::Story(Box::default());
                     }
-                    if let Err(e) = self.start_section(&mut vm, 0) {
-                        self.error = Some(e.0);
+                    if !self.apply_quick(&mut vm) {
+                        if let Err(e) = self.start_section(&mut vm, 0) {
+                            self.error = Some(e.0);
+                        }
                     }
                     self.vm = Some(vm);
+                    if let Some(sec) = self.pending_camp.take() {
+                        self.open_camp(sec);
+                    }
                     true
                 }
             },
@@ -956,7 +985,8 @@ impl<A: Assets> Engine<A> {
             }
             0x24 => {
                 let n = a(0);
-                self.sounds.push(Sound::Music(if n == 0xFF { None } else { Some(n + 2) }));
+                self.music_now = if n == 0xFF { None } else { Some(n + 2) };
+                self.sounds.push(Sound::Music(self.music_now));
             }
             0x23 => {
                 // 효과음 (원작 FUN_00476c2d / FUN_0047699d): 번호 <100 SEnn, 100.. SE_M_nn, 200.. SE_E_nn.
@@ -991,6 +1021,7 @@ impl<A: Assets> Engine<A> {
                             if let Some(p) = pal {
                                 self.screen.pal = p;
                             }
+                            self.last_map = Some((mode, v));
                         }
                     }
                 }
@@ -1621,6 +1652,13 @@ impl<A: Assets> Engine<A> {
                 _ => return false,
             };
             b.set_map(&img, &hex);
+            // 중간 저장에서: 바뀐 지형·겹침과 성문 그림 되살리기
+            if let Some((t, o)) = b.restore_terrain.take() {
+                b.terrain = t;
+                b.overlay = o;
+                let gates: Vec<(usize, i32, i32)> = b.objs.iter().filter(|o| o.2 >= 4).map(|o| (o.2 as usize * 2 - 8, o.0, o.1)).collect();
+                b.gate_queue.extend(gates);
+            }
             self.screen.pal = palette::from_bytes(&pal);
             let p = &self.screen.pal;
             b.col = [
@@ -2225,6 +2263,14 @@ impl<A: Assets> Engine<A> {
             // 적·우군 차례, 차례 표시 중에도 끌기
             if matches!(b.phase, battle::Phase::Ai { .. } | battle::Phase::TurnBanner { .. } | battle::Phase::Attack { .. } | battle::Phase::Cast { .. }) {
                 b.drag_input(&inp0);
+            }
+        }
+        // 시험 자동 진행: 내 차례 대기면 AI 에게
+        if self.autoplay {
+            if let Some(b) = self.battle() {
+                if b.phase == battle::Phase::PlayerIdle {
+                    b.phase = battle::Phase::Ai { side: battle::Side::Player, idx: 0, stage: 0 };
+                }
             }
         }
         // 쓰러진 부대: 사건(사망 대사 등)이 먼저 처리된 뒤 남은 부대만 퇴각

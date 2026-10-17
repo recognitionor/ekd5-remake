@@ -20,6 +20,8 @@ pub struct Page {
 
 pub struct Actor {
     pub id: usize,
+    /// 그림 번호 (PMAPOBJ)
+    pub sprite: u16,
     pub x: f32,
     pub y: f32,
     pub dir: i32,
@@ -155,7 +157,7 @@ impl Story {
             }
         };
         self.actors.retain(|a| a.id != id);
-        self.actors.push(Actor { id, x: x as f32, y: y as f32, dir: dir & 3, pose: pose.clamp(0, 19), target: None, end_dir: dir & 3, step: 0, images });
+        self.actors.push(Actor { id, x: x as f32, y: y as f32, dir: dir & 3, pose: pose.clamp(0, 19), target: None, end_dir: dir & 3, step: 0, sprite, images });
         Ok(())
     }
 

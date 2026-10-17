@@ -193,6 +193,12 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
         eng.restore(&r);
     }
     let snap = std::env::var("EKD5_SNAP").is_ok();
+    // 시험: 중간 저장 불러오기 (EKD5_QLOAD=파일), 그 틱에 중간 저장 (EKD5_QSAVE=틱:파일)
+    if let Ok(f) = std::env::var("EKD5_QLOAD") {
+        let s = fs::read_to_string(&f).unwrap();
+        println!("중간 저장 불러오기 {}", eng.quick_restore(&s));
+    }
+    let qsave: Option<(u32, String)> = std::env::var("EKD5_QSAVE").ok().and_then(|v| { let (a, b) = v.split_once(':')?; Some((a.parse().ok()?, b.to_string())) });
     // 시험: 시작 플래그 (EKD5_FLAGS="0,100")
     for f in std::env::var("EKD5_FLAGS").unwrap_or_default().split(',').filter_map(|v| v.parse::<usize>().ok()) {
         if f < eng.flags.len() {
@@ -226,7 +232,20 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
                 }
             }
         }
+        if let Some(e) = std::env::var("EKD5_AUTOPLAY_END").ok().and_then(|v| v.parse::<u32>().ok()) {
+            if t == e {
+                eng.autoplay = false;
+            }
+        }
         eng.tick();
+        if let Some((qt, qf)) = &qsave {
+            if t >= *qt && !Path::new(qf).exists() {
+                if let Some(s) = eng.quick_save() {
+                    fs::write(qf, s).unwrap();
+                    println!("[{t:>6}] 중간 저장 → {qf}");
+                }
+            }
+        }
         if let Some(sv) = eng.save_out.take() {
             if snap && !sv.is_empty() {
                 println!("[{t:>6}] SNAP {sv}");

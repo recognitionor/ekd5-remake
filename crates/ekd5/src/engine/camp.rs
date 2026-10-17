@@ -8,7 +8,7 @@ use super::ui::{ListBox, Pick};
 use super::{key, Engine, Scene};
 use crate::officer::{item_name, item_stat};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SortieRule {
     pub max: usize,
     pub forced: Vec<usize>,

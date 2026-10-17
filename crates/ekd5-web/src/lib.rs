@@ -153,6 +153,24 @@ pub extern "C" fn toggle_minimap() -> i32 {
     })
 }
 
+/// 중간 저장: out 에 JSON (저장할 수 없으면 길이 0)
+#[no_mangle]
+pub extern "C" fn quick_save() -> *const u8 {
+    with(|app| {
+        app.out = app.engine.quick_save().unwrap_or_default().into_bytes();
+        app.out.as_ptr()
+    })
+}
+
+/// 중간 저장 불러오기 (제목 화면 전에). 성공 1
+/// # Safety
+/// 유효한 UTF-8 포인터
+#[no_mangle]
+pub unsafe extern "C" fn quick_restore(ptr: *const u8, len: usize) -> i32 {
+    let s = str_at(ptr, len);
+    with(|app| app.engine.quick_restore(&s) as i32)
+}
+
 /// 대사 대기 중 (빨리 감기)
 #[no_mangle]
 pub extern "C" fn waiting_text() -> i32 {
