@@ -103,6 +103,8 @@ pub enum Phase {
     ToolList { unit: usize, from: (i32, i32), list: Vec<usize> },
     ToolTarget { unit: usize, from: (i32, i32), inv: usize, cells: Vec<(i32, i32)> },
     Ai { side: Side, idx: usize, stage: u8 },
+    /// 원작 전투 메뉴 (0 메뉴, 1 장수 일람, 2 소유 아이템, 3 지형 정보, 4 승리 조건) — 목록과 줄별 부대
+    Sys { kind: u8, list: Box<super::ui::ListBox>, units: Vec<usize> },
     TurnBanner { t: u32, side: Side },
     Over { won: bool, t: u32 },
 }
@@ -221,6 +223,14 @@ pub struct Battle {
     pub fx_after: Option<FxEffect>,
     /// 중간 저장에서 되살릴 지형·겹침
     pub restore_terrain: Option<(Vec<u8>, Vec<u8>)>,
+    /// 승리 조건 글 (op19)
+    pub victory_text: String,
+    /// 지형 이름 (TERRAIN.TXT, 원작 0x494120)
+    pub terrain_names: Rc<Vec<String>>,
+    /// 메뉴 열기 요청 (웹 버튼)
+    pub open_menu: bool,
+    /// 마지막 화면 팔레트 (아이콘 색 맞춤용)
+    pub pal_cache: crate::palette::Palette,
     /// 직업 이름 (JOBS.TXT)
     pub job_names: Rc<Vec<String>>,
     /// 이번 공격 전 공격자 경험치 (부대, 경험치, 레벨)
@@ -377,6 +387,10 @@ impl Battle {
             fx_queue: VecDeque::new(),
             fx_after: None,
             restore_terrain: None,
+            victory_text: String::new(),
+            terrain_names: Rc::new(Vec::new()),
+            open_menu: false,
+            pal_cache: [[0; 3]; 256],
             job_names: Rc::new(Vec::new()),
             atk_exp: None,
             ai_plan: None,
@@ -1852,10 +1866,10 @@ impl Battle {
         }
         match self.phase.clone() {
             Phase::PlayerIdle => {
-                // 위쪽 띠 오른쪽 [턴 종료]
-                let end_tap = tapped.is_some() && inp.mouse.is_some_and(|(mx, my)| my < 26 && mx > 500);
-                if end_tap {
-                    self.end_player_turn();
+                // 위쪽 띠 오른쪽 [메뉴] (원작 메뉴 막대) 또는 웹 메뉴 버튼
+                let menu_tap = tapped.is_some() && inp.mouse.is_some_and(|(mx, my)| my < 26 && mx > 540);
+                if menu_tap || std::mem::take(&mut self.open_menu) {
+                    self.phase = self.sys_menu();
                 } else if let Some(c) = tapped {
                     if let Some(u) = self.at(c.0, c.1) {
                         if self.units[u].side == Side::Player && !self.units[u].acted {
@@ -1865,6 +1879,51 @@ impl Battle {
                             self.info_unit = Some((u, 120));
                         }
                     }
+                }
+            }
+            Phase::Sys { kind, mut list, units } => {
+                let tap_any = tapped.is_some() || inp.pressed & key::DECIDE != 0;
+                match list.update(inp, tap_any) {
+                    super::ui::Pick::Cancel => {
+                        self.phase = if kind == 0 { Phase::PlayerIdle } else { self.sys_menu() };
+                    }
+                    super::ui::Pick::Row(k) if kind == 0 => {
+                        self.phase = match k {
+                            0 => self.sys_units(),
+                            1 => self.sys_items(),
+                            2 => self.sys_terrain(),
+                            3 => self.sys_victory(),
+                            4 => {
+                                // 미실행 부대 검색: 다음 행동 안 한 조조군 부대로
+                                let list: Vec<usize> = self.alive(Side::Player).filter(|&i| !self.units[i].acted).collect();
+                                let cur = self.at(self.cursor.0, self.cursor.1);
+                                let next = list.iter().copied().find(|&i| Some(i) > cur).or(list.first().copied());
+                                if let Some(i) = next {
+                                    let (x, y) = (self.units[i].x, self.units[i].y);
+                                    self.cursor = (x, y);
+                                    self.focus(x, y);
+                                    self.info_unit = Some((i, 90));
+                                }
+                                Phase::PlayerIdle
+                            }
+                            5 => {
+                                self.end_player_turn();
+                                return true;
+                            }
+                            _ => Phase::PlayerIdle,
+                        };
+                    }
+                    super::ui::Pick::Row(k) if kind == 1 => {
+                        // 장수 일람에서 고르면 그 부대로
+                        if let Some(&i) = units.get(k) {
+                            let (x, y) = (self.units[i].x, self.units[i].y);
+                            self.cursor = (x, y);
+                            self.focus(x, y);
+                            self.info_unit = Some((i, 90));
+                        }
+                        self.phase = Phase::PlayerIdle;
+                    }
+                    _ => self.phase = Phase::Sys { kind, list, units },
                 }
             }
             Phase::Selected { unit, cells } => {
@@ -2454,6 +2513,7 @@ impl Battle {
     }
 
     pub fn render(&mut self, scr: &mut Screen, font: Option<&Font>, tick: u32) {
+        self.pal_cache = scr.pal;
         scr.clear(0);
         if let Some(m) = &self.map {
             scr.blit_rect(m, self.cam.0, self.cam.1, 640, 480, 0, 0, None);
@@ -2686,8 +2746,8 @@ impl Battle {
         if !self.objective.is_empty() {
             draw_text(scr, f, 200, 4, &self.objective, story::NAME);
         }
-        if matches!(self.phase, Phase::PlayerIdle) {
-            draw_text(scr, f, 540, 4, "[턴 종료]", story::NAME);
+        if matches!(self.phase, Phase::PlayerIdle | Phase::Sys { .. }) {
+            draw_text(scr, f, 568, 4, "[메뉴]", story::NAME);
         }
         // 선택된 부대 정보
         let sel = match &self.phase {
@@ -2817,6 +2877,11 @@ impl Battle {
             }
             d.render(scr, self.col[6], self.col[5], tick);
         }
+        // 전투 메뉴
+        if let Phase::Sys { list, .. } = &self.phase {
+            let hi = crate::palette::nearest(&scr.pal, [208, 176, 112]);
+            list.render(scr, f, hi);
+        }
         self.ui.render_overlay(scr, Some(f), tick);
     }
 
@@ -2840,6 +2905,101 @@ impl Battle {
                 }
             }
         }
+    }
+
+    /// 원작 전투 메뉴 (리소스 메뉴: 장수 일람·소유 아이템 일람·지형 정보 일람·승리 조건·미실행 부대 검색·턴 종료)
+    fn sys_menu(&self) -> Phase {
+        let mut l = super::ui::ListBox::new("메뉴", 240);
+        l.y = 80;
+        for t in ["장수 일람", "소유 아이템 일람", "지형 정보 일람", "승리 조건", "미실행 부대 검색", "턴 종료"] {
+            l.push(t, "", true);
+        }
+        Phase::Sys { kind: 0, list: Box::new(l), units: Vec::new() }
+    }
+
+    fn sys_units(&self) -> Phase {
+        let mut l = super::ui::ListBox::new("장수 일람", 520);
+        l.y = 20;
+        l.visible = 15;
+        let mut units = Vec::new();
+        for side in [Side::Player, Side::Ally, Side::Enemy] {
+            for i in self.alive(side) {
+                let u = &self.units[i];
+                let name = self.names.get(u.person).cloned().unwrap_or_default();
+                let job = self.job_names.get(u.job as usize).cloned().unwrap_or_default();
+                let tag = match side {
+                    Side::Player => if u.acted { "아군 ·" } else { "아군" },
+                    Side::Ally => "우군",
+                    Side::Enemy => "적군",
+                };
+                l.push(format!("{tag} {name}"), format!("{job} Lv{:2} HP{:3}/{:3} MP{:3}", u.level, u.hp, u.max_hp, u.mp), true);
+                units.push(i);
+            }
+        }
+        l.footer = "고르면 그 장수로 이동".into();
+        Phase::Sys { kind: 1, list: Box::new(l), units }
+    }
+
+    fn sys_items(&self) -> Phase {
+        let mut l = super::ui::ListBox::new("소유 아이템 일람", 420);
+        l.y = 30;
+        let mut ids = Vec::new();
+        for &(it, lv) in &self.inventory {
+            let s = crate::officer::item_stat(&self.items, it).map_or(String::new(), |_| format!("Lv{lv}"));
+            l.push(crate::officer::item_name(&self.items, it), s, false);
+            ids.push(it);
+        }
+        if ids.is_empty() {
+            l.push("(없음)", "", false);
+        }
+        l.icons = ids.iter().map(|&i| self.icons.item(&self.items, i, &self.pal_cache)).collect();
+        Phase::Sys { kind: 2, list: Box::new(l), units: Vec::new() }
+    }
+
+    fn sys_terrain(&self) -> Phase {
+        // 이 맵에 있는 지형마다: 조조군 장수들(직업이 다른) 기준 지형 효과·이동 비용
+        let mut l = super::ui::ListBox::new("지형 정보 일람", 560);
+        l.y = 20;
+        l.visible = 14;
+        let mut seen: Vec<u8> = self.terrain.clone();
+        seen.sort();
+        seen.dedup();
+        let mut jobs: Vec<(String, u8)> = Vec::new();
+        for i in self.alive(Side::Player) {
+            let j = self.units[i].job;
+            if !jobs.iter().any(|x| x.1 / 3 == j / 3) && jobs.len() < 3 {
+                jobs.push((self.job_names.get(j as usize).cloned().unwrap_or_default(), j));
+            }
+        }
+        let head: Vec<String> = jobs.iter().map(|j| j.0.clone()).collect();
+        l.title = format!("지형 정보 일람   {}", head.join(" / "));
+        for t in seen {
+            let name = self.terrain_names.get(t as usize).cloned().unwrap_or_else(|| format!("지형{t}"));
+            let cols: Vec<String> = jobs
+                .iter()
+                .map(|(_, j)| {
+                    let row = Self::move_row(*j);
+                    let eff = self.terrain_tab.get(row * 60 + (t as usize).min(29)).map_or(0, |&v| v as i32 * 10);
+                    match self.terrain_tab.get(row * 60 + 30 + (t as usize).min(29)) {
+                        Some(&0xFF) | None => format!("{eff:3}% ×"),
+                        Some(&c) => format!("{eff:3}% {c}"),
+                    }
+                })
+                .collect();
+            l.push(name, cols.join("  "), false);
+        }
+        l.footer = "효과 % · 이동 비용 (× 못 감)".into();
+        Phase::Sys { kind: 3, list: Box::new(l), units: Vec::new() }
+    }
+
+    fn sys_victory(&self) -> Phase {
+        let mut l = super::ui::ListBox::new("승리 조건", 460);
+        l.y = 60;
+        let t = if self.victory_text.is_empty() { self.objective.clone() } else { self.victory_text.clone() };
+        for line in t.split('\n') {
+            l.push(line.to_string(), "", false);
+        }
+        Phase::Sys { kind: 4, list: Box::new(l), units: Vec::new() }
     }
 
     /// 피해·회복 창 (원작 FUN_00452964: 우군·적 4×2칸 — 이름 색 0xAD/0xAC, HP·MP /

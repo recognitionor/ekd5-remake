@@ -171,6 +171,12 @@ pub unsafe extern "C" fn quick_restore(ptr: *const u8, len: usize) -> i32 {
     with(|app| app.engine.quick_restore(&s) as i32)
 }
 
+/// 전투 메뉴 열기
+#[no_mangle]
+pub extern "C" fn open_menu() {
+    with(|app| app.engine.open_menu())
+}
+
 /// 대사 대기 중 (빨리 감기)
 #[no_mangle]
 pub extern "C" fn waiting_text() -> i32 {

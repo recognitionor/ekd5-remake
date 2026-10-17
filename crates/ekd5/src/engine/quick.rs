@@ -199,6 +199,7 @@ impl<A: Assets> Engine<A> {
             b.icons = self.icons.clone();
             b.names = std::rc::Rc::new(self.persons.iter().map(|p| p.name.clone()).collect());
             b.job_names = self.job_names.clone();
+            b.terrain_names = self.terrain_names.clone();
             b.units = bs.units;
             for u in &mut b.units {
                 u.px = (u.x * battle::CELL) as f32;

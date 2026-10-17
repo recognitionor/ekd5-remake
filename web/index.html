@@ -27,11 +27,11 @@
     height: min(var(--vh), calc((var(--vw) - var(--bar) - var(--side)) * 3 / 4)); }
   /* 꽉 채우기: 비율을 늘여 남는 곳 없이 */
   body.fill #screen { width: calc(var(--vw) - var(--bar) - var(--side)); height: var(--vh); }
-  #bar { width: var(--bar); height: 100%; display: flex; flex-direction: column; justify-content: center; gap: 6px; align-items: center; }
-  #bar button { width: 54px; height: 42px; border-radius: 12px; border: 1px solid var(--btn-bd);
+  #bar { width: var(--bar); height: 100%; display: flex; flex-direction: column; justify-content: center; gap: 4px; align-items: center; }
+  #bar button { width: 54px; height: 38px; border-radius: 12px; border: 1px solid var(--btn-bd);
     background: var(--btn-bg); color: var(--fg); font-size: 12px; font-weight: 600; line-height: 1.15; padding: 0; touch-action: manipulation; }
   #bar button:active, #bar button.on { background: rgba(255,255,255,.32); }
-  #bar #cancel { height: 56px; background: rgba(220,80,80,.25); border-color: rgba(255,120,120,.5); }
+  #bar #cancel { height: 48px; background: rgba(220,80,80,.25); border-color: rgba(255,120,120,.5); }
   /* 명성 게이지 (원작 상태줄 200×8, MARK 무늬) — 왼쪽에 세로로 */
   #fame { width: var(--side); height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; font-size: 11px; }
   #fameBox { width: 12px; height: 204px; position: relative; }
@@ -57,6 +57,7 @@
   <canvas id="screen" width="640" height="480"></canvas>
   <div id="bar">
     <button id="fast">빨리<br>▶▶</button>
+    <button id="menu">메뉴</button>
     <button id="save">저장</button>
     <button id="map">지도</button>
     <button id="cancel">취소</button>

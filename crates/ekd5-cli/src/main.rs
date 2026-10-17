@@ -42,6 +42,20 @@ const TUTOR: &[(&str, &[(u32, u16)])] = &[
     ("bye", &[(0x496c90, 0x9d)]),
 ];
 
+/// 지형 이름: 파일 위치 0x94120 부터 4바이트 정렬된 C 문자열 30개 (평지·초원·숲 …)
+fn terrain_names(exe: &[u8]) -> String {
+    let mut o = 0x94120;
+    let mut out = Vec::new();
+    while out.len() < 30 && o < exe.len() {
+        let e = exe[o..].iter().position(|&b| b == 0).unwrap_or(0);
+        if e > 0 {
+            out.push(encoding_rs::EUC_KR.decode(&exe[o..o + e]).0.to_string());
+        }
+        o = (o + e + 1 + 3) & !3;
+    }
+    out.join("\n")
+}
+
 /// 직업 이름 (원작 표 0x496200: u32 주소 × 53)
 fn job_names(exe: &[u8]) -> String {
     let u16at = |o: usize| u16::from_le_bytes([exe[o], exe[o + 1]]) as usize;
@@ -173,6 +187,9 @@ fn extract(src: &Path, dst: &Path) {
         // 직업 이름 표 (원작 0x496200 의 문자열 주소 53개) → JOBS.TXT
         fs::write(dst.join("JOBS.TXT"), job_names(&exe)).unwrap();
         names.push("JOBS.TXT".into());
+        // 지형 이름 30개 (원작 0x494120 부터 이어진 문자열, 4바이트 정렬) → TERRAIN.TXT
+        fs::write(dst.join("TERRAIN.TXT"), terrain_names(&exe)).unwrap();
+        names.push("TERRAIN.TXT".into());
     }
     names.sort();
     fs::write(dst.join("index.txt"), names.join("\n")).unwrap();

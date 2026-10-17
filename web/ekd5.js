@@ -94,6 +94,8 @@
     b.addEventListener("pointerup", up); b.addEventListener("pointercancel", up); b.addEventListener("pointerleave", up);
   }
   holdBtn("cancel", KEY.CANCEL);
+  // 전투 메뉴 (원작 메뉴 막대: 장수·아이템·지형 일람, 승리 조건, 미실행 부대 검색, 턴 종료)
+  document.getElementById("menu").addEventListener("click", (e) => { e.preventDefault(); w.open_menu(); });
   // 화면 맞춤: 비율 유지 ↔ 꽉 채우기 (기억)
   const fitBtn = document.getElementById("fit");
   let fill = false;

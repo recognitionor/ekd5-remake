@@ -22,6 +22,12 @@ pub struct ListBox {
     pub icons: Vec<Option<std::rc::Rc<Pic>>>,
 }
 
+impl PartialEq for ListBox {
+    fn eq(&self, o: &Self) -> bool {
+        self.title == o.title && self.rows == o.rows && self.sel == o.sel && self.top == o.top
+    }
+}
+
 pub const ROW: i32 = 24;
 
 /// 결과

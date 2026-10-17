@@ -182,6 +182,8 @@ pub struct Engine<A: Assets> {
     pub minimap_on: bool,
     /// 직업 이름 (JOBS.TXT, 원작 표 0x496200)
     pub job_names: Rc<Vec<String>>,
+    /// 지형 이름 (TERRAIN.TXT)
+    pub terrain_names: Rc<Vec<String>>,
     /// 불러 둔 MCALL 번호 (op6b)
     mcall_loaded: Option<u8>,
     /// 불러올 중간 저장
@@ -268,6 +270,7 @@ impl<A: Assets> Engine<A> {
             icons: Rc::new(icons::Icons::default()),
             minimap_on: false,
             job_names: Rc::new(Vec::new()),
+            terrain_names: Rc::new(Vec::new()),
             mcall_loaded: None,
             quick: None,
             music_now: None,
@@ -337,9 +340,12 @@ impl<A: Assets> Engine<A> {
             }
         }
         if !self.icons_loaded {
-            match (self.assets.get("ICONS.BIN"), self.assets.get("JOBS.TXT")) {
-                (Asset::Pending, _) | (_, Asset::Pending) => return false,
-                (i, j) => {
+            match (self.assets.get("ICONS.BIN"), self.assets.get("JOBS.TXT"), self.assets.get("TERRAIN.TXT")) {
+                (Asset::Pending, _, _) | (_, Asset::Pending, _) | (_, _, Asset::Pending) => return false,
+                (i, j, tn) => {
+                    if let Asset::Ready(d) = tn {
+                        self.terrain_names = Rc::new(String::from_utf8_lossy(&d).lines().map(|l| l.to_string()).collect());
+                    }
                     if let Asset::Ready(d) = i {
                         self.icons = Rc::new(icons::Icons::parse(&d));
                     }
@@ -610,6 +616,7 @@ impl<A: Assets> Engine<A> {
                         b.icons = self.icons.clone();
                         b.names = Rc::new(self.persons.iter().map(|p| p.name.clone()).collect());
                         b.job_names = self.job_names.clone();
+                        b.terrain_names = self.terrain_names.clone();
                         b.items = self.items.clone();
                         b.strategies = self.strategies.clone();
                         b.inventory = self.inventory.clone();
@@ -1101,6 +1108,11 @@ impl<A: Assets> Engine<A> {
             0x16 | 0x19 => {
                 // 해설 창 (원작 FUN_0042fa65(글, 0xffff): 가운데 352×144). 19 = 전투 승패 조건
                 let (t, _, _) = encoding_rs::EUC_KR.decode(args[0].bytes());
+                if op == 0x19 {
+                    if let Scene::Battle(b) = &mut self.scene {
+                        b.victory_text = t.to_string();
+                    }
+                }
                 if let Some(st) = self.ui() {
                     let lines: Vec<String> = t.split('\n').filter(|l| !l.is_empty()).map(|l| l.to_string()).collect();
                     st.pages = lines.chunks(6).map(|c| story::Page { person: None, face: None, name: String::new(), lines: c.to_vec() }).collect();
@@ -2588,6 +2600,13 @@ impl<A: Assets> Engine<A> {
             }
         }
         out
+    }
+
+    /// 전투 메뉴 열기 (웹 버튼)
+    pub fn open_menu(&mut self) {
+        if let Scene::Battle(b) = &mut self.scene {
+            b.open_menu = true;
+        }
     }
 
     /// 대사·자막을 넘기길 기다리는 중인가 (빨리 감기용)
