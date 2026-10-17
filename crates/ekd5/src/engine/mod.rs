@@ -1135,8 +1135,10 @@ impl<A: Assets> Engine<A> {
                             b.focus(x, y);
                         }
                         b.ui.speaker_y = Some(y * battle::CELL - b.cam.1 + 24);
+                        b.ui.speaker_cell = Some((x, y));
                     } else {
                         b.ui.speaker_y = None;
+                        b.ui.speaker_cell = None;
                     }
                 }
                 let (packs, assets) = (&mut self.packs, &mut self.assets);
@@ -1387,9 +1389,13 @@ impl<A: Assets> Engine<A> {
                                 b.focus(x, y);
                             }
                             b.ui.speaker_y = Some(y * battle::CELL - b.cam.1 + 24);
+                            b.ui.speaker_cell = Some((x, y));
                             b.ui.narration = false;
                         }
-                        None => b.ui.narration = true,
+                        None => {
+                            b.ui.speaker_cell = None;
+                            b.ui.narration = true;
+                        }
                     }
                     if b.ui.show_dialog(packs, assets, pages).is_err() {
                         vm.pc = at;
@@ -1623,6 +1629,7 @@ impl<A: Assets> Engine<A> {
                 if let Some(b) = self.battle() {
                     b.duel = None;
                     b.ui.speaker_y = None;
+                    b.ui.speaker_cell = None;
                 }
             }
             0x61 => {}
@@ -1662,6 +1669,7 @@ impl<A: Assets> Engine<A> {
                     if let Scene::Battle(b) = &mut self.scene {
                         // 왼쪽(0) 장수 말은 위, 오른쪽(1) 은 아래
                         b.ui.speaker_y = Some(if side == 0 { 400 } else { 60 });
+                        b.ui.speaker_cell = None;
                         if b.ui.show_dialog(packs, assets, pages).is_err() {
                             vm.pc = at;
                             return Ok(false);
@@ -1725,7 +1733,8 @@ impl<A: Assets> Engine<A> {
             self.screen.pal = palette::from_bytes(&pal);
             let p = &self.screen.pal;
             b.col = [
-                palette::nearest(p, [40, 90, 255]),
+                // 이동 범위: 원작 FUN_00453d9d 팔레트 0x3C (아군 부대) 바둑판, 칸 테두리 없음
+                0x3C,
                 palette::nearest(p, [255, 40, 40]),
                 palette::nearest(p, [80, 160, 255]),
                 palette::nearest(p, [255, 60, 40]),
@@ -1748,6 +1757,8 @@ impl<A: Assets> Engine<A> {
                 Asset::Pending => return false,
                 Asset::Ready(d) => {
                     b.mark = d.clone();
+                    let tile = |o: usize| d.get(o..o + 256).map(|t| t.to_vec()).unwrap_or_default();
+                    b.ui.arrows = Some(Rc::new((tile(0x194C0), tile(0x193C0))));
                     b.mark_tiles = [0x8BC0, 0x94C0, 0x9DC0, 0xA6C0, 0xAFC0, 0xB8C0, 0x1B2E0, 0x1BBE0]
                         .iter()
                         .map(|&o| Pic::new(48, 48, d.get(o..o + 2304).map(|t| t.to_vec()).unwrap_or_default()))

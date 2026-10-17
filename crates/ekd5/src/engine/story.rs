@@ -59,6 +59,12 @@ pub struct Story {
     pub card: Option<String>,
     /// 전투 중 말하는 부대의 화면 y (창 위치 결정)
     pub speaker_y: Option<i32>,
+    /// 전투 중 말하는 부대의 칸 — 창을 그 옆에 붙이고 화살표로 가리킴 (원작 FUN_0042efde)
+    pub speaker_cell: Option<(i32, i32)>,
+    /// 전투 화면 위치 (전투가 그릴 때 넣어 줌)
+    pub cam: (i32, i32),
+    /// 말풍선 화살표 16×16 (MARK.E5 0x194C0 세로, 0x193C0 가로)
+    pub arrows: Option<Rc<(Vec<u8>, Vec<u8>)>>,
 }
 
 impl Default for Story {
@@ -85,6 +91,9 @@ impl Default for Story {
             title_timer: 0,
             card: None,
             speaker_y: None,
+            speaker_cell: None,
+            cam: (0, 0),
+            arrows: None,
         }
     }
 }
@@ -367,11 +376,45 @@ impl Story {
         }
     }
 
+    /// 전투 말풍선 자리 (원작 FUN_0042efde): 창 (x, y), 화살표 (x, y, 방향 0 아래쪽 창/1 왼쪽 창/2 위쪽 창/3 오른쪽 창)
+    /// 화면 13×10 칸 기준. 부대가 왼쪽·오른쪽 끝 2칸이면 옆에, 아니면 위·아래에 붙임
+    fn bubble_pos(&self) -> Option<(i32, i32, i32, i32, u8)> {
+        let (cx, cy) = self.speaker_cell?;
+        let (sx, sy) = (cx * 48 - self.cam.0, cy * 48 - self.cam.1);
+        let (vw, vh) = (640, 480);
+        if !(0..vw).contains(&sx) || !(0..vh).contains(&sy) {
+            return None;
+        }
+        let (cols, half_rows) = (vw / 48, vh / 48 / 2);
+        if sx < 2 * 48 || sx >= (cols - 2) * 48 {
+            let (bx, ax, dir) = if sx < 2 * 48 { (sx + 48 + 16, sx + 48, 3) } else { (sx - 0x1d0, sx - 16, 1) };
+            let by = if sy < half_rows * 48 { sy + 8 } else { sy + 48 - 0x68 };
+            Some((bx, by, ax, sy + 16, dir))
+        } else {
+            let bx = if sx < 0xd0 {
+                sx - 48 + 8
+            } else if sx + 48 + 0xd0 < vw {
+                sx - 0xc0
+            } else {
+                (cols - 1) * 48 - 0x1c8
+            };
+            if sy < half_rows * 48 {
+                Some((bx, sy + 48 + 16, sx + 16, sy + 48, 0))
+            } else {
+                Some((bx, sy - 0x70, sx + 16, sy - 16, 2))
+            }
+        }
+    }
+
     fn draw_window(&self, scr: &mut Screen, f: &Font, p: &Page, tick: u32) {
         // 원작: 448×96, 왼쪽 x=16 (얼굴 왼쪽) / 오른쪽 x=176 (얼굴 오른쪽). 말하는 인물이 위쪽이면 창은 아래 (y=318), 아니면 위 (y=56)
-        let speaker_low = if let Some(y) = self.speaker_y { y > 240 } else { p.person.and_then(|id| self.actors.iter().find(|a| a.id == id)).map(|a| self.screen_pos(a.x, a.y).1 > 240).unwrap_or(false) };
-        let y = if speaker_low { 56 } else { 318 };
-        let x = if self.left { 16 } else { 176 };
+        // 이야기 장면 기준 (원작 FUN_0042b0c8 → 인물 +0x20 = 발 − 64, 그림 위끝): 위끝 > (480 − 40) / 2 = 220 이면 아래쪽 인물
+        let speaker_low = if let Some(y) = self.speaker_y { y > 240 } else { p.person.and_then(|id| self.actors.iter().find(|a| a.id == id)).map(|a| self.screen_pos(a.x, a.y).1 - 64 > 220).unwrap_or(false) };
+        let bubble = self.bubble_pos();
+        let (x, y) = match bubble {
+            Some((bx, by, ..)) => (bx, by),
+            None => (if self.left { 16 } else { 176 }, if speaker_low { 56 } else { 318 }),
+        };
         frame_box(scr, x, y, 448, 96);
         let (fx, tx) = if self.left { (x + 8, x + 0x70) } else { (x + 0x178, x + 0x20) };
         if let Some(face) = &self.face {
@@ -384,6 +427,23 @@ impl Story {
         // 다음 표시
         if (tick / 8) % 2 == 0 {
             scr.fill(x + 448 - 20, y + 96 - 14, 8, 6, 251);
+        }
+        // 말풍선 화살표 (세로 그림: 2 그대로·0 위아래 뒤집기 / 가로 그림: 3 그대로·1 좌우 뒤집기)
+        if let (Some((_, _, ax, ay, dir)), Some(ar)) = (bubble, &self.arrows) {
+            let src = if dir % 2 == 0 { &ar.0 } else { &ar.1 };
+            for yy in 0..16 {
+                for xx in 0..16 {
+                    let (u, v) = match dir {
+                        0 => (xx, 15 - yy),
+                        1 => (15 - xx, yy),
+                        _ => (xx, yy),
+                    };
+                    let c = src.get((v * 16 + u) as usize).copied().unwrap_or(0);
+                    if c != 0 {
+                        scr.fill(ax + xx, ay + yy, 1, 1, c);
+                    }
+                }
+            }
         }
     }
 }

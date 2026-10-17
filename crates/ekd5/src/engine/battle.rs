@@ -2882,6 +2882,7 @@ impl Battle {
             let hi = crate::palette::nearest(&scr.pal, [208, 176, 112]);
             list.render(scr, f, hi);
         }
+        self.ui.cam = self.cam;
         self.ui.render_overlay(scr, Some(f), tick);
     }
 

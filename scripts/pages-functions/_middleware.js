@@ -109,6 +109,7 @@ export async function onRequest({ request, env, next }) {
   const res = await next();
   // 인증된 응답이 공유 캐시에 남지 않도록
   const out = new Response(res.body, res);
-  out.headers.set("Cache-Control", "private, no-store");
+  // 게임 자료(data/)는 이 기기 브라우저에만 하루 보관 (매번 다시 받지 않게). 페이지·스크립트는 항상 최신
+  out.headers.set("Cache-Control", url.pathname.startsWith("/data/") ? "private, max-age=86400" : "private, no-store");
   return out;
 }

@@ -153,6 +153,7 @@ impl<A: Assets> Engine<A> {
                     let st = match &mut self.scene {
                         Scene::Battle(b) => {
                             b.ui.speaker_y = None;
+                            b.ui.speaker_cell = None;
                             Some(&mut b.ui)
                         }
                         Scene::Story(s) => Some(&mut **s),

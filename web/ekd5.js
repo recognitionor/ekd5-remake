@@ -41,16 +41,38 @@
   }
 
   // ---------- 소리 ----------
-  let audioOk = false;
+  // 효과음은 Web Audio: 파일마다 한 번만 받아 풀어 두고 바로 재생 (매번 new Audio 로 받으면 늦고 버벅임)
+  let audioOk = false, actx = null;
+  const sfx = new Map();
+  function sfxBuffer(name) {
+    let p = sfx.get(name);
+    if (!p) {
+      p = fetch(DATA + name).then((r) => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); })
+        .then((b) => new Promise((ok, no) => actx.decodeAudioData(b, ok, no)));
+      p.catch(() => sfx.delete(name));
+      sfx.set(name, p);
+    }
+    return p;
+  }
+  function sfxPlay(name, vol, loop) {
+    const h = { src: null, stopped: false, stop() { this.stopped = true; if (this.src) try { this.src.stop(); } catch (_) {} } };
+    sfxBuffer(name).then((buf) => {
+      if (h.stopped) return;
+      const g = actx.createGain(); g.gain.value = vol; g.connect(actx.destination);
+      const s = actx.createBufferSource(); s.buffer = buf; s.loop = !!loop; s.connect(g); s.start();
+      h.src = s;
+    }).catch(() => {});
+    return h;
+  }
   function playWav(name, vol = 1) {
-    if (!audioOk) return;
-    const a = new Audio(DATA + name); a.volume = vol; a.play().catch(() => {});
+    if (!audioOk || !actx) return;
+    sfxPlay(name, vol, false);
   }
   // 반복 효과음 (원작 op23 방식 0) 과 배경음악 (원작 CD 트랙 → data/BGMnn.m4a, 반복)
   let loopFx = null, bgm = null, bgmTrack = -1, bgmWant = -1;
   function setLoop(name) {
-    if (loopFx) { loopFx.pause(); loopFx = null; }
-    if (name && audioOk) { loopFx = new Audio(DATA + name); loopFx.loop = true; loopFx.volume = 0.6; loopFx.play().catch(() => {}); }
+    if (loopFx) { loopFx.stop(); loopFx = null; }
+    if (name && audioOk && actx) loopFx = sfxPlay(name, 0.6, true);
   }
   function setMusic(n) {
     bgmWant = n;
@@ -63,7 +85,14 @@
     }
   }
   // 브라우저는 첫 터치 전에는 소리를 못 냄 → 터치하면 그때 원하던 음악 시작
-  const unlockAudio = () => { if (!audioOk) { audioOk = true; if (bgmWant >= 0) setMusic(bgmWant); } };
+  // 아이폰: 무음 스위치와 상관없이 소리 (Web Audio 는 기본이 무음 스위치를 따름)
+  try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (_) {}
+  // 아이폰은 AudioContext 도 터치 안에서 만들거나 다시 깨워야 소리가 남
+  const unlockAudio = () => {
+    if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {} }
+    if (actx && actx.state !== "running") actx.resume().catch(() => {});
+    if (!audioOk) { audioOk = true; if (bgmWant >= 0) setMusic(bgmWant); }
+  };
 
   // ---------- 입력 ----------
   let held = 0, mouse = null, click = 0, pulse = 0, pulseTicks = 0, started = true;
@@ -89,6 +118,7 @@
   }
   // 터치는 손을 뗄 때(pointerup)에야 '사용자 동작'으로 인정됨
   canvas.addEventListener("pointerup", tryAutoFull);
+  addEventListener("touchend", () => { if (actx && actx.state !== "running") actx.resume().catch(() => {}); }, { capture: true });
   addEventListener("touchend", tryAutoFull, { capture: true });
   addEventListener("click", tryAutoFull, { capture: true });
   canvas.addEventListener("pointerdown", (e) => {
