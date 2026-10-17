@@ -1599,8 +1599,9 @@ impl Battle {
         }
         let mut se = Vec::new();
         for un in &mut self.units {
-            if let Some((m, t)) = un.motion {
-                un.motion = (t > 1).then_some((m, t - 1));
+            // 움직이거나 공격·피격 자세가 되면 다시 그려짐 → 동작 자세 풀림
+            if un.motion.is_some() && (!un.path.is_empty() || un.pose.is_some()) {
+                un.motion = None;
             }
             if let Some((k, t)) = un.leave {
                 let end = match k {
@@ -2421,7 +2422,7 @@ impl Battle {
                 draw_frame(scr, atk, 64, k, sx - 8, sy - 8, u.dir == 3);
             } else if let (Some(9), Some(spc)) = (u.pose, &u.spc) {
                 draw_frame(scr, spc, 48, 3, sx, sy, u.dir == 3);
-            } else if let (Some((m, _)), None, None) = (u.motion, u.pose, u.leave) {
+            } else if let (Some((m, _)), None, None | Some((0, _))) = (u.motion, u.pose, u.leave) {
                 // 스크립트 동작 (원작 FUN_0045976f): 1 승리 SPC4, 2 방어 SPC0-2, 3·10 맞음 SPC3, 4 무릎 MOV9,
                 // 5 공격 준비 ATK 첫 장, 6·7 공격 ATK, 8 옆걸음 MOV4-5, 9 지침 MOV9-10, 11 옆 서기 MOV8
                 let side = u.dir >= 2;

@@ -1946,6 +1946,7 @@ impl<A: Assets> Engine<A> {
                 if let Some(u) = b.unit_of(a(0) as usize) {
                     let m = a(1);
                     // 걸리는 틱 (원작 대기 수): 9 = 2장 × 6번 × 8, 6·7 공격 4장, 8·10·12 짧은 반복, 그 외 한 장
+                    // 연출 길이 (스크립트 대기). 그림은 원작처럼 다시 그릴 때까지 남음
                     let dur = match m {
                         9 => 48,
                         6 | 7 => 16,
@@ -1954,7 +1955,7 @@ impl<A: Assets> Engine<A> {
                         _ => 8,
                     };
                     b.units[u].pose = None;
-                    b.units[u].motion = (1..=12).contains(&m).then_some((m as u8, dur));
+                    b.units[u].motion = (1..=12).contains(&m).then_some((m as u8, u32::MAX));
                     let se = match m {
                         0 => None,
                         6 | 7 => Some("SE07.WAV"),
@@ -2206,6 +2207,10 @@ impl<A: Assets> Engine<A> {
             battle::Phase::Script => {}
             battle::Phase::TurnBanner { t, side } => {
                 if t == 0 {
+                    // 차례가 바뀌면 원작은 맵 전체를 다시 그림 → 스크립트 동작 자세가 풀림
+                    for u in b.units.iter_mut() {
+                        u.motion = None;
+                    }
                     // 차례 시작: 그 진영 부대가 없으면 건너뜀
                     let has = b.alive(side).next().is_some();
                     if !has && side != battle::Side::Player {
