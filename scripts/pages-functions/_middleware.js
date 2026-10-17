@@ -1,7 +1,7 @@
 // 사이트 전체 비밀번호 잠금. 원본 게임 파일이 공개되지 않도록 모든 요청에 적용.
 // 비밀번호는 Cloudflare secret `SITE_PASSWORD` (wrangler pages secret put SITE_PASSWORD)
 // secret이 없으면 무조건 거부 (fail closed).
-// 로그인 방법: ① 로그인 화면에서 비밀번호 한 번 입력 → 1년 쿠키 (아이폰 홈 화면 앱에서도 됨)
+// 로그인 방법: ⓪ 전용 링크 /?k=토큰 (입력 없음) ① 로그인 화면에서 비밀번호 한 번 입력 → 쿠키 (아이폰 홈 화면 앱에서도 됨)
 //              ② HTTP Basic Auth (ekd5 / 비밀번호) — 예전 방식, 시험 도구용
 const USER = "ekd5";
 const COOKIE = "ekd5_auth";
@@ -55,7 +55,21 @@ export async function onRequest({ request, env, next }) {
       status: 303,
       headers: {
         Location: "/",
-        "Set-Cookie": `${COOKIE}=${good}; Path=/; Max-Age=31536000; HttpOnly; Secure; SameSite=Lax`,
+        "Set-Cookie": `${COOKIE}=${good}; Path=/; Max-Age=315360000; HttpOnly; Secure; SameSite=Lax`,
+        "Cache-Control": "no-store",
+      },
+    });
+  }
+
+  // 전용 링크 (?k=토큰): 열면 바로 들어가고 기억 — 입력 없음
+  const k = url.searchParams.get("k");
+  if (k && safeEqual(k, good)) {
+    url.searchParams.delete("k");
+    return new Response(null, {
+      status: 303,
+      headers: {
+        Location: url.pathname + url.search,
+        "Set-Cookie": `${COOKIE}=${good}; Path=/; Max-Age=315360000; HttpOnly; Secure; SameSite=Lax`,
         "Cache-Control": "no-store",
       },
     });
@@ -82,6 +96,14 @@ export async function onRequest({ request, env, next }) {
     // 페이지 요청이면 로그인 화면, 파일 요청이면 401 (브라우저 기본 로그인 창은 더 이상 띄우지 않음)
     const wantsHtml = (request.headers.get("Accept") || "").includes("text/html");
     return wantsHtml ? loginPage("") : new Response("로그인이 필요합니다.", { status: 401, headers: { "Cache-Control": "no-store" } });
+  }
+
+  // 홈 화면 앱 설정: 시작 주소에 전용 링크를 넣어, 앱이 저장소를 따로 써도 바로 들어가게
+  if (url.pathname.endsWith("/manifest.webmanifest")) {
+    const res = await next();
+    const j = await res.json();
+    j.start_url = "/?k=" + good;
+    return new Response(JSON.stringify(j), { headers: { "Content-Type": "application/manifest+json", "Cache-Control": "private, no-store" } });
   }
 
   const res = await next();
