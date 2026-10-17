@@ -1852,11 +1852,56 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x4D => {
-                // 체력 지정 (…, 백분율)
-                if let Some(u) = b.unit_of(a(1) as usize) {
-                    let pct = a(11).clamp(1, 100);
-                    let un = &mut b.units[u];
-                    un.hp = un.max_hp * pct / 100;
+                // 부대 상태 바꾸기 (원작 FUN_004174fe → FUN_0045ca55 / FUN_0045cdde):
+                // 0 방식(0 인물, 1 목록 번호, 2 영역), 1 인물, 2 목록 번호, 3..6 x1 y1 x2 y2, 7 진영,
+                // 8 능력 종류(0..4, FFFF 없음), 9 정도(0 내림·1 보통·2 올림), 10 상태이상 비트(0x80 = 풀기), 11 HP 깎기, 12 MP 깎기
+                let (mode, x1, y1, x2, y2, side) = (a(0), a(3), a(4), a(5), a(6), a(7));
+                let pick: Vec<usize> = (0..b.units.len())
+                    .filter(|&i| {
+                        let u = &b.units[i];
+                        if !u.visible || u.hp <= 0 {
+                            return false;
+                        }
+                        match mode {
+                            1 => b.list47.get(a(2) as usize) == Some(&u.person),
+                            2 => {
+                                let in_side = match side {
+                                    0 => u.side == battle::Side::Player,
+                                    1 => u.side == battle::Side::Ally,
+                                    2 | 3 | 5 => u.side == battle::Side::Enemy,
+                                    4 => u.side != battle::Side::Enemy,
+                                    _ => true,
+                                };
+                                in_side && (x1..=x2).contains(&u.x) && (y1..=y2).contains(&u.y)
+                            }
+                            _ => u.person == a(1) as usize,
+                        }
+                    })
+                    .collect();
+                let (stat, lvl, st, hp, mp) = (a(8), a(9), a(10), a(11), a(12));
+                for i in pick {
+                    let un = &mut b.units[i];
+                    if stat != 0xFFFF && (0..5).contains(&stat) {
+                        un.state[stat as usize] = match lvl {
+                            0 => 1,
+                            2 => 5,
+                            _ => 3,
+                        };
+                    }
+                    if st != 0xFFFF && st != 0 {
+                        if st & 0x80 == 0 {
+                            un.status |= st as u8;
+                        } else {
+                            un.status &= !(st as u8 & 0x7F);
+                        }
+                    }
+                    // HP·MP 는 그만큼 깎되 1 은 남김 (값은 바이트)
+                    if hp != 0 {
+                        un.hp = (un.hp - (hp & 0xFF)).max(1);
+                    }
+                    if mp != 0 {
+                        un.mp = (un.mp - (mp & 0xFF)).max(1);
+                    }
                 }
             }
             0x4E => {
