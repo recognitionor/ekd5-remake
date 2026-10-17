@@ -104,6 +104,8 @@ pub enum Scene {
     Battle(Box<battle::Battle>),
     /// 엔딩 뒤
     End { t: u32 },
+    /// 게임 오버 (원작 FUN_0042e65c: LOGO.E5[7] + SE40) 뒤 고르기 (0 다시, 1 제목)
+    Over { pic: Option<Pic>, t: u32, sel: usize },
 }
 
 /// 스크립트 대기 상태
@@ -513,6 +515,54 @@ impl<A: Assets> Engine<A> {
                     self.fame = 0;
                 }
             }
+            Scene::Over { pic, t, sel } => {
+                if pic.is_none() {
+                    let p = self.packs.get(&mut self.assets, "LOGO.E5", 7);
+                    let pal = self.packs.get(&mut self.assets, "LOGO_P.E5", 2);
+                    if let (Ok(Some(p)), Ok(Some(pal))) = (p, pal) {
+                        self.screen.pal = palette::from_bytes(&pal);
+                        *pic = Some(Pic::new(640, 400, p));
+                    }
+                    return;
+                }
+                *t += 1;
+                let inp = self.input.clone();
+                if inp.pressed & (key::UP | key::DOWN | key::LEFT | key::RIGHT) != 0 {
+                    *sel ^= 1;
+                }
+                let mut pick = None;
+                if *t > 40 {
+                    if let (Some((mx, my)), true) = (inp.mouse, inp.click) {
+                        if my >= 440 {
+                            pick = Some(if mx < 320 { 0 } else { 1 });
+                        }
+                    } else if inp.pressed & key::DECIDE != 0 {
+                        pick = Some(*sel);
+                    }
+                }
+                match pick {
+                    // 이 전투 다시 (단계 시작 값으로)
+                    Some(0) => {
+                        self.scene = Scene::Story(Box::default());
+                        self.vm = None;
+                        self.screen.level = 16;
+                    }
+                    // 제목으로 (원작은 제목 → 불러오기)
+                    Some(_) => {
+                        self.scene = Scene::Boot;
+                        self.logo_shown = true;
+                        self.vm = None;
+                        if let Some((f, r, o, i, g)) = self.saved.clone() {
+                            self.flags = f;
+                            self.roster = r;
+                            self.officers = o;
+                            self.inventory = i;
+                            self.gold = g;
+                        }
+                    }
+                    None => {}
+                }
+            }
             Scene::Story(_) | Scene::Battle(_) => {
                 if !self.load_base() {
                     return;
@@ -919,8 +969,9 @@ impl<A: Assets> Engine<A> {
                 return;
             }
             if self.stage % 2 == 1 && self.flag(1) {
-                // 패배 처리 스크립트(플래그 1) → 같은 전투 다시
+                // 패배 (플래그 1) → 원작 게임 오버 화면
                 self.log.push("전투 패배 — 다시".into());
+                self.game_over();
             } else {
                 self.commit_battle();
                 self.stage += 1;
@@ -2411,6 +2462,9 @@ impl<A: Assets> Engine<A> {
                     }
                     self.vm = None;
                     self.resume = None;
+                    if !won {
+                        self.game_over();
+                    }
                     return;
                 }
                 b.phase = battle::Phase::Over { won, t: t + 1 };
@@ -2506,6 +2560,25 @@ impl<A: Assets> Engine<A> {
             }
             Scene::Story(st) => st.render(scr, self.font.as_ref(), self.tick),
             Scene::Battle(b) => b.render(scr, self.font.as_ref(), self.tick),
+            Scene::Over { pic, t, sel } => {
+                scr.clear(0);
+                if let Some(p) = pic {
+                    scr.blit(p, 0, 40, None);
+                }
+                scr.level = (*t / 2).min(16) as u8;
+                if *t > 40 {
+                    if let Some(f) = &self.font {
+                        let hi = palette::nearest(&scr.pal, [255, 255, 255]);
+                        let lo = palette::nearest(&scr.pal, [120, 100, 80]);
+                        // 아래 검은 띠에 나란히
+                        for (k, s) in ["이 전투 다시 하기", "제목으로"].iter().enumerate() {
+                            let c = if *sel == k { hi } else { lo };
+                            let x = if k == 0 { 120 } else { 420 };
+                            story::draw_text(scr, f, x, 452, s, c);
+                        }
+                    }
+                }
+            }
             Scene::End { .. } => {
                 scr.clear(0);
                 scr.level = 16;
@@ -2600,6 +2673,16 @@ impl<A: Assets> Engine<A> {
             }
         }
         out
+    }
+
+    /// 게임 오버 (원작 FUN_0042e65c)
+    fn game_over(&mut self) {
+        self.sounds.push(Sound::Music(None));
+        self.sounds.push(Sound::EffectStop);
+        self.sounds.push(Sound::Effect("SE40.WAV".into()));
+        self.scene = Scene::Over { pic: None, t: 0, sel: 0 };
+        self.vm = None;
+        self.wait = Wait::None;
     }
 
     /// 전투 메뉴 열기 (웹 버튼)
