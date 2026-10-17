@@ -1930,6 +1930,9 @@ impl<A: Assets> Engine<A> {
                 if wait > 0 {
                     self.wait = Wait::Ticks(wait);
                 }
+                if std::env::var("EKD5_DUMP").is_ok() {
+                    self.log.push(format!("op{op:02x} {pid} kind{kind} wait{wait}"));
+                }
             }
             0x4F => {
                 // 방향 바꾸기 (인물, 대상 인물, …)
@@ -2163,6 +2166,12 @@ impl<A: Assets> Engine<A> {
             if matches!(b.phase, battle::Phase::Ai { .. } | battle::Phase::TurnBanner { .. } | battle::Phase::Attack { .. } | battle::Phase::Cast { .. }) {
                 b.drag_input(&inp0);
             }
+        }
+        // 쓰러진 부대: 사건(사망 대사 등)이 먼저 처리된 뒤 남은 부대만 퇴각
+        let w = self.battle().map_or(0, |b| b.retreat_fallen());
+        if w > 0 {
+            self.wait = Wait::Ticks(w);
+            return;
         }
         let inp = self.input.clone();
         let autoplay = self.autoplay;

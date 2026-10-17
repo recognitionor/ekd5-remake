@@ -25,6 +25,8 @@ pub struct Actor {
     pub dir: i32,
     pub pose: i32,
     pub target: Option<(f32, f32)>,
+    /// 다 걸은 뒤 바라볼 방향 (스크립트 지정)
+    pub end_dir: i32,
     pub step: u32,
     pub images: Rc<[Pic; 4]>,
 }
@@ -153,14 +155,14 @@ impl Story {
             }
         };
         self.actors.retain(|a| a.id != id);
-        self.actors.push(Actor { id, x: x as f32, y: y as f32, dir: dir & 3, pose: pose.clamp(0, 19), target: None, step: 0, images });
+        self.actors.push(Actor { id, x: x as f32, y: y as f32, dir: dir & 3, pose: pose.clamp(0, 19), target: None, end_dir: dir & 3, step: 0, images });
         Ok(())
     }
 
     pub fn walk(&mut self, id: usize, x: i32, y: i32, dir: i32) {
         if let Some(a) = self.actors.iter_mut().find(|a| a.id == id) {
             a.target = Some((x as f32, y as f32));
-            a.dir = dir & 3;
+            a.end_dir = dir & 3;
             a.pose = 0;
         }
     }
@@ -186,17 +188,22 @@ impl Story {
         const SPEED: f32 = 0.34;
         for a in &mut self.actors {
             if let Some((tx, ty)) = a.target {
+                // 원작은 칸 단위로 가로·세로 축을 따라 걷고, 걷는 쪽을 바라봄 (스크립트 통계: x+ 1, x− 3, y+ 2, y− 0).
+                // 다 걸으면 스크립트가 정한 방향으로 돌아섬
                 let (dx, dy) = (tx - a.x, ty - a.y);
-                let d = (dx * dx + dy * dy).sqrt();
                 a.step += 1;
-                if d <= SPEED {
+                if dx.abs() > 0.001 {
+                    a.dir = if dx > 0.0 { 1 } else { 3 };
+                    a.x += dx.signum() * SPEED.min(dx.abs());
+                } else if dy.abs() > 0.001 {
+                    a.dir = if dy > 0.0 { 2 } else { 0 };
+                    a.y += dy.signum() * SPEED.min(dy.abs());
+                } else {
                     a.x = tx;
                     a.y = ty;
                     a.target = None;
                     a.step = 0;
-                } else {
-                    a.x += dx / d * SPEED;
-                    a.y += dy / d * SPEED;
+                    a.dir = a.end_dir;
                 }
             }
         }

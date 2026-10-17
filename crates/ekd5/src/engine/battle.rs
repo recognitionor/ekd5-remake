@@ -199,6 +199,8 @@ pub struct Battle {
     info_unit: Option<(usize, u32)>,
     /// 피해·회복 창 (원작 FUN_00452964 / FUN_00452016)
     pub dmg_win: Option<DmgWin>,
+    /// 다음에 보여줄 창들 (책략이 여럿을 맞힐 때)
+    dmg_queue: VecDeque<DmgWin>,
     /// 직업 이름 (JOBS.TXT)
     pub job_names: Rc<Vec<String>>,
     /// 이번 공격 전 공격자 경험치 (부대, 경험치, 레벨)
@@ -350,6 +352,7 @@ impl Battle {
             show_minimap: false,
             info_unit: None,
             dmg_win: None,
+            dmg_queue: VecDeque::new(),
             job_names: Rc::new(Vec::new()),
             atk_exp: None,
             ai_plan: None,
@@ -1053,9 +1056,7 @@ impl Battle {
             };
             if dmg > 0 {
                 self.units[t].hp -= dmg;
-                if self.units[t].hp <= 0 {
-                    self.units[t].fade = 15;
-                }
+
                 if hostile {
                     // 맞은 쪽 방어구 경험치: 시전자 레벨이 낮으면 3, 아니면 4
                     let k = if self.units[u].level < self.units[t].level { 3 } else { 4 };
@@ -1139,34 +1140,37 @@ impl Battle {
                 self.cast_end = Some(t);
             }
         }
-        // 창이 다 보일 때까지
-        if self.dmg_win.as_ref().is_some_and(|w| w.t < 30) {
+        // 창이 다 보일 때까지 (여럿이면 차례로)
+        if self.dmg_win.as_ref().is_some_and(|w| w.t < 40) {
+            return false;
+        }
+        if let Some(n) = self.dmg_queue.pop_front() {
+            self.dmg_win = Some(n);
             return false;
         }
         self.dmg_win = None;
         self.units[u].pose = None;
         self.cast_fx.clear();
-        let mut fading = false;
-        for un in &mut self.units {
-            if un.visible && un.hp <= 0 {
-                fading = true;
-                un.fade = un.fade.saturating_sub(1);
-                if un.fade == 0 {
-                    un.visible = false;
-                }
-            }
-        }
-        !fading
+        // 쓰러진 부대는 사건 검사 뒤 퇴각 (retreat_fallen)
+        true
     }
 
     fn cast_apply(&mut self, u: usize, sid: u8, cell: (i32, i32)) {
         self.cast_applied = true;
         let before: Vec<(i32, i32)> = self.units.iter().map(|x| (x.hp, x.mp)).collect();
         let res = self.apply_strategy(u, sid, cell);
-        // 값이 바뀐 첫 부대의 창 (원작은 대상마다 차례로)
-        if let Some(i) = (0..self.units.len()).find(|&i| before.get(i).is_some_and(|b| *b != (self.units[i].hp, self.units[i].mp))) {
-            let un = &self.units[i];
-            self.dmg_win = Some(DmgWin { u: i, hp: (before[i].0, un.hp.max(0)), mp: (before[i].1, un.mp), ex: (un.off.exp as i32, un.off.exp as i32), t: 0 });
+        // 값이 바뀐 부대마다 창 (원작은 대상마다 차례로)
+        let changed: Vec<usize> = (0..self.units.len()).filter(|&i| before.get(i).is_some_and(|b| *b != (self.units[i].hp, self.units[i].mp))).collect();
+        if !changed.is_empty() {
+            for i in changed {
+                let un = &self.units[i];
+                self.dmg_queue.push_back(DmgWin { u: i, hp: (before[i].0, un.hp.max(0)), mp: (before[i].1, un.mp), ex: (un.off.exp as i32, un.off.exp as i32), t: 0 });
+            }
+            self.dmg_win = self.dmg_queue.pop_front();
+            // 효과 없음·빗나감 같은 글은 그대로 띄움
+            if let Some(((x, y), txt)) = res.iter().find(|(_, t)| !t.starts_with('-') && !t.chars().next().is_some_and(|c| c.is_ascii_digit())) {
+                self.popup = Some((x * CELL + 4 - self.cam.0, y * CELL - 8 - self.cam.1, txt.clone(), 30));
+            }
             return;
         }
         if let Some(((x, y), txt)) = res.first() {
@@ -2067,8 +2071,6 @@ impl Battle {
                         }
                         if self.units[y].hp <= 0 {
                             self.killed_by = Some(x);
-                            // 퇴각 소리 (원작 FUN_004438a5)
-                            self.sounds.push("SE16.WAV".into());
                         }
                         // 경험치
                         let killed = self.units[y].hp <= 0;
@@ -2095,14 +2097,13 @@ impl Battle {
                     self.popup = Some((vx * CELL + 8 - self.cam.0, vy * CELL - 8 - self.cam.1, text, 24));
                 }
             }
-            if st >= if self.dmg_win.is_some() { 30 } else { 18 } {
+            if st >= if self.dmg_win.is_some() { 40 } else { 18 } {
                 self.dmg_win = None;
                 self.units[x].pose = None;
                 self.units[y].pose = None;
                 self.strikes.pop_front();
                 self.strike_t = 0;
                 if self.units[y].hp <= 0 {
-                    self.units[y].fade = 15;
                     self.strikes.retain(|s| s.0 != y && s.1 != y);
                 }
             }
@@ -2130,18 +2131,29 @@ impl Battle {
                 return false;
             }
         }
-        // 퇴각 사라짐
-        let mut fading = false;
-        for u in &mut self.units {
-            if u.visible && u.hp <= 0 {
-                fading = true;
-                u.fade = u.fade.saturating_sub(1);
-                if u.fade == 0 {
-                    u.visible = false;
-                }
+        // 쓰러진 부대는 사건 검사 뒤 퇴각 (retreat_fallen)
+        true
+    }
+
+    /// 쓰러졌는데 스크립트가 따로 처리하지 않은 부대를 퇴각시킴 (원작: 사건 → 기본 퇴각 FUN_004438a5).
+    /// 반환: 걸리는 틱 (0 = 없음)
+    pub fn retreat_fallen(&mut self) -> u32 {
+        // 공격·책략 연출이 끝나고 사건 검사까지 지난 뒤에만
+        let busy = !self.strikes.is_empty()
+            || self.dmg_win.is_some()
+            || self.attack_target.is_some()
+            || matches!(self.phase, Phase::Attack { .. } | Phase::Cast { .. } | Phase::Ai { stage: 2 | 3, .. });
+        if busy {
+            return 0;
+        }
+        let mut w = 0;
+        for i in 0..self.units.len() {
+            let u = &self.units[i];
+            if u.visible && u.hp <= 0 && u.leave.is_none() {
+                w = w.max(self.start_leave(i, 0));
             }
         }
-        !fading
+        w
     }
 
     fn after_player_action(&mut self) {
@@ -2665,7 +2677,7 @@ impl Battle {
         let (ww, wh) = (192, if player { 144 } else { 96 });
         let (ux, uy) = (un.x * CELL - self.cam.0, un.y * CELL - self.cam.1);
         let wx = if ux + CELL + 8 + ww <= 640 { ux + CELL + 8 } else { (ux - ww - 8).max(0) };
-        let wy = uy.clamp(28, 480 - wh);
+        let wy = uy.clamp(60, 480 - wh);
         frame_box(scr, wx, wy, ww, wh);
         let nc = match un.side {
             Side::Player => 0x2A,
@@ -2674,9 +2686,20 @@ impl Battle {
         };
         let name = self.names.get(un.person).cloned().unwrap_or_default();
         draw_text(scr, f, wx + 8, wy + 8, &name, nc);
-        draw_text(scr, f, wx + 80, wy + 8, &format!("{}", un.level), story::TEXT);
+        draw_text(scr, f, wx + 96, wy + 8, &format!("Lv{}", un.level), story::TEXT);
         let job = self.job_names.get(un.job as usize).cloned().unwrap_or_default();
         draw_text(scr, f, wx + 120, wy + 8, &job, story::TEXT);
+        // 깎인·채워진 양 (크게, 빨강 = 피해, 초록 = 회복)
+        let dh = w.hp.1 - w.hp.0;
+        let dm = w.mp.1 - w.mp.0;
+        let delta = |d: i32| if d < 0 { (format!("{d}"), self.col[1]) } else { (format!("+{d}"), self.col[5]) };
+        if dh != 0 {
+            let (t, c) = delta(dh);
+            story::draw_text_big(scr, f, wx + ww - 16 - t.len() as i32 * 16, wy - 30, &t, 2, c, self.col[6]);
+        } else if dm != 0 {
+            let (t, c) = delta(dm);
+            story::draw_text_big(scr, f, wx + ww - 16 - (t.len() as i32 + 2) * 16, wy - 30, &format!("MP{t}"), 2, c, self.col[6]);
+        }
         let hp = w.at(w.hp);
         self.mark_pic(scr, 0x180, 24, 24, wx + 8, wy + 32);
         draw_text(scr, f, wx + 64, wy + 30, &format!("{hp:3}/{:3}", un.max_hp), story::TEXT);
