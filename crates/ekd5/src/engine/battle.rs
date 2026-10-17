@@ -2565,6 +2565,14 @@ impl Battle {
                 }
             }
         }
+        // 부대를 고르면 지금 자리에서 공격할 수 있는 칸에 빨간 테두리 칸 (원작 FUN_0043f6xx → FUN_004559bc(자리, 공격 범위 종류),
+        // 맵 그리기 FUN_0045416f 에서 DAT_004b9c20 칸마다 MARK 0xCC0 48×48)
+        if let Phase::Selected { unit, .. } = &self.phase {
+            let u = &self.units[*unit];
+            for (x, y) in self.attack_cells(*unit, (u.x, u.y)) {
+                self.mark_pic(scr, 0xCC0, 48, 48, x * CELL - self.cam.0, y * CELL - self.cam.1);
+            }
+        }
         // 색 바꾸기 표 (원작 FUN_00432a30 어둡게: 각 채널 −4 / FUN_00432aee 독: 빨강·파랑 −6, 초록 그대로; 4비트 단위)
         let tint = |pal: &crate::palette::Palette, dr: u8, dg: u8, db: u8| -> Vec<u8> {
             (0..256usize)

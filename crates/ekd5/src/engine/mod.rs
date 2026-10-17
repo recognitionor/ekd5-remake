@@ -1745,7 +1745,8 @@ impl<A: Assets> Engine<A> {
             b.col = [
                 // 이동 범위: 원작 FUN_00453d9d 팔레트 0x3C (아군 부대) 바둑판, 칸 테두리 없음
                 0x3C,
-                palette::nearest(p, [255, 40, 40]),
+                // 공격 대상 고르기: 원작 팔레트 0x28 바둑판 (FUN_0045416f 의 '(' )
+                0x28,
                 palette::nearest(p, [80, 160, 255]),
                 palette::nearest(p, [255, 60, 40]),
                 palette::nearest(p, [255, 255, 255]),
