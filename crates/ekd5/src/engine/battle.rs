@@ -1160,7 +1160,8 @@ impl Battle {
         let before: Vec<(i32, i32)> = self.units.iter().map(|x| (x.hp, x.mp)).collect();
         let res = self.apply_strategy(u, sid, cell);
         // 값이 바뀐 부대마다 창 (원작은 대상마다 차례로)
-        let changed: Vec<usize> = (0..self.units.len()).filter(|&i| before.get(i).is_some_and(|b| *b != (self.units[i].hp, self.units[i].mp))).collect();
+        // 시전자의 MP 소모는 창으로 안 띄움 (원작은 대상만)
+        let changed: Vec<usize> = (0..self.units.len()).filter(|&i| i != u && before.get(i).is_some_and(|b| *b != (self.units[i].hp, self.units[i].mp))).collect();
         if !changed.is_empty() {
             for i in changed {
                 let un = &self.units[i];
@@ -2675,7 +2676,8 @@ impl Battle {
     fn draw_dmg_win(&self, scr: &mut Screen, f: &Font, w: &DmgWin) {
         let un = &self.units[w.u];
         let player = un.side == Side::Player;
-        let (ww, wh) = (192, if player { 144 } else { 96 });
+        // 원작 창(192) 오른쪽에 깎인 양 칸을 덧붙임
+        let (ww, wh) = (272, if player { 144 } else { 96 });
         let (ux, uy) = (un.x * CELL - self.cam.0, un.y * CELL - self.cam.1);
         let wx = if ux + CELL + 8 + ww <= 640 { ux + CELL + 8 } else { (ux - ww - 8).max(0) };
         let wy = uy.clamp(60, 480 - wh);
@@ -2694,12 +2696,11 @@ impl Battle {
         let dh = w.hp.1 - w.hp.0;
         let dm = w.mp.1 - w.mp.0;
         let delta = |d: i32| if d < 0 { (format!("{d}"), self.col[1]) } else { (format!("+{d}"), self.col[5]) };
-        if dh != 0 {
-            let (t, c) = delta(dh);
-            story::draw_text_big(scr, f, wx + ww - 16 - t.len() as i32 * 16, wy - 30, &t, 2, c, self.col[6]);
-        } else if dm != 0 {
-            let (t, c) = delta(dm);
-            story::draw_text_big(scr, f, wx + ww - 16 - (t.len() as i32 + 2) * 16, wy - 30, &format!("MP{t}"), 2, c, self.col[6]);
+        // 숫자는 창 오른쪽 칸에 크게 (HP 줄 높이)
+        let big = if dh != 0 { Some(delta(dh)) } else if dm != 0 { let (t, c) = delta(dm); Some((format!("MP{t}"), c)) } else { None };
+        if let Some((t, c)) = big {
+            let tw = t.chars().count() as i32 * 16;
+            story::draw_text_big(scr, f, wx + ww - 12 - tw, wy + 40, &t, 2, c, self.col[6]);
         }
         let hp = w.at(w.hp);
         self.mark_pic(scr, 0x180, 24, 24, wx + 8, wy + 32);
