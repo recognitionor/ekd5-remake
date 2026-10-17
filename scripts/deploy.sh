@@ -6,4 +6,5 @@ cd "$(dirname "$0")/.."
 mkdir -p deploy/public
 rsync -a --delete --copy-links --exclude data web/ deploy/public/
 rsync -a --delete data/ deploy/public/data/
+date +%s > deploy/public/version.txt
 cd deploy && wrangler pages deploy --branch main --commit-dirty=true

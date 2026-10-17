@@ -171,6 +171,21 @@
     } catch (_) {}
   });
 
+  // ---------- 새 버전 알림 (홈 화면 앱은 새로고침 단추가 없음) ----------
+  // 배포 때 version.txt 가 바뀜. 앱으로 돌아올 때·10분마다 확인해서, 바뀌었으면 단추를 띄움 (누를 때만 새로고침 — 하던 게임은 먼저 저장)
+  const updBtn = document.getElementById("update");
+  let myVer = null;
+  async function checkVer() {
+    try {
+      const v = (await (await fetch("version.txt", { cache: "no-store" })).text()).trim();
+      if (myVer === null) myVer = v; else if (v && v !== myVer) updBtn.style.display = "block";
+    } catch (_) {}
+  }
+  checkVer();
+  setInterval(checkVer, 600000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) checkVer(); });
+  updBtn.addEventListener("click", () => location.reload());
+
   // ---------- 회차 공통 기록 (엔딩·보물도감) ----------
   try { const c = localStorage.getItem("ekd5-common"); if (c) withStr(c, (p, n) => w.set_common(p, n)); } catch (_) {}
 
