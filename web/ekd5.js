@@ -78,16 +78,21 @@
   canvas.addEventListener("pointermove", (e) => { mouse = toGame(e); });
   // 터치 기기에서 링크로 들어왔으면 첫 터치 때 자동 전체 화면 (브라우저는 사용자 동작이 있어야 허락)
   const standalone = matchMedia("(display-mode: fullscreen), (display-mode: standalone)").matches || navigator.standalone;
+  // 홈 화면 앱으로 실행했으면 전체화면 버튼 필요 없음 (전체 화면 API 의 fullscreen 과 구별하려고 시작 때 한 번만 판정)
+  if (standalone) document.getElementById("full").style.display = "none";
   let autoFull = !standalone && matchMedia("(pointer: coarse)").matches && !!document.documentElement.requestFullscreen;
   function tryAutoFull() {
     if (!autoFull || document.fullscreenElement) return;
-    autoFull = false;
     document.documentElement.requestFullscreen({ navigationUI: "hide" })
-      .then(() => screen.orientation && screen.orientation.lock && screen.orientation.lock("landscape").catch(() => {}))
+      .then(() => { autoFull = false; screen.orientation && screen.orientation.lock && screen.orientation.lock("landscape").catch(() => {}); })
       .catch(() => {});
   }
+  // 터치는 손을 뗄 때(pointerup)에야 '사용자 동작'으로 인정됨
+  canvas.addEventListener("pointerup", tryAutoFull);
+  addEventListener("touchend", tryAutoFull, { capture: true });
+  addEventListener("click", tryAutoFull, { capture: true });
   canvas.addEventListener("pointerdown", (e) => {
-    e.preventDefault(); unlockAudio(); started = true; tryAutoFull();
+    e.preventDefault(); unlockAudio(); started = true;
     mouse = toGame(e);
     try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
     if (e.button === 2) { pulse = KEY.CANCEL; pulseTicks = 3; } else { ptrDown = KEY.DECIDE; click = 1; pulse = KEY.DECIDE; pulseTicks = 2; }
