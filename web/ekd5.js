@@ -66,7 +66,7 @@
   const unlockAudio = () => { if (!audioOk) { audioOk = true; if (bgmWant >= 0) setMusic(bgmWant); } };
 
   // ---------- 입력 ----------
-  let held = 0, mouse = null, click = 0, pulse = 0, pulseTicks = 0, started = false;
+  let held = 0, mouse = null, click = 0, pulse = 0, pulseTicks = 0, started = true;
   addEventListener("keydown", (e) => { const b = KEYMAP[e.code]; if (b) { held |= b; e.preventDefault(); } unlockAudio(); started = true; });
   addEventListener("keyup", (e) => { const b = KEYMAP[e.code]; if (b) held &= ~b; });
   function toGame(e) {
@@ -162,7 +162,6 @@
   }
 
   // ---------- 루프 ----------
-  setStatus("화면을 탭하면 시작합니다");
   let last = performance.now(), acc = 0;
   function step() {
     const pulseBits = pulseTicks > 0 ? pulse : 0;
@@ -186,13 +185,16 @@
       else if ("log" in e) console.log("[ekd5]", e.log);
     }
   }
+  const soundHint = document.getElementById("soundHint");
   function loop(now) {
     if (started) {
       acc += Math.min(250, now - last);
       while (acc >= TICK_MS) { step(); acc -= TICK_MS; }
       const p = w.frame();
       img.data.set(mem().subarray(p, p + 640 * 480 * 4)); ctx.putImageData(img, 0, 0);
+      // 브라우저는 첫 터치 전엔 소리를 못 냄 → 그동안 작은 안내만
       setStatus(loading > 0 ? "불러오는 중…" : "");
+      soundHint.style.display = audioOk ? "none" : "block";
     }
     last = now;
     requestAnimationFrame(loop);

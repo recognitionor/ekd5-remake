@@ -1697,6 +1697,11 @@ impl Battle {
     }
 
     pub fn update_player(&mut self, inp: &Input) -> bool {
+        // 조작할 조조군 부대가 없으면 (첫 전투 1턴처럼 아직 도착 전) 차례를 자동으로 넘김
+        if matches!(self.phase, Phase::PlayerIdle) && !self.alive(Side::Player).any(|i| !self.units[i].acted) {
+            self.end_player_turn();
+            return true;
+        }
         let mut tapped = self.drag_input(inp);
         // 키보드
         let mut dc = (0, 0);
