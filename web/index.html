@@ -6,27 +6,39 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="조조전">
+<link rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials">
+<link rel="apple-touch-icon" href="data/icon-180.png">
 <title>삼국지 조조전 (리메이크 엔진)</title>
 <style>
-  :root { --bar: 64px; --btn-bg: rgba(255,255,255,.10); --btn-bd: rgba(255,255,255,.22); --fg: #e8e8e8; }
-  html, body { margin: 0; height: 100%; background: #000; color: var(--fg);
+  :root { --bar: 64px; --side: 30px; --btn-bg: rgba(255,255,255,.10); --btn-bd: rgba(255,255,255,.22); --fg: #e8e8e8;
+    --vw: calc(100vw - env(safe-area-inset-left) - env(safe-area-inset-right));
+    --vh: calc(100vh - env(safe-area-inset-top) - env(safe-area-inset-bottom)); }
+  @supports (height: 100dvh) { :root { --vh: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom)); } }
+  html, body { margin: 0; height: 100%; background: #000; color: var(--fg); overflow: hidden;
     font-family: -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
     overscroll-behavior: none; touch-action: none; -webkit-user-select: none; user-select: none; }
   #app { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
     padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
-  #screen { aspect-ratio: 4 / 3; image-rendering: pixelated; background: #000; touch-action: none;
-    width: min(calc(100vw - var(--bar) - env(safe-area-inset-left) - env(safe-area-inset-right)),
-               calc((100vh - 22px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) * 4 / 3)); }
-  #bar { width: var(--bar); height: 100%; display: flex; flex-direction: column; justify-content: center; gap: 10px; align-items: center; }
-  #bar button { width: 54px; height: 48px; border-radius: 14px; border: 1px solid var(--btn-bd);
-    background: var(--btn-bg); color: var(--fg); font-size: 13px; font-weight: 600; line-height: 1.15; padding: 0; touch-action: manipulation; }
+  /* 비율 유지: 높이를 꽉 쓰고 남는 폭은 양옆 (왼쪽 명성 · 오른쪽 버튼) */
+  #screen { image-rendering: pixelated; background: #000; touch-action: none; display: block;
+    width: min(calc(var(--vw) - var(--bar) - var(--side)), calc(var(--vh) * 4 / 3));
+    height: min(var(--vh), calc((var(--vw) - var(--bar) - var(--side)) * 3 / 4)); }
+  /* 꽉 채우기: 비율을 늘여 남는 곳 없이 */
+  body.fill #screen { width: calc(var(--vw) - var(--bar) - var(--side)); height: var(--vh); }
+  #bar { width: var(--bar); height: 100%; display: flex; flex-direction: column; justify-content: center; gap: 6px; align-items: center; }
+  #bar button { width: 54px; height: 42px; border-radius: 12px; border: 1px solid var(--btn-bd);
+    background: var(--btn-bg); color: var(--fg); font-size: 12px; font-weight: 600; line-height: 1.15; padding: 0; touch-action: manipulation; }
   #bar button:active, #bar button.on { background: rgba(255,255,255,.32); }
-  /* 명성 게이지 (원작 상태줄: 가로 200×8, MARK 무늬) */
-  #col { display: flex; flex-direction: column; align-items: center; gap: 4px; }
-  #fame { display: flex; align-items: center; gap: 8px; font-size: 12px; height: 14px; }
-  #fameCv { width: 200px; height: 10px; image-rendering: pixelated; background: #000; border: 1px solid var(--btn-bd); }
+  #bar #cancel { height: 56px; background: rgba(220,80,80,.25); border-color: rgba(255,120,120,.5); }
+  /* 명성 게이지 (원작 상태줄 200×8, MARK 무늬) — 왼쪽에 세로로 */
+  #fame { width: var(--side); height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; font-size: 11px; }
+  #fameBox { width: 12px; height: 204px; position: relative; }
+  #fameCv { position: absolute; left: 50%; top: 50%; width: 200px; height: 10px; transform: translate(-50%, -50%) rotate(-90deg);
+    image-rendering: pixelated; background: #000; border: 1px solid var(--btn-bd); }
   #fame.blink #fameCv { opacity: .45; }
-  #bar #cancel { height: 60px; background: rgba(220,80,80,.25); border-color: rgba(255,120,120,.5); }
+  #fameLabel { writing-mode: vertical-rl; letter-spacing: 2px; }
   #movie { display: none; position: fixed; inset: 0; z-index: 10; width: 100%; height: 100%; background: #000; object-fit: contain; }
   #movie.on { display: block; }
   #status { pointer-events: none; position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 15px; text-align: center;
@@ -35,20 +47,21 @@
   #rotate { display: none; position: fixed; inset: 0; z-index: 20; background: #000;
     flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; font-size: 17px; }
   @media (orientation: portrait) and (max-width: 900px) { #rotate { display: flex; } }
+  /* 홈 화면 앱으로 실행 중이면 전체화면 버튼 필요 없음 */
+  @media (display-mode: fullscreen), (display-mode: standalone) { #full { display: none; } }
 </style>
 </head>
 <body>
 <div id="app">
-  <div id="col">
-    <div id="fame"><span>명성</span><canvas id="fameCv" width="200" height="8"></canvas><span id="fameNum">0</span></div>
-    <canvas id="screen" width="640" height="480"></canvas>
-  </div>
+  <div id="fame"><span id="fameNum">0</span><div id="fameBox"><canvas id="fameCv" width="200" height="8"></canvas></div><span id="fameLabel">명성</span></div>
+  <canvas id="screen" width="640" height="480"></canvas>
   <div id="bar">
     <button id="fast">빨리<br>▶▶</button>
     <button id="save">저장</button>
     <button id="map">지도</button>
     <button id="cancel">취소</button>
     <button id="skip">넘기기</button>
+    <button id="fit">꽉<br>채우기</button>
     <button id="full">전체<br>화면</button>
   </div>
 </div>

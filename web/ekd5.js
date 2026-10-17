@@ -94,6 +94,15 @@
     b.addEventListener("pointerup", up); b.addEventListener("pointercancel", up); b.addEventListener("pointerleave", up);
   }
   holdBtn("cancel", KEY.CANCEL);
+  // 화면 맞춤: 비율 유지 ↔ 꽉 채우기 (기억)
+  const fitBtn = document.getElementById("fit");
+  let fill = false;
+  try { fill = localStorage.getItem("ekd5-fill") === "1"; } catch (_) {}
+  const applyFit = () => { document.body.classList.toggle("fill", fill); fitBtn.classList.toggle("on", fill); fitBtn.innerHTML = fill ? "비율<br>유지" : "꽉<br>채우기"; };
+  applyFit();
+  fitBtn.addEventListener("click", (e) => { e.preventDefault(); fill = !fill; applyFit(); try { localStorage.setItem("ekd5-fill", fill ? "1" : "0"); } catch (_) {} });
+  // 홈 화면 앱 (PWA)
+  if ("serviceWorker" in navigator) { navigator.serviceWorker.register("sw.js").catch(() => {}); }
   // 빨리 감기: 4배 속도 + 대사·자막 자동 넘김 (선택지·전투 조작은 그대로)
   let fast = false, fastTick = 0;
   try { fast = localStorage.getItem("ekd5-fast") === "1"; } catch (_) {}
