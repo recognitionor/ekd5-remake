@@ -5,6 +5,7 @@
 
 ## 자료 만들기
 - `ekd5 extract <설치 폴더> data` (E5/EEX/WAV + DLL 아이콘 → ICONS.BIN + EXE 튜토리얼 대사 → TUTOR.TXT)
+- 아이콘(PWA, 원작 제목 그림이라 data/ 에만): `ekd5 shots data <out> 40 40` 의 제목 화면을 `sips -c 345 345 --cropOffset 20 150` → `sips -z N N` 으로 data/icon-180·192·512.png
 - `python3 -I scripts/extract-cd.py <CD.ccd> data` (CD 음악 트랙 2~22 → BGMnn.m4a(afconvert), 설치본에 없는 MCALL09.. 등, AVI → mp4(ffmpeg))
 
 ## 구조
@@ -30,7 +31,13 @@
 - 아이콘: 아이템(+20), 책략(계통), 명령, 지형(정보창)
 - 자동 진행 검사(치트): 전 단계 → 엔딩 → 2회차까지 오류 없음
 
+## 웹
+- 버튼: 빨리(4배속+대사 자동, F), 저장(중간 저장: 전투 내 차례·본진 → localStorage ekd5-quick), 지도(M), 취소, 넘기기, 꽉 채우기, 전체화면
+- PWA: web/manifest.webmanifest (fullscreen·landscape), web/sw.js (캐시 안 함), 비밀번호 잠금이라 manifest 는 crossorigin=use-credentials
+- 시험: EKD5_QSAVE=틱:파일 / EKD5_QLOAD=파일 (중간 저장), EKD5_AUTOPLAY_END=틱
+
 ## 근사/미구현
 - 일기토 동작 16종 그림 근사, 책략 연출의 반투명은 점무늬, 겹 그림(마스크) 미사용
 - op08(모드 값)·op0e/op49(전투 끝 상태)·op02(표지)는 화면 동작 없음
+- 상태이상: 차례 시작 일괄 해제 조건(FUN_0043f218) 미분석
 - 패배하면 같은 전투 다시 (원작은 게임 오버 → 불러오기)
