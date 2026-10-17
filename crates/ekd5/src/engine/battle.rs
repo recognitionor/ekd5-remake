@@ -104,6 +104,15 @@ pub enum Phase {
     Over { won: bool, t: u32 },
 }
 
+/// 연출이 끝난 뒤 그 부대에 적용할 상태 변화 (원작은 연출 다음에 값을 바꿈)
+#[derive(Clone, Debug)]
+pub struct FxEffect {
+    pub u: usize,
+    pub set: u8,
+    pub clear: u8,
+    pub stat: Option<(usize, u8)>,
+}
+
 /// 피해·회복 창: 값이 다섯 번에 나눠 바뀜
 #[derive(Clone, Debug)]
 pub struct DmgWin {
@@ -204,7 +213,9 @@ pub struct Battle {
     /// 책략 연출 중 대상 칸에 남는 숫자 (부대, 양) — 원작 FUN_0042459c → FUN_00451ad1
     cast_nums: Vec<(usize, i32)>,
     /// 차례로 재생할 상태 변화 연출 (MEFF 번호, 중심) — 원작 FUN_0045ca55 → FUN_0044080f
-    pub fx_queue: VecDeque<(u8, Vec<(i32, i32)>)>,
+    pub fx_queue: VecDeque<(u8, Vec<(i32, i32)>, Option<FxEffect>)>,
+    /// 지금 재생 중인 연출이 끝나면 적용할 변화
+    pub fx_after: Option<FxEffect>,
     /// 직업 이름 (JOBS.TXT)
     pub job_names: Rc<Vec<String>>,
     /// 이번 공격 전 공격자 경험치 (부대, 경험치, 레벨)
@@ -359,6 +370,7 @@ impl Battle {
             dmg_queue: VecDeque::new(),
             cast_nums: Vec::new(),
             fx_queue: VecDeque::new(),
+            fx_after: None,
             job_names: Rc::new(Vec::new()),
             atk_exp: None,
             ai_plan: None,
@@ -1272,12 +1284,14 @@ impl Battle {
         if !un.visible {
             return;
         }
-        self.fx_queue.push_back((id, vec![(un.x * CELL + CELL / 2, un.y * CELL + CELL / 2)]));
+        self.fx_queue.push_back((id, vec![(un.x * CELL + CELL / 2, un.y * CELL + CELL / 2)], None));
     }
 
     /// 줄 선 연출 하나 시작 (원작 FUN_0044080f: 그 부대 쪽으로 화면 이동 → 재생). 없으면 false
     pub fn next_status_fx(&mut self) -> bool {
-        let Some((id, c)) = self.fx_queue.pop_front() else { return false };
+        self.apply_fx_after();
+        let Some((id, c, eff)) = self.fx_queue.pop_front() else { return false };
+        self.fx_after = eff;
         if let Some(&(x, y)) = c.first() {
             if x < self.cam.0 + 48 || x > self.cam.0 + 592 || y < self.cam.1 + 48 || y > self.cam.1 + 432 {
                 self.focus(x / CELL, y / CELL);
@@ -1285,6 +1299,30 @@ impl Battle {
         }
         self.fx_req = Some((id, c));
         true
+    }
+
+    /// 연출에 딸린 변화 적용
+    pub fn apply_fx_after(&mut self) {
+        if let Some(e) = self.fx_after.take() {
+            if let Some(un) = self.units.get_mut(e.u) {
+                un.status = (un.status | e.set) & !e.clear;
+                if let Some((k, v)) = e.stat {
+                    un.state[k] = v;
+                }
+            }
+        }
+    }
+
+    /// 변화가 딸린 연출 줄 세우기 (연출이 없으면 바로 적용)
+    pub fn queue_effect(&mut self, id: Option<u8>, e: FxEffect) {
+        let un = &self.units[e.u];
+        match id.filter(|_| un.visible) {
+            Some(id) => self.fx_queue.push_back((id, vec![(un.x * CELL + CELL / 2, un.y * CELL + CELL / 2)], Some(e))),
+            None => {
+                self.fx_after = Some(e);
+                self.apply_fx_after();
+            }
+        }
     }
 
     /// 상태이상 걸기 연출 번호 (원작: 2→50, 4→51, 8→48, 0x10→49, 높은 비트 우선)
@@ -1309,20 +1347,21 @@ impl Battle {
             // 상태이상 회복 (원작 FUN_0043e8e6): 확률 = 기본 사기 (태평청령서 0x14 면 100).
             // 포박·봉책·독은 그 확률, 혼란은 max(10, 사기−15) (100 이면 확실)
             let cure = if self.sp(i, 0x14).is_some() { 100 } else { self.units[i].off.base[4] as i32 };
+            let mut cleared = 0u8;
             for bit in [status::PARALYZE, status::SEAL, status::CONFUSE, status::POISON] {
                 if self.units[i].status & bit == 0 {
                     continue;
                 }
                 let c = if bit == status::CONFUSE && cure != 100 { (cure - 15).max(10) } else { cure };
                 if self.rand(100) < c {
-                    self.units[i].status &= !bit;
-                    // 회복 연출 (원작 FUN_0045ca55(..., 6, 0x80|비트, 1) → MEFF 44)
-                    self.queue_status_fx(i, 44);
+                    // 회복 연출 뒤 풀림 (원작 FUN_0045ca55(..., 6, 0x80|비트, 1) → MEFF 44)
+                    cleared |= bit;
+                    self.queue_effect(Some(44), FxEffect { u: i, set: 0, clear: bit, stat: None });
                 }
             }
             // 독 피해 (원작 FUN_0044ffb8): 최대 HP/10 (최소 1), 1 은 남김
             let un = &mut self.units[i];
-            if un.status & status::POISON != 0 && un.hp > 1 {
+            if un.status & !cleared & status::POISON != 0 && un.hp > 1 {
                 let d = (un.max_hp / 10).max(1).min(un.hp - 1);
                 un.hp -= d;
                 let (x, y) = (un.x, un.y);

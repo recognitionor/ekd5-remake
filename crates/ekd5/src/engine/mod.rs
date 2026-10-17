@@ -1883,33 +1883,27 @@ impl<A: Assets> Engine<A> {
                     .collect();
                 let (stat, lvl, st, hp, mp) = (a(8), a(9), a(10), a(11), a(12));
                 b.fx_queue.clear();
-                let mut pending: Vec<(usize, Vec<u8>)> = Vec::new();
+                let mut effs: Vec<(Option<u8>, battle::FxEffect)> = Vec::new();
                 for i in pick {
-                    let un = &mut b.units[i];
-                    let mut fx: Vec<u8> = Vec::new();
                     if stat != 0xFFFF && (0..5).contains(&stat) {
                         let new = match lvl {
                             0 => 1,
                             2 => 5,
                             _ => 3,
                         };
-                        let old = un.state[stat as usize];
-                        if new != old {
-                            fx.push(battle::Battle::stat_fx_id(stat as u8, new > old));
-                        }
-                        un.state[stat as usize] = new;
+                        let old = b.units[i].state[stat as usize];
+                        let id = (new != old).then(|| battle::Battle::stat_fx_id(stat as u8, new > old));
+                        effs.push((id, battle::FxEffect { u: i, set: 0, clear: 0, stat: Some((stat as usize, new)) }));
                     }
                     if st != 0xFFFF && st != 0 {
                         if st & 0x80 == 0 {
-                            un.status |= st as u8;
-                            fx.extend(battle::Battle::status_fx_id(st as u8));
+                            effs.push((battle::Battle::status_fx_id(st as u8), battle::FxEffect { u: i, set: st as u8, clear: 0, stat: None }));
                         } else {
-                            un.status &= !(st as u8 & 0x7F);
-                            fx.push(44);
+                            effs.push((Some(44), battle::FxEffect { u: i, set: 0, clear: st as u8 & 0x7F, stat: None }));
                         }
                     }
-                    pending.push((i, fx));
                     // HP·MP 는 그만큼 깎되 1 은 남김 (값은 바이트)
+                    let un = &mut b.units[i];
                     if hp != 0 {
                         un.hp = (un.hp - (hp & 0xFF)).max(1);
                     }
@@ -1917,10 +1911,8 @@ impl<A: Assets> Engine<A> {
                         un.mp = (un.mp - (mp & 0xFF)).max(1);
                     }
                 }
-                for (i, fx) in pending {
-                    for id in fx {
-                        b.queue_status_fx(i, id);
-                    }
+                for (id, e) in effs {
+                    b.queue_effect(id, e);
                 }
                 if b.next_status_fx() {
                     self.wait = Wait::Fx;
