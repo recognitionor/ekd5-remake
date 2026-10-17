@@ -26,6 +26,10 @@ pub struct BattleSave {
     pub objs: Vec<(i32, i32, u8, u8)>,
     pub goal_zone: Option<(i32, i32, i32, i32)>,
     pub list47: Vec<usize>,
+    #[serde(default)]
+    pub win_target: Option<usize>,
+    #[serde(default)]
+    pub lose_target: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -112,6 +116,8 @@ impl<A: Assets> Engine<A> {
                 objs: b.objs.clone(),
                 goal_zone: b.goal_zone,
                 list47: b.list47.clone(),
+                win_target: b.win_target,
+                lose_target: b.lose_target,
             }),
             _ => None,
         };
@@ -217,6 +223,8 @@ impl<A: Assets> Engine<A> {
             b.objs = bs.objs;
             b.goal_zone = bs.goal_zone;
             b.list47 = bs.list47;
+            b.win_target = bs.win_target;
+            b.lose_target = bs.lose_target;
             b.restore_terrain = Some((bs.terrain, bs.overlay));
             b.started = true;
             b.phase = battle::Phase::PlayerIdle;

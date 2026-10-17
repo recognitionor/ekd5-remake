@@ -1552,6 +1552,7 @@ impl<A: Assets> Engine<A> {
                 if let Some(b) = self.battle() {
                     for u in b.units.iter_mut().filter(|u| u.visible && u.hp <= 0) {
                         u.visible = false;
+                        u.gone = true;
                     }
                 }
             }
@@ -1741,8 +1742,13 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x5C => {
+                // 부대 보여 주기 (원작 FUN_0041921d: 그 부대로 화면을 옮기고 세 번 깜빡임)
                 if let Some(b) = self.battle() {
-                    b.targets.push(a(0) as usize);
+                    if let Some(u) = b.unit_of(a(0) as usize).filter(|&u| b.units[u].visible && b.units[u].hp > 0) {
+                        let (x, y) = (b.units[u].x, b.units[u].y);
+                        b.focus(x, y);
+                        b.cursor = (x, y);
+                    }
                 }
             }
             0x44..=0x47 | 0x4B..=0x4F | 0x31 | 0x50 | 0x53 | 0x55 if self.battle().is_some() => self.battle_op(op, &args),
@@ -1920,7 +1926,13 @@ impl<A: Assets> Engine<A> {
         };
         match op {
             0x44 => b.units.clear(),
-            0x45 => b.turn_limit = a(2),
+            // 전투 설정 (원작 FUN_004146c1): 인자 2 턴 제한, 5 승리 목표 장수, 7 패배 목표 장수 (0xFFFF 없음)
+            0x45 => {
+                b.turn_limit = a(2);
+                let who = |v: i32| (v != 0xFFFF && v >= 0).then_some(v as usize);
+                b.win_target = who(a(5));
+                b.lose_target = who(a(7));
+            }
             0x46 | 0x47 => {
                 // 부대 목록: 46 아군 (표지 0x26 이 1이면 처음에 숨김), 47 적군
                 let n = if op == 0x46 { 11 } else { 12 };
@@ -2257,21 +2269,15 @@ impl<A: Assets> Engine<A> {
                     _ => v == a(2),
                 }
             }
-            // 승리 조건: 목표(op5c)가 있으면 목표 전원 퇴각, 없으면 적 전멸 (원작 FUN_0044e6af)
+            // 승리 (원작 FUN_0044e6af): 아군이 아닌 승리 목표 장수가 퇴각했거나, 맵 위 적군이 없음
             0x42 => {
                 if b.cheat && b.turn > 3 {
                     return true;
                 }
-                if b.targets.is_empty() {
-                    !b.units.iter().any(|u| u.side == battle::Side::Enemy && u.hp > 0)
-                } else {
-                    b.targets.iter().all(|&p| b.unit_of(p).is_none_or(|u| b.units[u].hp <= 0))
-                }
+                battle_won(b)
             }
-            0x43 => {
-                let cao_dead = b.unit_of(0).is_some_and(|u| b.units[u].hp <= 0);
-                cao_dead || b.turn > b.turn_limit
-            }
+            // 패배 (원작 FUN_0044e7a4): 아군 패배 목표 장수가 퇴각했거나, 맵 위 아군이 없음 (턴 제한은 엔진이 따로)
+            0x43 => battle_lost(b),
             // 진영별 부대 수 비교 (종류 0 아군/1 우군/2 적/4 아군+우군/5 적/6 전부, 수, 비교, 영역?, x1, y1, x2, y2) — 원작 FUN_0044e93d
             0x41 => {
                 let (kind, n, cmp, area) = (a(0), a(1), a(2), a(3) == 1);
@@ -2534,9 +2540,9 @@ impl<A: Assets> Engine<A> {
             // 사건이 연달아 생길 수 있으니 하나씩
             self.check_events();
         }
-        // 스크립트가 끝을 내지 않았을 때의 기본 승패 (사건이 먼저)
+        // 승패가 날 만하면 사건 검사를 한 번 더 (승패는 스크립트 op42/op43 사건이 정함)
         let ended = self.battle().is_some_and(|b| {
-            b.started && !matches!(b.phase, battle::Phase::Script | battle::Phase::Over { .. }) && (!b.units.iter().any(|u| u.side == battle::Side::Enemy && u.hp > 0) || b.unit_of(0).is_some_and(|u| b.units[u].hp <= 0) || b.turn > b.turn_limit)
+            b.started && !matches!(b.phase, battle::Phase::Script | battle::Phase::Over { .. }) && (battle_won(b) || battle_lost(b) || b.turn > b.turn_limit)
         });
         if !ended {
             self.end_checked = false;
@@ -2546,17 +2552,18 @@ impl<A: Assets> Engine<A> {
                 return;
             }
         }
+        // 시험(치트) 자동 진행 전용: 사건을 못 일으켜도 적이 없으면 승리 (원작에는 없음)
         if let Some(b) = self.battle() {
-            if b.started && !matches!(b.phase, battle::Phase::Script | battle::Phase::Over { .. }) {
-                let enemies = b.units.iter().filter(|u| u.side == battle::Side::Enemy && u.hp > 0).count();
-                let cao_dead = b.unit_of(0).is_some_and(|u| b.units[u].hp <= 0);
-                if enemies == 0 && b.turn > 0 {
-                    self.log.push("적 전멸".into());
-                    let Some(b) = self.battle() else { return };
-                    b.phase = battle::Phase::Over { won: true, t: 0 };
-                } else if cao_dead || b.turn > b.turn_limit {
-                    b.phase = battle::Phase::Over { won: false, t: 0 };
-                }
+            if b.cheat && b.started && b.turn > 0 && !matches!(b.phase, battle::Phase::Script | battle::Phase::Over { .. }) && !b.units.iter().any(|u| u.side == battle::Side::Enemy && u.hp > 0) {
+                b.phase = battle::Phase::Over { won: true, t: 0 };
+            }
+        }
+        // 턴 제한 (원작 FUN_00450f0b: 마지막 턴이 끝나면 조조 퇴각 → 패배)
+        if let Some(b) = self.battle() {
+            if b.started && !matches!(b.phase, battle::Phase::Script | battle::Phase::Over { .. }) && b.turn > b.turn_limit {
+                self.log.push("턴 제한 — 패배".into());
+                let Some(b) = self.battle() else { return };
+                b.phase = battle::Phase::Over { won: false, t: 0 };
             }
         }
     }
@@ -2769,4 +2776,29 @@ impl<A: Assets> Engine<A> {
     pub fn take_sounds(&mut self) -> Vec<Sound> {
         std::mem::take(&mut self.sounds)
     }
+}
+
+/// 맵 위에서 물러난 부대 (원작 부대 상태 3·4)
+fn fallen(u: &battle::Unit) -> bool {
+    u.gone || (u.visible && u.hp <= 0)
+}
+
+/// 원작 FUN_0044e6af: 승리 목표 장수(아군 아님)가 물러났거나 맵 위 적군이 없음
+fn battle_won(b: &battle::Battle) -> bool {
+    if let Some(p) = b.win_target {
+        if b.units.iter().any(|u| u.side != battle::Side::Player && u.person == p && fallen(u)) {
+            return true;
+        }
+    }
+    !b.units.iter().any(|u| u.side == battle::Side::Enemy && u.visible && u.hp > 0)
+}
+
+/// 원작 FUN_0044e7a4: 패배 목표 장수(아군)가 물러났거나 아군이 모두 물러남 (아직 안 나온 부대 = 상태 1 은 남은 것으로 셈)
+fn battle_lost(b: &battle::Battle) -> bool {
+    if let Some(p) = b.lose_target {
+        if b.units.iter().any(|u| u.side == battle::Side::Player && u.person == p && fallen(u)) {
+            return true;
+        }
+    }
+    b.units.iter().any(|u| u.side == battle::Side::Player) && !b.units.iter().any(|u| u.side == battle::Side::Player && !fallen(u))
 }

@@ -62,6 +62,9 @@ pub struct Unit {
     pub status: u8,
     pub acted: bool,
     pub visible: bool,
+    /// 퇴각·퇴장을 마침 (원작 부대 상태 3·4). 아직 안 나온 부대와 구별
+    #[serde(default)]
+    pub gone: bool,
     /// 스크립트 AI (원작 표 0x498bf8): 0 적극 공격, 1 범위 안만 공격, 2 제자리 고수, 3 장수 공격, 4 지점으로, 5 장수 따라가기, 6 지점으로 도주
     pub ai: u8,
     /// AI 3·5 의 대상 장수
@@ -152,6 +155,9 @@ pub struct Battle {
     pub ui: story::Story,
     pub slots: Vec<(i32, i32)>,
     pub targets: Vec<usize>,
+    /// 승리 목표 장수 (원작 op45 인자 5 → +0x3d04/06: 이 장수가 퇴각하면 승리) · 패배 목표 장수 (인자 7 → +0x3d08/0a: 대개 조조)
+    pub win_target: Option<usize>,
+    pub lose_target: Option<usize>,
     pub message: Option<(String, u32)>,
     pub popup: Option<(i32, i32, String, u32)>,
     pub objective: String,
@@ -343,6 +349,8 @@ impl Battle {
             ui: story::Story::default(),
             slots: vec![(0, 0); 16],
             targets: Vec::new(),
+            win_target: None,
+            lose_target: None,
             message: None,
             popup: None,
             objective: String::new(),
@@ -508,6 +516,7 @@ impl Battle {
             status: 0,
             acted: false,
             visible: true,
+            gone: false,
             ai: 0,
             ai_target: None,
             ai_person: None,
@@ -925,7 +934,7 @@ impl Battle {
         let base = self.strat_rate(a, d);
         match sid {
             9 | 21 => {
-                if self.units[d].person < 0x1A || self.targets.contains(&self.units[d].person) { 0 } else { base / if sid == 9 { 3 } else { 2 } }
+                if self.units[d].person < 0x1A || self.win_target == Some(self.units[d].person) { 0 } else { base / if sid == 9 { 3 } else { 2 } }
             }
             _ => {
                 // 칠성검('4') 더하기, 백은방패('6')·풍신방패('7') 빼기 (원작 FUN_0043d84f)
@@ -1748,6 +1757,7 @@ impl Battle {
                 if t >= end {
                     un.leave = None;
                     un.visible = false;
+                    un.gone = true;
                 } else {
                     un.leave = Some((k, t + 1));
                 }
