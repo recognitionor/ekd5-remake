@@ -35,7 +35,7 @@
 - 자동 진행 검사(치트): 전 단계 → 엔딩 → 2회차까지 오류 없음
 
 ## 웹
-- 버튼: 빨리(4배속+대사 자동, F), 저장(중간 저장: 전투 내 차례·본진 → localStorage ekd5-quick), 지도(M), 취소, 넘기기, 꽉 채우기, 전체화면
+- 버튼: 빨리(4배속+대사 자동, F), 소리(배경음악·효과음 켜고 끄기, localStorage ekd5-bgm/ekd5-sfx; 아이폰 audioSession: 음악 켬=playback, 끔=ambient 로 다른 앱 음악과 같이), 저장(중간 저장: 전투 내 차례·본진 → localStorage ekd5-quick), 지도(M), 취소, 넘기기, 꽉 채우기, 전체화면
 - PWA: web/manifest.webmanifest (fullscreen·landscape), web/sw.js (캐시 안 함), 비밀번호 잠금이라 manifest 는 crossorigin=use-credentials
 - 시험: EKD5_QSAVE=틱:파일 / EKD5_QLOAD=파일 (중간 저장), EKD5_AUTOPLAY_END=틱
 

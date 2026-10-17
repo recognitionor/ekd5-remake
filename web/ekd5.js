@@ -64,19 +64,24 @@
     }).catch(() => {});
     return h;
   }
+  // 소리 설정 (기억): 배경음악·효과음 켜고 끄기
+  let bgmOn = true, sfxOn = true;
+  try { bgmOn = localStorage.getItem("ekd5-bgm") !== "0"; sfxOn = localStorage.getItem("ekd5-sfx") !== "0"; } catch (_) {}
   function playWav(name, vol = 1) {
-    if (!audioOk || !actx) return;
+    if (!audioOk || !actx || !sfxOn) return;
     sfxPlay(name, vol, false);
   }
   // 반복 효과음 (원작 op23 방식 0) 과 배경음악 (원작 CD 트랙 → data/BGMnn.m4a, 반복)
-  let loopFx = null, bgm = null, bgmTrack = -1, bgmWant = -1;
+  let loopFx = null, loopWant = null, bgm = null, bgmTrack = -1, bgmWant = -1;
   function setLoop(name) {
+    loopWant = name || null;
     if (loopFx) { loopFx.stop(); loopFx = null; }
-    if (name && audioOk && actx) loopFx = sfxPlay(name, 0.6, true);
+    if (name && audioOk && actx && sfxOn) loopFx = sfxPlay(name, 0.6, true);
   }
   function setMusic(n) {
     bgmWant = n;
-    if (!audioOk || n === bgmTrack) return;
+    if (!audioOk || !bgmOn) { if (bgm) { bgm.pause(); bgm = null; } bgmTrack = -1; return; }
+    if (n === bgmTrack) return;
     if (bgm) { bgm.pause(); bgm = null; }
     bgmTrack = n;
     if (n >= 0) {
@@ -84,9 +89,10 @@
       bgm.loop = true; bgm.volume = 0.8; bgm.play().catch(() => {});
     }
   }
-  // 브라우저는 첫 터치 전에는 소리를 못 냄 → 터치하면 그때 원하던 음악 시작
-  // 아이폰: 무음 스위치와 상관없이 소리 (Web Audio 는 기본이 무음 스위치를 따름)
-  try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (_) {}
+  // 아이폰 소리 방식: 배경음악을 켜면 playback (무음 스위치와 상관없이 남, 다른 앱 음악은 멈춤),
+  // 끄면 ambient (다른 앱 음악과 같이 남, 무음 스위치를 따름)
+  function setSession() { try { if (navigator.audioSession) navigator.audioSession.type = bgmOn ? "playback" : "ambient"; } catch (_) {} }
+  setSession();
   // 아이폰은 AudioContext 도 터치 안에서 만들거나 다시 깨워야 소리가 남
   const unlockAudio = () => {
     if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {} }
@@ -171,6 +177,21 @@
     } catch (_) {}
   });
 
+  // ---------- 소리 설정 창 ----------
+  const sndPanel = document.getElementById("sndPanel"), sndBgm = document.getElementById("sndBgm"), sndSfx = document.getElementById("sndSfx");
+  const sndLabels = () => { sndBgm.textContent = "배경음악: " + (bgmOn ? "켜짐 🔊" : "꺼짐 🔇"); sndSfx.textContent = "효과음: " + (sfxOn ? "켜짐 🔊" : "꺼짐 🔇"); };
+  sndLabels();
+  document.getElementById("snd").addEventListener("click", (e) => { e.preventDefault(); unlockAudio(); sndPanel.style.display = sndPanel.style.display === "flex" ? "none" : "flex"; });
+  document.getElementById("sndClose").addEventListener("click", () => { sndPanel.style.display = "none"; });
+  sndBgm.addEventListener("click", () => {
+    bgmOn = !bgmOn; try { localStorage.setItem("ekd5-bgm", bgmOn ? "1" : "0"); } catch (_) {}
+    setSession(); setMusic(bgmWant); sndLabels();
+  });
+  sndSfx.addEventListener("click", () => {
+    sfxOn = !sfxOn; try { localStorage.setItem("ekd5-sfx", sfxOn ? "1" : "0"); } catch (_) {}
+    setLoop(loopWant); sndLabels();
+  });
+
   // ---------- 새 버전 알림 (홈 화면 앱은 새로고침 단추가 없음) ----------
   // 배포 때 version.txt 가 바뀜. 앱으로 돌아올 때·10분마다 확인해서, 바뀌었으면 단추를 띄움 (누를 때만 새로고침 — 하던 게임은 먼저 저장)
   const updBtn = document.getElementById("update");
@@ -226,7 +247,7 @@
   function endMovie() {
     if (!movie.classList.contains("on")) return;
     movie.pause(); movie.removeAttribute("src"); movie.load(); movie.classList.remove("on");
-    if (bgm && bgmTrack >= 0) bgm.play().catch(() => {});
+    if (bgm && bgmTrack >= 0 && bgmOn) bgm.play().catch(() => {});
     w.movie_done();
   }
   function playMovie(name) {
