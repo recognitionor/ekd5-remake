@@ -76,8 +76,18 @@
   // 누르고 있는 동안 결정 키를 계속 누른 것으로 보냄 (전장 끌어서 스크롤)
   let ptrDown = 0;
   canvas.addEventListener("pointermove", (e) => { mouse = toGame(e); });
+  // 터치 기기에서 링크로 들어왔으면 첫 터치 때 자동 전체 화면 (브라우저는 사용자 동작이 있어야 허락)
+  const standalone = matchMedia("(display-mode: fullscreen), (display-mode: standalone)").matches || navigator.standalone;
+  let autoFull = !standalone && matchMedia("(pointer: coarse)").matches && !!document.documentElement.requestFullscreen;
+  function tryAutoFull() {
+    if (!autoFull || document.fullscreenElement) return;
+    autoFull = false;
+    document.documentElement.requestFullscreen({ navigationUI: "hide" })
+      .then(() => screen.orientation && screen.orientation.lock && screen.orientation.lock("landscape").catch(() => {}))
+      .catch(() => {});
+  }
   canvas.addEventListener("pointerdown", (e) => {
-    e.preventDefault(); unlockAudio(); started = true;
+    e.preventDefault(); unlockAudio(); started = true; tryAutoFull();
     mouse = toGame(e);
     try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
     if (e.button === 2) { pulse = KEY.CANCEL; pulseTicks = 3; } else { ptrDown = KEY.DECIDE; click = 1; pulse = KEY.DECIDE; pulseTicks = 2; }
@@ -121,7 +131,7 @@
   holdBtn("skip", KEY.DECIDE);
   document.getElementById("full").addEventListener("click", async () => {
     try {
-      if (!document.fullscreenElement) { await document.documentElement.requestFullscreen(); try { await screen.orientation.lock("landscape"); } catch (_) {} }
+      if (!document.fullscreenElement) { await document.documentElement.requestFullscreen({ navigationUI: "hide" }); try { await screen.orientation.lock("landscape"); } catch (_) {} }
       else await document.exitFullscreen();
     } catch (_) {}
   });
