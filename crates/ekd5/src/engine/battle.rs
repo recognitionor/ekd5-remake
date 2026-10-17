@@ -2554,13 +2554,14 @@ impl Battle {
             Phase::Cast { .. } if self.fx.is_none() => (self.cast_fx.clone(), self.col[5]),
             _ => (Vec::new(), 0),
         };
+        // 원작은 한 칸 걸러 점을 찍는 바둑판 (FUN_00453d9d). 폰에서 정수배가 아니게 늘이면 점이 뭉개져 통으로 보이므로,
+        // 원래 크기 화면에서 눈에 보이는 대로 바탕과 반반 섞음 (화면을 RGBA 로 바꿀 때, 위에 그린 부대는 그대로)
         for (x, y) in cells {
             let (sx, sy) = (x * CELL - self.cam.0, y * CELL - self.cam.1);
-            for yy in 0..CELL {
-                for xx in 0..CELL {
-                    if (xx + yy) % 2 == 0 {
-                        scr.fill(sx + xx, sy + yy, 1, 1, col);
-                    }
+            for yy in sy.max(0)..(sy + CELL).min(480) {
+                for xx in sx.max(0)..(sx + CELL).min(640) {
+                    let i = yy as usize * 640 + xx as usize;
+                    scr.glaze.push((i as u32, scr.px[i], col));
                 }
             }
         }

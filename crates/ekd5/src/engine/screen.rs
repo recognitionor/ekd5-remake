@@ -29,11 +29,13 @@ pub struct Screen {
     rgba: Vec<u8>,
     /// 창 바탕 무늬 (MARK.E5 0x18dc0, 32×48)
     pub window_tex: Option<Pic>,
+    /// 반투명 칠 (화소 번호, 칠할 때 화소 색, 섞을 색): RGBA 로 바꿀 때 반반 섞음. 그 뒤 덮어 그려진 화소는 그대로
+    pub glaze: Vec<(u32, u8, u8)>,
 }
 
 impl Default for Screen {
     fn default() -> Self {
-        Self { px: vec![0; W * H], pal: [[0; 3]; 256], level: 16, rgba: vec![0; W * H * 4], window_tex: None }
+        Self { px: vec![0; W * H], pal: [[0; 3]; 256], level: 16, rgba: vec![0; W * H * 4], window_tex: None, glaze: Vec::new() }
     }
 }
 
@@ -86,6 +88,16 @@ impl Screen {
             self.rgba[o + 1] = (p[1] as u32 * l / 16) as u8;
             self.rgba[o + 2] = (p[2] as u32 * l / 16) as u8;
             self.rgba[o + 3] = 255;
+        }
+        for (i, at, col) in std::mem::take(&mut self.glaze) {
+            if self.px[i as usize] != at {
+                continue;
+            }
+            let k = self.pal[col as usize];
+            let o = i as usize * 4;
+            for j in 0..3 {
+                self.rgba[o + j] = ((self.rgba[o + j] as u32 + k[j] as u32 * l / 16) / 2) as u8;
+            }
         }
         &self.rgba
     }
