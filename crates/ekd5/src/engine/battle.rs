@@ -201,6 +201,8 @@ pub struct Battle {
     pub dmg_win: Option<DmgWin>,
     /// 다음에 보여줄 창들 (책략이 여럿을 맞힐 때)
     dmg_queue: VecDeque<DmgWin>,
+    /// 책략 연출 중 대상 칸에 남는 숫자 (부대, 양) — 원작 FUN_0042459c → FUN_00451ad1
+    cast_nums: Vec<(usize, i32)>,
     /// 직업 이름 (JOBS.TXT)
     pub job_names: Rc<Vec<String>>,
     /// 이번 공격 전 공격자 경험치 (부대, 경험치, 레벨)
@@ -353,6 +355,7 @@ impl Battle {
             info_unit: None,
             dmg_win: None,
             dmg_queue: VecDeque::new(),
+            cast_nums: Vec::new(),
             job_names: Rc::new(Vec::new()),
             atk_exp: None,
             ai_plan: None,
@@ -1141,6 +1144,11 @@ impl Battle {
             }
         }
         // 창이 다 보일 때까지 (여럿이면 차례로)
+        if self.dmg_win.is_none() && !self.dmg_queue.is_empty() {
+            self.cast_nums.clear();
+            self.dmg_win = self.dmg_queue.pop_front();
+            return false;
+        }
         if self.dmg_win.as_ref().is_some_and(|w| w.t < 40) {
             return false;
         }
@@ -1149,6 +1157,7 @@ impl Battle {
             return false;
         }
         self.dmg_win = None;
+        self.cast_nums.clear();
         self.units[u].pose = None;
         self.cast_fx.clear();
         // 쓰러진 부대는 사건 검사 뒤 퇴각 (retreat_fallen)
@@ -1159,6 +1168,16 @@ impl Battle {
         self.cast_applied = true;
         let before: Vec<(i32, i32)> = self.units.iter().map(|x| (x.hp, x.mp)).collect();
         let res = self.apply_strategy(u, sid, cell);
+        // 맞는 순간 대상 칸에 양 (HP 변화, 없으면 MP 변화)
+        self.cast_nums = (0..self.units.len())
+            .filter(|&i| i != u)
+            .filter_map(|i| {
+                let b = before.get(i)?;
+                let (dh, dm) = (self.units[i].hp.max(0) - b.0.max(0), self.units[i].mp - b.1);
+                let v = if dh != 0 { dh } else { dm };
+                (v != 0).then_some((i, v.abs()))
+            })
+            .collect();
         // 값이 바뀐 부대마다 창 (원작은 대상마다 차례로)
         // 시전자의 MP 소모는 창으로 안 띄움 (원작은 대상만)
         let changed: Vec<usize> = (0..self.units.len()).filter(|&i| i != u && before.get(i).is_some_and(|b| *b != (self.units[i].hp, self.units[i].mp))).collect();
@@ -1167,7 +1186,7 @@ impl Battle {
                 let un = &self.units[i];
                 self.dmg_queue.push_back(DmgWin { u: i, hp: (before[i].0, un.hp.max(0)), mp: (before[i].1, un.mp), ex: (un.off.exp as i32, un.off.exp as i32), t: 0 });
             }
-            self.dmg_win = self.dmg_queue.pop_front();
+            // 창은 연출이 끝난 뒤 (원작: 연출 → FUN_00452964)
             // 효과 없음·빗나감 같은 글은 그대로 띄움
             if let Some(((x, y), txt)) = res.iter().find(|(_, t)| !t.starts_with('-') && !t.chars().next().is_some_and(|c| c.is_ascii_digit())) {
                 self.popup = Some((x * CELL + 4 - self.cam.0, y * CELL - 8 - self.cam.1, txt.clone(), 30));
@@ -2604,6 +2623,14 @@ impl Battle {
         if let Some(f) = &self.fx {
             f.render(scr, self.cam);
         }
+        // 책략 숫자 (원작: 대상 칸 왼쪽 위, 글자색 0x12·바탕 0x18, 연출이 끝날 때까지)
+        for &(i, v) in &self.cast_nums {
+            let un = &self.units[i];
+            let (x, y) = (un.x * CELL - self.cam.0, un.y * CELL - self.cam.1);
+            let t = v.to_string();
+            scr.fill(x, y, t.len() as i32 * 8 + 2, 17, 0x18);
+            draw_text(scr, f, x + 1, y + 1, &t, 0x12);
+        }
         // 전체 지도 (원작 FUN_0044c8e8: 축소 그림 + 부대 4×4 점 — 조조군 0x2A, 우군 0xAD, 적 0xAC — + 보이는 범위)
         if let (Some(m), Some((x, y, w, h))) = (&self.minimap, self.minimap_rect()) {
             scr.fill(x - 2, y - 2, w + 4, h + 4, self.col[6]);
@@ -2676,8 +2703,7 @@ impl Battle {
     fn draw_dmg_win(&self, scr: &mut Screen, f: &Font, w: &DmgWin) {
         let un = &self.units[w.u];
         let player = un.side == Side::Player;
-        // 원작 창(192) 오른쪽에 깎인 양 칸을 덧붙임
-        let (ww, wh) = (272, if player { 144 } else { 96 });
+        let (ww, wh) = (192, if player { 144 } else { 96 });
         let (ux, uy) = (un.x * CELL - self.cam.0, un.y * CELL - self.cam.1);
         let wx = if ux + CELL + 8 + ww <= 640 { ux + CELL + 8 } else { (ux - ww - 8).max(0) };
         let wy = uy.clamp(60, 480 - wh);
@@ -2692,16 +2718,6 @@ impl Battle {
         draw_text(scr, f, wx + 96, wy + 8, &format!("Lv{}", un.level), story::TEXT);
         let job = self.job_names.get(un.job as usize).cloned().unwrap_or_default();
         draw_text(scr, f, wx + 120, wy + 8, &job, story::TEXT);
-        // 깎인·채워진 양 (크게, 빨강 = 피해, 초록 = 회복)
-        let dh = w.hp.1 - w.hp.0;
-        let dm = w.mp.1 - w.mp.0;
-        let delta = |d: i32| if d < 0 { (format!("{d}"), self.col[1]) } else { (format!("+{d}"), self.col[5]) };
-        // 숫자는 창 오른쪽 칸에 크게 (HP 줄 높이)
-        let big = if dh != 0 { Some(delta(dh)) } else if dm != 0 { let (t, c) = delta(dm); Some((format!("MP{t}"), c)) } else { None };
-        if let Some((t, c)) = big {
-            let tw = t.chars().count() as i32 * 16;
-            story::draw_text_big(scr, f, wx + ww - 12 - tw, wy + 40, &t, 2, c, self.col[6]);
-        }
         let hp = w.at(w.hp);
         self.mark_pic(scr, 0x180, 24, 24, wx + 8, wy + 32);
         draw_text(scr, f, wx + 64, wy + 30, &format!("{hp:3}/{:3}", un.max_hp), story::TEXT);
