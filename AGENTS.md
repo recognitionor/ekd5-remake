@@ -43,10 +43,12 @@
 - 난수: 원작은 전투마다 GetTickCount 씨앗 (FUN_00482060). 웹은 w.seed(시각) → 전투 시작·불러오기 때 새 씨앗 (CLI 는 고정)
 - (예전 설명) 소리(배경음악·효과음 켜고 끄기, localStorage ekd5-bgm/ekd5-sfx; 아이폰 audioSession: 음악 켬=playback, 끔=ambient 로 다른 앱 음악과 같이), 저장(중간 저장: 전투 내 차례·본진 → localStorage ekd5-quick), 지도(M), 취소, 넘기기, 꽉 채우기, 전체화면
 - PWA: web/manifest.webmanifest (fullscreen·landscape), web/sw.js (캐시 안 함), 비밀번호 잠금이라 manifest 는 crossorigin=use-credentials
-- 시험: EKD5_QSAVE=틱:파일 / EKD5_QLOAD=파일 (중간 저장), EKD5_AUTOPLAY_END=틱
+- 시험: EKD5_FORCE=틱:블록 (절 1 사건 블록 강제 실행, 예: S_01 일기토 = 7), EKD5_QSAVE=틱:파일 / EKD5_QLOAD=파일 (중간 저장), EKD5_AUTOPLAY_END=틱
 
 ## 근사/미구현
-- 일기토 동작 16종 그림 근사, 책략 연출의 반투명은 점무늬, 겹 그림(마스크) 미사용
+- 일기토는 원작 FUN_00445xxx~0044bxxx 를 단계 목록으로 옮김 (duel.rs). 큰 글자(이름·VS·승 부)는 원작 굴림체 굵게 대신 웹 캔버스 글꼴("@txt/높이/글" 자료, CLI 는 비트맵 글꼴 확대). 메시지 속도는 1(보통) 고정
+- 원작 대기 단위는 1/20 초 (GetTickCount/50). 엔진은 30틱/초라 원작 대기값을 1:1 로 쓴 곳은 1.5배 빠름 (일기토는 환산함) — 전체 정리 필요
+- 책략 연출의 반투명은 점무늬, 겹 그림(마스크) 미사용
 - op08(모드 값)·op0e/op49(전투 끝 상태)·op02(표지)는 화면 동작 없음
 - 상태이상: 차례 시작 일괄 해제 조건(FUN_0043f218) 미분석
 - 출진 화면: 9pt 윈도 글꼴 대신 16px 글꼴이라 오른쪽 장수 정보 배치는 근사, 본진 밖(op4a 등)에서 연 출진 창의 취소는 고른 것만 비움

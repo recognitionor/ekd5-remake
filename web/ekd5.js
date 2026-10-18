@@ -26,9 +26,42 @@
   // ---------- 파일 ----------
   const inflight = new Set();
   let loading = 0;
+  // 큰 글자 (일기토 이름·VS·승부): 원작은 굴림체 굵게 (CreateFont 높이 h, 반각 폭 h/2) → 캔버스로 그려 0/1 모양으로 줌
+  async function textMask(h, text) {
+    const fam = '"GulimChe","굴림체","Gulim","굴림","Nanum Gothic Coding","D2Coding",monospace';
+    try { await document.fonts.load(`bold ${h}px "Nanum Gothic Coding"`, text); } catch (_) {}
+    const half = (ch) => ch.charCodeAt(0) < 0x80;
+    const w = [...text].reduce((a, ch) => a + (half(ch) ? h / 2 : h), 0) | 0;
+    const cv = document.createElement("canvas"); cv.width = Math.max(1, w); cv.height = h;
+    const c = cv.getContext("2d");
+    c.fillStyle = "#fff"; c.textBaseline = "middle"; c.font = `bold ${h}px ${fam}`;
+    let x = 0;
+    for (const ch of text) {
+      const cw = half(ch) ? h / 2 : h;
+      c.save(); c.translate(x + cw / 2, h / 2);
+      const m = c.measureText(ch).width; if (m > cw) c.scale(cw / m, 1);
+      c.textAlign = "center"; c.fillText(ch, 0, h * 0.04); c.restore();
+      x += cw;
+    }
+    const d = c.getImageData(0, 0, cv.width, h).data;
+    const out = new Uint8Array(4 + cv.width * h);
+    out[0] = cv.width & 255; out[1] = cv.width >> 8; out[2] = h & 255; out[3] = h >> 8;
+    for (let i = 0; i < cv.width * h; i++) out[4 + i] = d[i * 4 + 3] > 110 ? 1 : 0;
+    return out;
+  }
   async function fetchFile(name) {
     if (inflight.has(name)) return;
     inflight.add(name); loading++;
+    if (name.startsWith("@txt/")) {
+      try {
+        const [, h, ...rest] = name.split("/");
+        const b = await textMask(parseInt(h, 10), rest.join("/"));
+        const p = putBytes(b);
+        withStr(name, (np, nl) => w.provide(np, nl, p, b.length));
+      } catch (e) { withStr(name, (np, nl) => w.missing(np, nl)); }
+      finally { inflight.delete(name); loading--; }
+      return;
+    }
     try {
       const r = await fetch(DATA + name);
       if (!r.ok) throw new Error(r.status);

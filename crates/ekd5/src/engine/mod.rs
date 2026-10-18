@@ -125,6 +125,10 @@ pub enum Wait {
     Movie,
     /// 맵 연출 (op6b) 끝날 때까지
     Fx,
+    /// 일기토 단계가 끝날 때까지
+    Duel,
+    /// 일기토 뒤 경험치 창·레벨업
+    DuelExp,
 }
 
 pub struct Engine<A: Assets> {
@@ -212,6 +216,10 @@ pub struct Engine<A: Assets> {
     pub camp_menu: bool,
     /// 난수 씨앗 (웹이 시각으로 줌, 0 = 시험용 고정). 원작은 전투마다 GetTickCount 로 씨앗 (FUN_00482060)
     pub entropy: u32,
+    /// 일기토 끝 (op5f) 처리 중
+    duel_ending: bool,
+    /// 시험: 이 사건 블록을 조건과 상관없이 다음 검사 때 실행
+    pub force_block: Option<usize>,
     /// MARK.E5 (막대 무늬 등, 전투 밖에서도)
     pub mark_data: Rc<Vec<u8>>,
     /// 출진 고르기
@@ -301,6 +309,8 @@ impl<A: Assets> Engine<A> {
             camp_pending: false,
             camp_menu: false,
             entropy: 0,
+            duel_ending: false,
+            force_block: None,
             mark_data: Rc::new(Vec::new()),
             sortie_ui: None,
             sortie_sort: (1, 2),
@@ -837,6 +847,42 @@ impl<A: Assets> Engine<A> {
         st.update();
         match self.wait.clone() {
             Wait::Movie => {}
+            Wait::Duel => {
+                let mut done = true;
+                if let Scene::Battle(b) = &mut self.scene {
+                    if let Some(d) = b.duel.as_mut() {
+                        d.update(decided);
+                        for o in d.out.drain(..) {
+                            match o {
+                                duel::Out::Sound(n) => self.sounds.push(Sound::Effect(n)),
+                                duel::Out::Music(m) => {
+                                    self.music_now = m;
+                                    self.sounds.push(Sound::Music(m));
+                                }
+                            }
+                        }
+                        done = !d.busy();
+                    }
+                }
+                if done {
+                    self.wait = Wait::None;
+                    if std::mem::take(&mut self.duel_ending) {
+                        self.end_duel();
+                    }
+                }
+            }
+            Wait::DuelExp => {
+                if let Scene::Battle(b) = &mut self.scene {
+                    if b.dmg_win.as_ref().is_some_and(|w| w.t < 40) {
+                        return;
+                    }
+                    b.dmg_win = None;
+                    if b.run_levelup() {
+                        return;
+                    }
+                }
+                self.wait = Wait::None;
+            }
             Wait::Fx => {
                 if let Scene::Battle(b) = &mut self.scene {
                     if b.fx_req.is_none() {
@@ -1525,13 +1571,13 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x62 => {
-                // 일기토 진 쪽 쓰러짐 (원작 FUN_0044b25a)
-                let t = self.battle().and_then(|b| b.duel.as_mut()).map(|d| {
-                    let s = if d.f[0].pose == duel::Pose::Tired || d.f[0].pose == duel::Pose::Hurt { 0 } else { 1 };
-                    d.motion(s, 12)
-                });
-                if let Some(t) = t {
-                    self.wait = Wait::Ticks(t + 8);
+                // 일기토 승패 (원작 FUN_0044b25a): 인자 = 이긴 쪽
+                if let Some(b) = self.battle() {
+                    let wt = b.win_target;
+                    if let Some(d) = b.duel.as_mut() {
+                        d.defeat(a(0) as usize, wt);
+                        self.wait = Wait::Duel;
+                    }
                 }
             }
             0x5D => {
@@ -1676,69 +1722,74 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x68 => {
-                // 일기토 시작 (두 인물)
-                let who = [a(0) as usize, a(1) as usize];
-                self.log.push(format!("일기토 {} 대 {}", who[0], who[1]));
-                if let Some(b) = self.battle() {
-                    let sp = |p: usize| match b.unit_of(p) {
-                        Some(u) => b.units[u].sprite_idx,
-                        None => battle::sprite_index(p, 0, battle::Side::Enemy),
-                    };
-                    let (s0, s1) = (sp(who[0]), sp(who[1]));
-                    b.duel = Some(duel::Duel::new((who[0], s0), (who[1], s1)));
+                // 일기토 시작 (원작 FUN_0044bb1f): 조조군·우군 장수가 오른쪽(1)
+                let (p1, p2) = (a(0) as usize, a(1) as usize);
+                let friendly = |e: &mut Self, p: usize| e.battle().and_then(|b| b.unit_of(p).map(|u| b.units[u].side != battle::Side::Enemy)).unwrap_or(false);
+                let who = if self.roster.contains(&p1) {
+                    [p2, p1]
+                } else if self.roster.contains(&p2) || !friendly(self, p1) {
+                    [p1, p2]
+                } else {
+                    [p2, p1]
+                };
+                match self.make_duel(who) {
+                    Err(Pending) => {
+                        vm.pc = at;
+                        return Ok(false);
+                    }
+                    Ok(d) => {
+                        self.log.push(format!("일기토 {} 대 {}", who[0], who[1]));
+                        if let Some(b) = self.battle() {
+                            b.duel = Some(d);
+                        }
+                        self.wait = Wait::Duel;
+                    }
                 }
             }
             0x5F => {
-                if let Some(b) = self.battle() {
-                    b.duel = None;
-                    b.ui.speaker_y = None;
-                    b.ui.speaker_cell = None;
+                // 끝 (원작 FUN_0044ba60)
+                if let Some(d) = self.battle().and_then(|b| b.duel.as_mut()) {
+                    d.finish();
+                    self.duel_ending = true;
+                    self.wait = Wait::Duel;
                 }
             }
-            0x61 => {}
+            0x61 => {
+                if let Some(d) = self.battle().and_then(|b| b.duel.as_mut()) {
+                    d.versus();
+                    self.wait = Wait::Duel;
+                }
+            }
             0x64 => {
-                // 일기토 동작 (쪽, 동작)
-                let t = self.battle().and_then(|b| b.duel.as_mut()).map(|d| d.motion(a(0) as usize, a(1) as u8));
-                if let Some(t) = t {
-                    self.wait = Wait::Ticks(t);
+                if let Some(d) = self.battle().and_then(|b| b.duel.as_mut()) {
+                    d.motion((a(0) as usize).min(1), a(1) as u8);
+                    self.wait = Wait::Duel;
                 }
             }
             0x65 | 0x66 => {
-                // 일기토 공방 (쪽, 종류, 맞음)
-                let rush = op == 0x65 && a(1) >= 2 || op == 0x66 && a(1) == 2;
-                let t = self.battle().and_then(|b| b.duel.as_mut()).map(|d| d.exchange(a(0) as usize, rush, a(2) != 0));
-                if let Some(t) = t {
-                    self.sounds.push(Sound::Effect("SE07.WAV".into()));
-                    self.wait = Wait::Ticks(t);
+                // 공격 (쪽, 종류, 모아 치기) / 반격 (쪽, 종류, 막음)
+                if let Some(d) = self.battle().and_then(|b| b.duel.as_mut()) {
+                    let s = (a(0) as usize).min(1);
+                    if op == 0x65 {
+                        d.attack(s, a(1) as u8, a(2) != 0);
+                    } else {
+                        d.counter(s, a(1) as u8, a(2) != 0);
+                    }
+                    self.wait = Wait::Duel;
                 }
             }
             0x60 | 0x63 => {
-                // 일기토 대사 (쪽, 글, 60: 등장 동작 / 63: 기다림)
+                // 등장+대사 (쪽, 글, 동작) / 대사 (쪽, 글, 기다림)
                 let side = (a(0) as usize).min(1);
-                let pid = self.battle().and_then(|b| b.duel.as_mut()).map(|d| {
-                    d.f[side].shown = true;
-                    if op == 0x60 && a(2) != 0 {
-                        d.motion(side, a(2) as u8);
+                let (t, _, _) = encoding_rs::EUC_KR.decode(args[1].bytes());
+                let lines: Vec<String> = t.split('\n').map(|l| l.to_string()).filter(|l| !l.is_empty()).collect();
+                if let Some(d) = self.battle().and_then(|b| b.duel.as_mut()) {
+                    if op == 0x60 {
+                        d.appear(side, lines, a(2) as u8);
+                    } else {
+                        d.say(side, lines, a(2) != 0);
                     }
-                    d.f[side].person
-                });
-                if let Some(pid) = pid {
-                    let (t, _, _) = encoding_rs::EUC_KR.decode(args[1].bytes());
-                    let lines: Vec<String> = t.split('\n').filter(|l| !l.is_empty()).map(|l| l.to_string()).collect();
-                    let name = self.persons.get(pid).map(|p| p.name.clone()).unwrap_or_default();
-                    let face = (pid < self.persons.len()).then(|| self.face_of(pid));
-                    let pages: Vec<story::Page> = lines.chunks(4).map(|c| story::Page { person: Some(pid), face, name: name.clone(), lines: c.to_vec() }).collect();
-                    let (packs, assets) = (&mut self.packs, &mut self.assets);
-                    if let Scene::Battle(b) = &mut self.scene {
-                        // 왼쪽(0) 장수 말은 위, 오른쪽(1) 은 아래
-                        b.ui.speaker_y = Some(if side == 0 { 400 } else { 60 });
-                        b.ui.speaker_cell = None;
-                        if b.ui.show_dialog(packs, assets, pages).is_err() {
-                            vm.pc = at;
-                            return Ok(false);
-                        }
-                        self.wait = Wait::Dialog;
-                    }
+                    self.wait = Wait::Duel;
                 }
             }
             0x11 => {
@@ -1867,22 +1918,6 @@ impl<A: Assets> Engine<A> {
         }
         for s in std::mem::take(&mut b.sounds) {
             self.sounds.push(Sound::Effect(s));
-        }
-        // 일기토 그림
-        if let Some(d) = b.duel.as_mut() {
-            for f in d.f.iter_mut().filter(|f| f.pics.is_none()) {
-                let i = f.sprite_idx;
-                match (self.packs.get(&mut self.assets, "UNIT_MOV.E5", i), self.packs.get(&mut self.assets, "UNIT_ATK.E5", i), self.packs.get(&mut self.assets, "UNIT_SPC.E5", i)) {
-                    (Ok(m), Ok(a), Ok(s)) => {
-                        f.pics = Some(duel::Sprites {
-                            mov: Rc::new(Pic::new(48, 48 * 11, m.unwrap_or_default())),
-                            atk: Rc::new(Pic::new(64, 64 * 12, a.unwrap_or_default())),
-                            spc: Rc::new(Pic::new(48, 48 * 5, s.unwrap_or_default())),
-                        });
-                    }
-                    _ => return false,
-                }
-            }
         }
         // 부대 그림
         for i in 0..b.units.len() {
@@ -2350,7 +2385,10 @@ impl<A: Assets> Engine<A> {
                             }
                         }
                     }
-                    if ok {
+                    if ok || self.force_block == Some(bi) {
+                        if self.force_block == Some(bi) {
+                            self.force_block = None;
+                        }
                         if self.autoplay {
                             self.log.push(format!("사건 블록 {bi}"));
                         }
@@ -2551,6 +2589,9 @@ impl<A: Assets> Engine<A> {
                 b.phase = battle::Phase::Over { won, t: t + 1 };
             }
             _ => check = b.update_player(&inp),
+        }
+        if self.force_block.is_some() && matches!(self.battle().map(|b| &b.phase), Some(battle::Phase::PlayerIdle)) {
+            check = true;
         }
         if check {
             // 사건이 연달아 생길 수 있으니 하나씩
@@ -2756,6 +2797,105 @@ impl<A: Assets> Engine<A> {
             }
         }
         out
+    }
+
+    /// 큰 글자 모양 (웹이 원작 굴림체 굵게로 그려 줌 "@txt/높이/글", 없으면 비트맵 글꼴)
+    fn text_mask(&mut self, text: &str, h: i32) -> Result<duel::Mask, Pending> {
+        let fb = |e: &Self| e.font.as_ref().map(|f| duel::fallback_mask(f, text, h)).unwrap_or(duel::Mask { w: 0, h: 0, px: Vec::new() });
+        match self.assets.get(&format!("@txt/{h}/{text}")) {
+            Asset::Pending => Err(Pending),
+            Asset::Ready(d) => Ok(duel::parse_mask(&d).unwrap_or_else(|| fb(self))),
+            Asset::Missing => Ok(fb(self)),
+        }
+    }
+
+    /// 일기토 준비 (원작 FUN_0044b778): 두 장수의 그림·얼굴·이름, 배경 LOGO.E5[5]. 받는 중이면 Err
+    fn make_duel(&mut self, who: [usize; 2]) -> Result<duel::Duel, Pending> {
+        let mut fs = Vec::new();
+        for &p in &who {
+            let info = self.battle().and_then(|b| b.unit_of(p).map(|u| {
+                let un = &b.units[u];
+                (un.side, un.job, un.level, un.sprite_idx)
+            }));
+            let (side, job, level, sidx) = match info {
+                Some(i) => i,
+                None => {
+                    let o = self.officer(p);
+                    (battle::Side::Enemy, o.job, o.level as i32, battle::sprite_index(p, o.job, battle::Side::Enemy))
+                }
+            };
+            let mov = self.packs.get(&mut self.assets, "UNIT_MOV.E5", sidx)?.unwrap_or_default();
+            let atk = self.packs.get(&mut self.assets, "UNIT_ATK.E5", sidx)?.unwrap_or_default();
+            let spc = self.packs.get(&mut self.assets, "UNIT_SPC.E5", sidx)?.unwrap_or_default();
+            let face_no = self.face_of(p);
+            let face = self.packs.get(&mut self.assets, "FACE.E5", face_no as usize)?.unwrap_or_default();
+            let name = self.persons.get(p).map(|x| x.name.clone()).unwrap_or_default();
+            let big_name = self.text_mask(&name, 64)?;
+            // 병과 (원작 FUN_00407bc0): 2·4 = 말 탄 병종, 걷는 소리 (FUN_00441634 → FUN_004414fb)
+            let g = if job < 0x27 { job as usize / 3 } else if job < 0x35 { job as usize - 0x1A } else { 0x1B };
+            let step = match g {
+                0 | 3 | 4 | 11 | 13 => Some(24),
+                5 | 21 | 22 => Some(25),
+                20 => None,
+                _ => Some(23),
+            }
+            .map(|n| format!("SE{n:02}.WAV"));
+            fs.push(duel::Fighter {
+                person: p,
+                name,
+                pics: duel::Sprites {
+                    mov: Rc::new(Pic::new(48, 48 * 11, mov)),
+                    atk: Rc::new(Pic::new(64, 64 * 12, atk)),
+                    spc: Rc::new(Pic::new(48, 48 * 5, spc)),
+                },
+                face: Pic::new(64, 80, face),
+                side: match side {
+                    battle::Side::Player => 0,
+                    battle::Side::Ally => 1,
+                    battle::Side::Enemy => 2,
+                },
+                cavalry: g == 2 || g == 4,
+                step,
+                level,
+                big_name,
+                shown: false,
+                x: 0,
+                right: false,
+                last: None,
+                dark: false,
+            });
+        }
+        let bg = self.packs.get(&mut self.assets, "LOGO.E5", 5)?.map(|d| Rc::new(Pic::new(624, 384, d)));
+        let vs = self.text_mask("VS", 64)?;
+        let win = self.text_mask("승 부", 96)?;
+        let f1 = fs.pop().unwrap();
+        let f0 = fs.pop().unwrap();
+        Ok(duel::Duel::new([f0, f1], bg, vs, win, self.screen.pal, self.music_now))
+    }
+
+    /// 일기토 끝 (원작 FUN_0044ba60): 지우고, 이긴 오른쪽 아군 장수 경험치 창 (FUN_00452964) 과 레벨업 (FUN_00408d42)
+    fn end_duel(&mut self) {
+        let jobs = self.jobs.clone();
+        let Some(b) = self.battle() else { return };
+        let Some(d) = b.duel.take() else { return };
+        b.ui.speaker_y = None;
+        b.ui.speaker_cell = None;
+        let p = d.f[1].person;
+        if d.exp > 0 && d.f[1].side == 0 {
+            if let Some(u) = b.unit_of(p) {
+                let un = &mut b.units[u];
+                let (ex, lv) = (un.off.exp as i32, un.off.level);
+                un.off.gain_exp(&jobs, d.exp as u32);
+                let to = if un.off.level > lv { 100 } else { un.off.exp as i32 };
+                let (hp, mp) = (un.hp, un.mp);
+                b.dmg_win = Some(battle::DmgWin { u, hp: (hp, hp), mp: (mp, mp), ex: (ex, to), t: 0 });
+                if b.units[u].off.level as i32 > b.units[u].level {
+                    let nl = b.units[u].off.level as i32;
+                    b.levelups.push_back((u, nl));
+                }
+                self.wait = Wait::DuelExp;
+            }
+        }
     }
 
     /// 게임 오버 (원작 FUN_0042e65c)

@@ -219,7 +219,6 @@ pub struct Battle {
     pub list47: Vec<usize>,
     /// 일기토 화면
     pub duel: Option<super::duel::Duel>,
-    duel_tick: u32,
     /// 전투 시작 연출 진행 틱 (원작 op5a FUN_0044db19: 가장자리부터 열고 "작전개시")
     pub intro: Option<u32>,
     /// 책략 연출 (원작 MEFF/MCALL)
@@ -404,7 +403,6 @@ impl Battle {
             goal_zone: None,
             list47: Vec::new(),
             duel: None,
-            duel_tick: 0,
             intro: None,
             fx: None,
             fx_req: None,
@@ -2985,12 +2983,8 @@ impl Battle {
         if let Some(w) = self.dmg_win.clone() {
             self.draw_dmg_win(scr, f, &w);
         }
-        if let Some(d) = self.duel.as_mut() {
-            if tick != self.duel_tick {
-                self.duel_tick = tick;
-                d.update();
-            }
-            d.render(scr, self.col[6], self.col[5], tick);
+        if let Some(d) = &self.duel {
+            d.render(scr, f, &self.mark);
         }
         // 전투 메뉴
         if let Phase::Sys { list, .. } = &self.phase {

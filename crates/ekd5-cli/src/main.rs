@@ -263,6 +263,12 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
                 eng.autoplay = false;
             }
         }
+        // 시험: EKD5_FORCE=틱:블록 (그 틱부터 절 1 의 그 사건 블록을 조건 없이 실행)
+        if let Some((ft, fb)) = std::env::var("EKD5_FORCE").ok().and_then(|v| { let (a, b) = v.split_once(':')?; Some((a.parse::<u32>().ok()?, b.parse::<usize>().ok()?)) }) {
+            if t == ft {
+                eng.force_block = Some(fb);
+            }
+        }
         eng.tick();
         if let Some((qt, qf)) = &qsave {
             if t >= *qt && !Path::new(qf).exists() {
