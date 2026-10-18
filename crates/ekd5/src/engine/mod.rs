@@ -2197,11 +2197,12 @@ impl<A: Assets> Engine<A> {
                         9 => 48,
                         6 | 7 => 16,
                         8 | 10 | 12 => 16,
-                        11 => 1,
+                        // 11 레벨업 돌기 (원작 9번 × 2틱 뒤 승리 자세)
+                        11 => 19,
                         _ => 8,
                     };
                     b.units[u].pose = None;
-                    b.units[u].motion = (1..=12).contains(&m).then_some((m as u8, u32::MAX));
+                    b.units[u].motion = (1..=12).contains(&m).then_some((m as u8, if m == 11 { b.anim_tick } else { u32::MAX }));
                     let se = match m {
                         0 => None,
                         6 | 7 => Some("SE07.WAV"),

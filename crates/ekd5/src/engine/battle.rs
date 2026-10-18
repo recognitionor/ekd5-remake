@@ -122,6 +122,29 @@ pub struct FxEffect {
 }
 
 /// 피해·회복 창: 값이 다섯 번에 나눠 바뀜
+/// 레벨업 연출 (원작 FUN_00407758): 돌기 18틱, 그다음 알림 창마다 (메시지 속도 +1)×10 틱 (FUN_00431a4d)
+#[derive(Clone)]
+pub struct LvUp {
+    pub u: usize,
+    pub msgs: VecDeque<String>,
+    pub t: u32,
+}
+
+/// 받침이 있나 (마지막 글자)
+fn has_batchim(s: &str) -> bool {
+    s.chars().rev().find(|c| !c.is_whitespace()).is_some_and(|c| {
+        let n = c as u32;
+        if (0xAC00..=0xD7A3).contains(&n) {
+            (n - 0xAC00) % 28 != 0
+        } else if c.is_ascii_digit() {
+            // 원작 FUN_004105c9: 숫자 끝자리 (0 영, 1 일, 3 삼, 6 육, 7 칠, 8 팔 은 받침)
+            matches!(c, '0' | '1' | '3' | '6' | '7' | '8')
+        } else {
+            false
+        }
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct DmgWin {
     pub u: usize,
@@ -219,6 +242,11 @@ pub struct Battle {
     info_unit: Option<(usize, u32)>,
     /// 피해·회복 창 (원작 FUN_00452964 / FUN_00452016)
     pub dmg_win: Option<DmgWin>,
+    /// 레벨업 대기 (부대, 새 레벨) 와 지금 보이는 레벨업 (원작 FUN_00407758: 돌기 동작 11, SE11, 알림 창)
+    pub levelups: VecDeque<(usize, i32)>,
+    pub lvup: Option<LvUp>,
+    /// 연출용 틱
+    pub anim_tick: u32,
     /// 다음에 보여줄 창들 (책략이 여럿을 맞힐 때)
     dmg_queue: VecDeque<DmgWin>,
     /// 책략 연출 중 대상 칸에 남는 숫자 (부대, 양) — 원작 FUN_0042459c → FUN_00451ad1
@@ -390,6 +418,9 @@ impl Battle {
             show_minimap: false,
             info_unit: None,
             dmg_win: None,
+            levelups: VecDeque::new(),
+            lvup: None,
+            anim_tick: 0,
             dmg_queue: VecDeque::new(),
             cast_nums: Vec::new(),
             fx_queue: VecDeque::new(),
@@ -1118,14 +1149,10 @@ impl Battle {
             }
             out.push((pos, text));
         }
-        let un = &mut self.units[u];
+        let un = &self.units[u];
         if un.off.level as i32 > un.level {
-            let old = un.max_hp;
-            un.max_hp = un.off.max_hp as i32;
-            un.hp += un.max_hp - old;
-            un.level = un.off.level as i32;
-            self.message = Some((format!("레벨 업! Lv{}", un.level), 60));
-            self.sounds.push("SE11.WAV".into());
+            let lv = un.off.level as i32;
+            self.levelups.push_back((u, lv));
         }
         out
     }
@@ -1202,6 +1229,9 @@ impl Battle {
             return false;
         }
         self.dmg_win = None;
+        if self.run_levelup() {
+            return false;
+        }
         self.cast_nums.clear();
         self.units[u].pose = None;
         self.cast_fx.clear();
@@ -1735,6 +1765,10 @@ impl Battle {
         }
         if let Some(w) = self.dmg_win.as_mut() {
             w.t += 1;
+        }
+        self.anim_tick = self.anim_tick.wrapping_add(1);
+        if let Some(l) = self.lvup.as_mut() {
+            l.t += 1;
         }
         let mut se = Vec::new();
         for un in &mut self.units {
@@ -2284,13 +2318,8 @@ impl Battle {
                         let e = Self::exp_for(self.units[x].level, self.units[y].level, killed);
                         let ups = self.units[x].off.gain_exp(&self.jobs.clone(), e);
                         if ups > 0 {
-                            let un = &mut self.units[x];
-                            let old_max = un.max_hp;
-                            un.max_hp = un.off.max_hp as i32;
-                            un.hp += un.max_hp - old_max;
-                            un.level = un.off.level as i32;
-                            self.message = Some((format!("레벨 업! Lv{}", un.level), 60));
-            self.sounds.push("SE11.WAV".into());
+                            let lv = self.units[x].off.level as i32;
+                            self.levelups.push_back((x, lv));
                         }
                         if crit { format!("치명타 {v}") } else { format!("{v}") }
                     }
@@ -2328,6 +2357,10 @@ impl Battle {
                 return false;
             }
         }
+        // 레벨업 연출 (경험치 창 뒤, 원작 FUN_00408d42 → FUN_00407758)
+        if self.run_levelup() {
+            return false;
+        }
         // 방천화극('.'): 쓰러뜨리면 사거리 안 다른 적을 이어서 (원작 FUN_0043cbeb)
         if self.killed_by == Some(a) && self.units[a].hp > 0 && self.sp(a, 0x2E).is_some() {
             let from = (self.units[a].x, self.units[a].y);
@@ -2339,6 +2372,48 @@ impl Battle {
             }
         }
         // 쓰러진 부대는 사건 검사 뒤 퇴각 (retreat_fallen)
+        true
+    }
+
+    /// 레벨업 연출 한 걸음. 진행 중이면 true
+    pub fn run_levelup(&mut self) -> bool {
+        const SPIN: u32 = 18;
+        const SHOW: u32 = 20;
+        if self.lvup.is_none() {
+            let Some((u, lv)) = self.levelups.pop_front() else { return false };
+            // 레벨·최대 HP 는 여기서 반영 (경험치 창까지는 옛 레벨)
+            let un = &mut self.units[u];
+            let old_max = un.max_hp;
+            un.max_hp = un.off.max_hp as i32;
+            un.hp += un.max_hp - old_max;
+            un.level = lv;
+            let un = &self.units[u];
+            let name = self.names.get(un.person).cloned().unwrap_or_default();
+            // 원작 "%s%s 레벨 %u%s 되었다!" / "책략「%s」%s 배웠다!"
+            let mut msgs = VecDeque::new();
+            msgs.push_back(format!("{name}{} 레벨 {lv}{} 되었다!", if has_batchim(&name) { "은" } else { "는" }, if has_batchim(&lv.to_string()) { "이" } else { "가" }));
+            for st in self.strategies.iter() {
+                if st.learn.get(un.job as usize).is_some_and(|&l| l as i32 == lv) {
+                    msgs.push_back(format!("책략「{}」{} 배웠다!", st.name, if has_batchim(&st.name) { "을" } else { "를" }));
+                }
+            }
+            let t = self.anim_tick;
+            self.units[u].pose = None;
+            self.units[u].motion = Some((11, t));
+            self.lvup = Some(LvUp { u, msgs, t: 0 });
+            return true;
+        }
+        let l = self.lvup.as_mut().unwrap();
+        if l.t == SPIN {
+            self.sounds.push("SE11.WAV".into());
+        }
+        if l.t >= SPIN + SHOW {
+            l.msgs.pop_front();
+            l.t = SPIN;
+            if l.msgs.is_empty() {
+                self.lvup = None;
+            }
+        }
         true
     }
 
@@ -2686,13 +2761,24 @@ impl Battle {
                         }
                     }
                     _ => {
-                        let k = match m {
-                            4 => 9,
-                            8 => 4 + ((tick / 4) % 2) as usize,
-                            9 => 9 + ((tick / 8) % 2) as usize,
-                            _ => 8,
-                        };
-                        draw_frame(scr, sp, 48, k, sx, sy, (m == 8 || m == 11) && (flip || !side && false));
+                        if m == 11 {
+                            // 레벨업 돌기 (원작 FUN_0045976f 11): 아래 6 · 옆 8 · 위 7 · 옆 8 뒤집기 를 2틱씩 9번, 그다음 승리 자세 SPC4
+                            let e = self.anim_tick.wrapping_sub(u.motion.map_or(0, |m| m.1));
+                            if e < 18 {
+                                let (k, fl) = [(6, false), (8, false), (7, false), (8, true)][((e / 2) % 4) as usize];
+                                draw_frame(scr, sp, 48, k, sx, sy, fl);
+                            } else if let Some(spc) = &u.spc {
+                                draw_frame(scr, spc, 48, 4, sx, sy, false);
+                            }
+                        } else {
+                            let k = match m {
+                                4 => 9,
+                                8 => 4 + ((tick / 4) % 2) as usize,
+                                9 => 9 + ((tick / 8) % 2) as usize,
+                                _ => 8,
+                            };
+                            draw_frame(scr, sp, 48, k, sx, sy, m == 8 && (flip || !side && false));
+                        }
                     }
                 }
             } else {
@@ -2886,6 +2972,16 @@ impl Battle {
             }
         }
         // 피해·회복 창
+        // 레벨업 알림 창 (원작 FUN_00431a4d: 가운데, 폭 = 글자 수에 맞춘 32 단위, 높이 48, 글자 0xAC)
+        if let Some(m) = self.lvup.as_ref().filter(|l| l.t >= 18).and_then(|l| l.msgs.front()) {
+            let n = encoding_rs::EUC_KR.encode(m).0.len();
+            let chars = n.div_ceil(2);
+            let (units, pad) = if chars % 2 == 0 { ((chars / 2 + 1).max(2), 16) } else { ((chars / 2 + 2).max(2), 24) };
+            let x = 320 - units as i32 * 16;
+            let y = 240 - 48;
+            story::frame_box(scr, x, y, units as i32 * 32, 48);
+            draw_text(scr, f, x + pad, y + 16, m, 0xAC);
+        }
         if let Some(w) = self.dmg_win.clone() {
             self.draw_dmg_win(scr, f, &w);
         }
