@@ -38,7 +38,7 @@
 - 자동 진행 검사(치트): 전 단계 → 엔딩 → 2회차까지 오류 없음
 
 ## 웹
-- 버튼: 빨리(4배속+대사 자동, F), 메뉴, 저장(5칸 슬롯 창: localStorage ekd5-slot-N, 저장·불러오기, 도중 불러오기는 sessionStorage ekd5-load 후 새로고침, 시작 때 고르기 창), 지도, 설정(배경음악·효과음·화면 방향 자동/세로 고정/가로 고정·화면 맞춤·전체 화면), 취소, 넘기기
+- 버튼: 속도(누를 때마다 ×1→×1.5→×2→×4, localStorage ekd5-speed, ×4 는 대사 자동, F), 메뉴, 저장(5칸 슬롯 창: localStorage ekd5-slot-N, 저장·불러오기, 도중 불러오기는 sessionStorage ekd5-load 후 새로고침, 시작 때 고르기 창), 지도, 설정(배경음악·효과음·화면 방향 자동/세로 고정/가로 고정·화면 맞춤·전체 화면), 취소, 넘기기
 - 화면 방향: 세로면 body.port (위 화면·아래 명성·버튼 4열), 원하는 방향과 폰 방향이 다르면 screen.orientation.lock 시도 + 앱을 90도 돌림 (body.rotcw/rotccw, 크기는 JS, 좌표 toGame 도 돌림)
 - 난수: 원작은 전투마다 GetTickCount 씨앗 (FUN_00482060). 웹은 w.seed(시각) → 전투 시작·불러오기 때 새 씨앗 (CLI 는 고정)
 - (예전 설명) 소리(배경음악·효과음 켜고 끄기, localStorage ekd5-bgm/ekd5-sfx; 아이폰 audioSession: 음악 켬=playback, 끔=ambient 로 다른 앱 음악과 같이), 저장(중간 저장: 전투 내 차례·본진 → localStorage ekd5-quick), 지도(M), 취소, 넘기기, 꽉 채우기, 전체화면

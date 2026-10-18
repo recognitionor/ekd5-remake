@@ -236,11 +236,14 @@
   // 홈 화면 앱 (PWA)
   if ("serviceWorker" in navigator) { navigator.serviceWorker.register("sw.js").catch(() => {}); }
   // 빨리 감기: 4배 속도 + 대사·자막 자동 넘김 (선택지·전투 조작은 그대로)
-  let fast = false, fastTick = 0;
-  try { fast = localStorage.getItem("ekd5-fast") === "1"; } catch (_) {}
+  // 속도: 누를 때마다 1 → 1.5 → 2 → 4 배 (기억). 4배는 대사도 자동으로 넘김
+  const SPEEDS = [1, 1.5, 2, 4];
+  let speed = 1, fastTick = 0;
+  try { const v = parseFloat(localStorage.getItem("ekd5-speed") || (localStorage.getItem("ekd5-fast") === "1" ? "4" : "1")); if (SPEEDS.includes(v)) speed = v; } catch (_) {}
   const fastBtn = document.getElementById("fast");
-  fastBtn.classList.toggle("on", fast);
-  const toggleFast = () => { fast = !fast; fastBtn.classList.toggle("on", fast); try { localStorage.setItem("ekd5-fast", fast ? "1" : "0"); } catch (_) {} };
+  const showSpeed = () => { fastBtn.classList.toggle("on", speed > 1); fastBtn.innerHTML = speed > 1 ? `×${speed}<br>▶▶` : "속도<br>×1"; };
+  showSpeed();
+  const toggleFast = () => { speed = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length]; showSpeed(); try { localStorage.setItem("ekd5-speed", String(speed)); } catch (_) {} };
   fastBtn.addEventListener("click", (e) => { e.preventDefault(); toggleFast(); });
   addEventListener("keydown", (e) => { if (e.code === "KeyF") toggleFast(); });
   // 전체 지도 (원작 미니맵 창)
@@ -421,7 +424,7 @@
     const m = mouse || [0, 0];
     // 빨리 감기 중 대사 대기면 8틱마다 결정 키
     let auto = 0;
-    if (fast && w.waiting_text()) { if (++fastTick >= 8) { fastTick = 0; auto = KEY.DECIDE; } } else fastTick = 0;
+    if (speed >= 4 && w.waiting_text()) { if (++fastTick >= 8) { fastTick = 0; auto = KEY.DECIDE; } } else fastTick = 0;
     w.tick(held | pulseBits | ptrDown | auto, m[0], m[1], mouse ? 1 : 0, click);
     click = 0;
     updateFame(w.fame());
@@ -444,7 +447,7 @@
   function loop(now) {
     if (started && !paused) {
       acc += Math.min(250, now - last);
-      while (acc >= TICK_MS) { for (let k = fast ? 4 : 1; k > 0; k--) step(); acc -= TICK_MS; }
+      while (acc >= TICK_MS / speed) { step(); acc -= TICK_MS / speed; }
       const p = w.frame();
       img.data.set(mem().subarray(p, p + 640 * 480 * 4)); ctx.putImageData(img, 0, 0);
       // 브라우저는 첫 터치 전엔 소리를 못 냄 → 그동안 작은 안내만
