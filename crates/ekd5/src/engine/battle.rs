@@ -157,7 +157,8 @@ pub struct DmgWin {
 impl DmgWin {
     /// 지금 보이는 값 (원작: 2틱마다 1/5씩)
     fn at(&self, v: (i32, i32)) -> i32 {
-        let k = (self.t / 2).min(5) as i32;
+        // 원작 FUN_00452964: 5번 × 1단위 (1.5틱) 에 걸쳐 줄어듦
+        let k = (self.t * 2 / 3).min(5) as i32;
         v.0 + (v.1 - v.0) * k / 5
     }
 }
@@ -221,6 +222,9 @@ pub struct Battle {
     pub duel: Option<super::duel::Duel>,
     /// 전투 시작 연출 진행 틱 (원작 op5a FUN_0044db19: 가장자리부터 열고 "작전개시")
     pub intro: Option<u32>,
+    pub intro_mask: Option<super::duel::Mask>,
+    /// 차례 알림 큰 글자 (진영, 턴)
+    pub banner: Option<(super::duel::Mask, Option<super::duel::Mask>)>,
     /// 책략 연출 (원작 MEFF/MCALL)
     pub fx: Option<super::fx::Fx>,
     /// 연출 읽기 요청 (연출 번호, 중심들) — 엔진이 읽어 fx 로
@@ -404,6 +408,8 @@ impl Battle {
             list47: Vec::new(),
             duel: None,
             intro: None,
+            intro_mask: None,
+            banner: None,
             fx: None,
             fx_req: None,
             cast_applied: false,
@@ -1699,23 +1705,19 @@ impl Battle {
 
     /// 걷기 진행. 모두 섰으면 true
     /// 떠나는 연출 시작 (원작 FUN_004438a5 → FUN_00443b0b). 반환: 걸리는 틱
-    /// 0 퇴각: SE16, 두 번 깜빡이고 사라짐 / 1 퇴장: SE06, SE17 과 함께 가라앉음 / 2 사망: 무릎 꿇고 점점 빨리 깜빡인 뒤 SE22 와 함께 흩어짐
+    /// 0 퇴각: SE16, 3단위씩 두 번 깜빡이고 사라짐 (12) / 1 퇴장: SE06, 4단위 뒤 SE17 과 함께 4px 씩 가라앉음 (16) /
+    /// 2 사망: 무릎 꿇고 3단위씩 4번·1단위씩 6번 깜빡임 (36) → SE22, 하얘짐 16 → 바탕으로 사라짐 16 (68). 단위 = 원작 1/20 초
     pub fn start_leave(&mut self, u: usize, kind: u8) -> u32 {
         if !self.units[u].visible {
             return 0;
         }
         self.units[u].leave = Some((kind, 0));
-        match kind {
-            0 => {
-                self.sounds.push("SE16.WAV".into());
-                14
-            }
-            1 => {
-                self.sounds.push("SE06.WAV".into());
-                20
-            }
-            _ => 46,
+        if kind == 0 {
+            self.sounds.push("SE16.WAV".into());
+        } else if kind == 1 {
+            self.sounds.push("SE06.WAV".into());
         }
+        leave_units(kind) * 3 / 2
     }
 
     /// 걷는 소리 (원작 FUN_004414fb): 도착 칸 지형 2 → 27, 7 → 26, 9·13 → 29, 10 → 28,
@@ -1745,7 +1747,9 @@ impl Battle {
                 let (tx, ty) = ((nx * CELL) as f32, (ny * CELL) as f32);
                 let (dx, dy) = (tx - u.px, ty - u.py);
                 u.dir = if dx.abs() > dy.abs() { if dx < 0.0 { 2 } else { 3 } } else if dy < 0.0 { 1 } else { 0 };
-                let sp = 8.0;
+                // 원작 FUN_00444170 (보통 속도): 1단위에 12px, 말 탄 병과 (FUN_004420cf: 0·3·4·11·13·17·20) 는 24px → 30틱 기준 8 / 16
+                let fast = matches!(Self::move_row(u.job), 0 | 3 | 4 | 11 | 13 | 17 | 20);
+                let sp = if fast { 16.0 } else { 8.0 };
                 if dx.abs() <= sp && dy.abs() <= sp {
                     u.px = tx;
                     u.py = ty;
@@ -1775,15 +1779,11 @@ impl Battle {
                 un.motion = None;
             }
             if let Some((k, t)) = un.leave {
-                let end = match k {
-                    0 => 14,
-                    1 => 20,
-                    _ => 46,
-                };
+                let end = leave_units(k) * 3 / 2;
                 if k == 1 && t == 6 {
                     se.push("SE17.WAV");
                 }
-                if k == 2 && t == 28 {
+                if k == 2 && t == 54 {
                     se.push("SE22.WAV");
                 }
                 if t >= end {
@@ -2277,12 +2277,15 @@ impl Battle {
                 self.units[x].pose = Some(6);
                 let m = format!("@공격 {}→{}", self.units[x].person, self.units[y].person);
                 self.cast_log.push(m);
+            }
+            // 원작 FUN_00404849 시간표 (단위 1/20 초 = 1.5틱): 2 휘두르기 소리·첫 장, 8 둘째 장, 12 셋째 장, 13 넷째 장·맞음, 27 끝
+            if st == 3 {
                 // 휘두르는 소리 (원작 FUN_00404849: 그룹 0,1,7,9,10,14,15,18 → 34, 2·4 → 37, 그 외 32)
                 let g = self.group(x);
                 let se = if matches!(g, 0 | 1 | 7 | 9 | 10 | 14 | 15 | 18) { 0x22 } else if matches!(g, 2 | 4) { 0x25 } else { 0x20 };
                 self.sounds.push(format!("SE{se:02}.WAV"));
             }
-            if st == 8 {
+            if st == 20 {
                 let (vx, vy) = (self.units[y].x, self.units[y].y);
                 let before = (self.units[y].hp, self.units[y].mp, self.units[y].off.exp as i32);
                 // 장비 경험치: 공격자 무기 (공격 무기만, 빗나감 1 / 상대 레벨이 낮으면 2 / 3), 맞은 쪽 방어구 (빗나감 1 / 공격자 레벨이 낮으면 3 / 4)
@@ -2331,7 +2334,7 @@ impl Battle {
                     self.popup = Some((vx * CELL + 8 - self.cam.0, vy * CELL - 8 - self.cam.1, text, 24));
                 }
             }
-            if st >= if self.dmg_win.is_some() { 40 } else { 18 } {
+            if st >= if self.dmg_win.is_some() { 60 } else { 41 } {
                 self.dmg_win = None;
                 self.units[x].pose = None;
                 self.units[y].pose = None;
@@ -2351,7 +2354,7 @@ impl Battle {
                 let un = &self.units[u];
                 self.dmg_win = Some(DmgWin { u, hp: (un.hp, un.hp), mp: (un.mp, un.mp), ex: (ex as i32, to), t: 0 });
                 self.strikes.push_back((u, u, Some(-1), false));
-                self.strike_t = 9;
+                self.strike_t = 21;
                 return false;
             }
         }
@@ -2375,8 +2378,9 @@ impl Battle {
 
     /// 레벨업 연출 한 걸음. 진행 중이면 true
     pub fn run_levelup(&mut self) -> bool {
-        const SPIN: u32 = 18;
-        const SHOW: u32 = 20;
+        // 원작 단위 → 30틱: 돌기 9장 × 2단위 = 27틱, 알림 (메시지 속도 1 + 1) × 10 × 0.1 초 = 60틱 (FUN_0042ec06)
+        const SPIN: u32 = 27;
+        const SHOW: u32 = 60;
         if self.lvup.is_none() {
             let Some((u, lv)) = self.levelups.pop_front() else { return false };
             // 레벨·최대 HP 는 여기서 반영 (경험치 창까지는 옛 레벨)
@@ -2684,23 +2688,48 @@ impl Battle {
             // 떠나는 연출
             let mut sink = 0;
             let mut dissolve = 0;
+            let mut whiten = 0u8;
             if let Some((k, t)) = u.leave {
+                // 원작 단위로 (1/20 초)
+                let n = t * 2 / 3;
                 match k {
-                    0 if (t / 3) % 2 == 1 => continue,
-                    1 if t >= 6 => sink = ((t - 6) * 4).min(48) as i32,
-                    2 if t < 28 => {
-                        // 점점 빨리 깜빡임
-                        let p = if t < 10 { 5 } else if t < 20 { 3 } else { 1 };
-                        if (t / p) % 2 == 1 {
+                    0 if (n / 3) % 2 == 0 => continue,
+                    1 if n >= 4 => sink = ((n - 4) * 4).min(48) as i32,
+                    2 if n < 24 => {
+                        if (n / 3) % 2 == 0 {
                             continue;
                         }
                     }
-                    2 => dissolve = (t - 28) as i32,
+                    2 if n < 36 => {
+                        if (n - 24) % 2 == 0 {
+                            continue;
+                        }
+                    }
+                    2 if n < 52 => whiten = ((n - 36) / 2 + 1) as u8,
+                    2 => dissolve = (n - 52) as i32 + 1,
                     _ => {}
                 }
             }
+            // 사망 하얘짐 (원작 FUN_00432970: 4비트 채널 + n)
+            let white_lut: Vec<u8> = if whiten > 0 {
+                (0..256usize)
+                    .map(|c| {
+                        let q = scr.pal[c];
+                        let f = |v: u8| ((v / 16 + whiten).min(15)) * 17;
+                        if c == 0 { 0 } else { crate::palette::nearest(&scr.pal, [f(q[0]), f(q[1]), f(q[2])]) }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let walking = !u.path.is_empty();
-            let step = if walking { (tick / 4) % 2 } else { (tick / 16) % 2 } as i32;
+            // 걷는 그림: 원작은 칸의 앞 24px 는 첫 장, 뒤 24px 는 둘째 장 (FUN_00444170)
+            let step = if walking {
+                let rem = u.path.front().map_or(0.0, |&(nx, ny)| ((nx * CELL) as f32 - u.px).abs() + ((ny * CELL) as f32 - u.py).abs());
+                if rem > 24.0 { 0 } else { 1 }
+            } else {
+                ((tick / 16) % 2) as i32
+            };
             let (frame, flip) = match u.pose {
                 Some(9) => (9 + step, false),
                 Some(6) => (6 + (u.dir.min(2)) as i32, u.dir == 3),
@@ -2726,7 +2755,14 @@ impl Battle {
                     1 => 4,
                     _ => 8,
                 };
-                let k = base + (self.strike_t / 3).min(3) as usize;
+                // 원작 단위로 그림: 0..7 첫 장, 8..11 둘째, 12 셋째, 13.. 넷째
+                let k = base
+                    + match self.strike_t * 2 / 3 {
+                        0..=7 => 0,
+                        8..=11 => 1,
+                        12 => 2,
+                        _ => 3,
+                    };
                 draw_frame(scr, atk, 64, k, sx - 8, sy - 8, u.dir == 3);
             } else if let (Some(9), Some(spc)) = (u.pose, &u.spc) {
                 draw_frame(scr, spc, 48, 3, sx, sy, u.dir == 3);
@@ -2762,8 +2798,8 @@ impl Battle {
                         if m == 11 {
                             // 레벨업 돌기 (원작 FUN_0045976f 11): 아래 6 · 옆 8 · 위 7 · 옆 8 뒤집기 를 2틱씩 9번, 그다음 승리 자세 SPC4
                             let e = self.anim_tick.wrapping_sub(u.motion.map_or(0, |m| m.1));
-                            if e < 18 {
-                                let (k, fl) = [(6, false), (8, false), (7, false), (8, true)][((e / 2) % 4) as usize];
+                            if e < 27 {
+                                let (k, fl) = [(6, false), (8, false), (7, false), (8, true)][((e / 3) % 4) as usize];
                                 draw_frame(scr, sp, 48, k, sx, sy, fl);
                             } else if let Some(spc) = &u.spc {
                                 draw_frame(scr, spc, 48, 4, sx, sy, false);
@@ -2798,13 +2834,13 @@ impl Battle {
                             continue;
                         }
                         // 흩어짐: 점점 많은 점을 빼기
-                        if dissolve > 0 && ((xx * 7 + yy * 13) % 18) < dissolve {
+                        if dissolve > 0 && ((xx * 7 + yy * 13) % 16) < dissolve {
                             continue;
                         }
                         let sxp = if flip { 47 - xx } else { xx };
                         let c = sp.px[((frame * 48 + yy) as usize) * 48 + sxp as usize];
                         if c != 0 {
-                            let c = if lut_dark { dark_lut[c as usize] } else if lut_poison { poison_lut[c as usize] } else { c };
+                            let c = if !white_lut.is_empty() { white_lut[c as usize] } else if lut_dark { dark_lut[c as usize] } else if lut_poison { poison_lut[c as usize] } else { c };
                             scr.fill(sx + xx, sy + yy, 1, 1, c);
                         }
                     }
@@ -2911,14 +2947,33 @@ impl Battle {
             draw_text(scr, f, 196, 448, m, story::TEXT);
         }
         match &self.phase {
-            Phase::TurnBanner { side, .. } => {
-                let s = match side {
-                    Side::Player => format!("제 {}턴  아군 차례", self.turn),
-                    Side::Ally => "우군 차례".to_string(),
-                    Side::Enemy => "적군 차례".to_string(),
-                };
-                frame_box(scr, 200, 210, 240, 44);
-                draw_text(scr, f, 320 - s.chars().count() as i32 * 7, 224, &s, story::TEXT);
+            Phase::TurnBanner { side, t } if *side != Side::Ally => {
+                // 원작 FUN_0044cc86: 맵을 바둑판으로 덮음 (아군 0x2d / 적군 0x3f), 가운데 큰 글자
+                // 층 (2, 0x2a·0x3a) (1, 0x24·0x35) 위 0x12. 아군은 10단위 뒤 아래에 "제 n턴" (2, 0x1f) (1, 0x18)
+                let enemy = *side == Side::Enemy;
+                let tint = if enemy { 0x3f } else { 0x2d };
+                for i in 0..640 * 480 {
+                    scr.glaze.push((i as u32, scr.px[i], tint));
+                }
+                if let Some((m1, m2)) = &self.banner {
+                    let draw = |scr: &mut Screen, m: &super::duel::Mask, y: i32, layers: [(i32, u8); 3]| {
+                        let x = 320 - m.w / 2;
+                        for (k, c) in layers {
+                            for yy in 0..m.h {
+                                for xx in 0..m.w {
+                                    if m.px[(yy * m.w + xx) as usize] != 0 {
+                                        scr.fill(x + xx + k, y + yy + k, 1, 1, c);
+                                    }
+                                }
+                            }
+                        }
+                    };
+                    draw(scr, m1, 240 - m1.h / 2, if enemy { [(2, 0x3a), (1, 0x35), (0, 0x12)] } else { [(2, 0x2a), (1, 0x24), (0, 0x12)] });
+                    if let (Some(m2), true) = (m2, *t >= 15) {
+                        // 글자 칸 위를 16 + 2h 내린 가운데 → 가운데가 8 + h 아래
+                        draw(scr, m2, 240 + 8 + m1.h - m2.h / 2, [(2, 0x1f), (1, 0x18), (0, 0x12)]);
+                    }
+                }
             }
             Phase::Over { won, .. } => {
                 let s = if *won { "승리!" } else { "패배……" };
@@ -2958,20 +3013,28 @@ impl Battle {
             scr.fill(vx, vy, 1, vh.min(h), c);
             scr.fill(vx + vw.min(w) - 1, vy, 1, vh.min(h), c);
         }
-        if let Some(t) = self.intro {
-            // 가장자리에서 가운데로 열림 (16틱), 그 뒤 "작전개시" (원작 문자열 0x498a04)
-            let open = (t as i32 * 20).min(320);
-            scr.fill(open, 0, 640 - open * 2, 480, self.col[6]);
-            if t >= 14 {
-                let txt = "작전개시";
-                let k = 3;
-                let w = txt.chars().count() as i32 * 16 * k;
-                story::draw_text_big(scr, f, 320 - w / 2, 240 - 8 * k, txt, k, self.col[4], self.col[6]);
+        if self.intro.is_some() {
+            // 원작 FUN_0044db19: 맵 전체에 어두운 바둑판 (FUN_00453cca 0x1f) + "작전개시" (원작 문자열 0x498a04, 층 2·1·위)
+            // (바둑판은 폰 확대에서 뭉개지므로 이동 범위처럼 반반 섞음)
+            for i in 0..640 * 480 {
+                scr.glaze.push((i as u32, scr.px[i], 0x1f));
+            }
+            if let Some(m) = &self.intro_mask {
+                let (x, y) = (320 - m.w / 2, 240 - m.h / 2);
+                for (k, c) in [(2, 0x18u8), (1, 0x15), (0, 0x12)] {
+                    for yy in 0..m.h {
+                        for xx in 0..m.w {
+                            if m.px[(yy * m.w + xx) as usize] != 0 {
+                                scr.fill(x + xx + k, y + yy + k, 1, 1, c);
+                            }
+                        }
+                    }
+                }
             }
         }
         // 피해·회복 창
         // 레벨업 알림 창 (원작 FUN_00431a4d: 가운데, 폭 = 글자 수에 맞춘 32 단위, 높이 48, 글자 0xAC)
-        if let Some(m) = self.lvup.as_ref().filter(|l| l.t >= 18).and_then(|l| l.msgs.front()) {
+        if let Some(m) = self.lvup.as_ref().filter(|l| l.t >= 27).and_then(|l| l.msgs.front()) {
             let n = encoding_rs::EUC_KR.encode(m).0.len();
             let chars = n.div_ceil(2);
             let (units, pad) = if chars % 2 == 0 { ((chars / 2 + 1).max(2), 16) } else { ((chars / 2 + 2).max(2), 24) };
@@ -3182,4 +3245,13 @@ impl Battle {
         draw_text(scr, f, bx + 280, by + 66, &format!("{eff:>3}%"), story::TEXT);
     }
 
+}
+
+/// 떠나는 연출 길이 (원작 단위 1/20 초, FUN_00443b0b)
+fn leave_units(kind: u8) -> u32 {
+    match kind {
+        0 => 12,
+        1 => 16,
+        _ => 68,
+    }
 }

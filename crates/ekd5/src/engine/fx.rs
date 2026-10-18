@@ -79,7 +79,7 @@ impl Fx {
     /// 한 틱. 끝나면 true
     pub fn advance(&mut self) -> bool {
         self.t += 1;
-        if self.t >= self.delay * 2 {
+        if self.t >= (self.delay * 3).div_ceil(2) {
             self.t = 0;
             self.step += 1;
         }

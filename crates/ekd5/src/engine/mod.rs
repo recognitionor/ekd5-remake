@@ -127,6 +127,10 @@ pub enum Wait {
     Fx,
     /// 일기토 단계가 끝날 때까지
     Duel,
+    /// 장 제목 카드 (단계 0 장 번호 / 1 제목, 틱)
+    Chapter(u8, u32),
+    /// 기다림 (누르면 넘김), 끝나면 op69 자막 지움
+    TicksSkip(u32),
     /// 일기토 뒤 경험치 창·레벨업
     DuelExp,
 }
@@ -216,6 +220,8 @@ pub struct Engine<A: Assets> {
     pub camp_menu: bool,
     /// 난수 씨앗 (웹이 시각으로 줌, 0 = 시험용 고정). 원작은 전투마다 GetTickCount 로 씨앗 (FUN_00482060)
     pub entropy: u32,
+    /// 장 제목 카드의 둘째 장 (제목)
+    card_title: Option<duel::Mask>,
     /// 일기토 끝 (op5f) 처리 중
     duel_ending: bool,
     /// 시험: 이 사건 블록을 조건과 상관없이 다음 검사 때 실행
@@ -309,6 +315,7 @@ impl<A: Assets> Engine<A> {
             camp_pending: false,
             camp_menu: false,
             entropy: 0,
+            card_title: None,
             duel_ending: false,
             force_block: None,
             mark_data: Rc::new(Vec::new()),
@@ -612,7 +619,7 @@ impl<A: Assets> Engine<A> {
                 }
                 if let Scene::Battle(b) = &mut self.scene {
                     if let Some(t) = b.intro {
-                        b.intro = if t >= 44 { None } else { Some(t + 1) };
+                        b.intro = if t >= 30 { None } else { Some(t + 1) };
                     }
                 }
                 if self.autoplay {
@@ -927,8 +934,45 @@ impl<A: Assets> Engine<A> {
                     self.wait = Wait::None;
                 }
             }
+            Wait::TicksSkip(n) => {
+                if decided || n <= 1 {
+                    if std::mem::take(&mut st.card_key) {
+                        st.card = None;
+                    }
+                    self.wait = Wait::None;
+                } else {
+                    self.wait = Wait::TicksSkip(n - 1);
+                }
+            }
+            Wait::Chapter(ph, t) => {
+                // 원작 FUN_0040bd20: 페이드 인 (10단계) → 1초 → 누를 때까지 최대 2초 (제목은 4초) → 페이드 아웃
+                let hold_max = if ph == 0 { 60 } else { 120 };
+                let (fin, hold, skip_end) = (16, 16 + 30, 16 + 30 + hold_max);
+                let mut t = t + 1;
+                if t <= fin {
+                    self.screen.level = t.min(16) as u8;
+                } else if t > hold && t < skip_end && decided {
+                    t = skip_end;
+                }
+                if t >= skip_end {
+                    let k = t - skip_end;
+                    self.screen.level = 16u32.saturating_sub(k) as u8;
+                    if k >= 16 {
+                        if ph == 0 {
+                            st.big_card = self.card_title.take();
+                            self.wait = Wait::Chapter(1, 0);
+                        } else {
+                            st.big_card = None;
+                            self.wait = Wait::None;
+                        }
+                        return;
+                    }
+                }
+                self.wait = Wait::Chapter(ph, t);
+            }
             Wait::Fade(to) => {
-                let l = if level < to { (level + 2).min(to) } else { level.saturating_sub(2).max(to) };
+                // 원작 FUN_004209b5: 10단계 × 1단위 (+3) ≈ 16틱
+                let l = if level < to { (level + 1).min(to) } else { level.saturating_sub(1).max(to) };
                 self.screen.level = l;
                 if l == to {
                     self.wait = Wait::None;
@@ -1140,8 +1184,9 @@ impl<A: Assets> Engine<A> {
                 }
             }
             9 => {
+                // 기다림 (원작 FUN_00417f1f → FUN_0042ea8b: n × 2단위 = n × 0.1 초 → 30틱 기준 3n)
                 if a(0) > 0 {
-                    self.wait = Wait::Ticks(a(0) as u32);
+                    self.wait = Wait::Ticks(a(0) as u32 * 3);
                 }
             }
             0x24 => {
@@ -1331,12 +1376,24 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x67 => {
-                // 장 제목 카드
+                // 장 제목 카드 (원작 FUN_00415f3c → FUN_0040bd20): 0 서장, 1~3 제n장, 4 종장 → 제목. 검은 화면 큰 글자
                 let (t, _, _) = encoding_rs::EUC_KR.decode(args[1].bytes());
-                self.chapter = (a(0) - 1).max(0) as u8;
-                if let Scene::Story(st) = &mut self.scene {
-                    st.card = Some(format!("제{}장  {}", a(0), t));
-                    self.wait = Wait::Ticks(75);
+                let label = ["서장", "제1장", "제2장", "제3장", "종장"].get(a(0) as usize).copied();
+                if let Some(label) = label {
+                    let (m1, m2) = match (self.text_mask(label, 64), self.text_mask(&t, 64)) {
+                        (Ok(x), Ok(y)) => (x, y),
+                        _ => {
+                            vm.pc = at;
+                            return Ok(false);
+                        }
+                    };
+                    self.chapter = (a(0) - 1).max(0) as u8;
+                    self.card_title = Some(m2);
+                    if let Scene::Story(st) = &mut self.scene {
+                        st.big_card = Some(m1);
+                        self.screen.level = 0;
+                        self.wait = Wait::Chapter(0, 0);
+                    }
                 }
             }
             0x06 => {
@@ -1528,7 +1585,8 @@ impl<A: Assets> Engine<A> {
                 if let Scene::Story(st) = &mut self.scene {
                     st.card = Some(t.to_string());
                     st.card_key = true;
-                    self.wait = Wait::Key;
+                    // (메시지 속도 1 + 1) × 10 × 0.1 초 = 2초, 누르면 넘김
+                    self.wait = Wait::TicksSkip(60);
                 }
             }
             0x31 if self.battle().is_none() => {
@@ -1564,10 +1622,19 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x5A => {
-                // 전투 시작 연출 (원작 FUN_0044db19)
+                // 전투 시작 연출 (원작 FUN_0044db19): 맵을 어둡게 덮고 "작전개시" (맵 폭 < 720 이면 48px, 아니면 64px), 1초 뒤 걷음
+                let h = self.battle().map_or(64, |b| if b.cols * battle::CELL < 0x2d0 { 48 } else { 64 });
+                let m = match self.text_mask("작전개시", h) {
+                    Ok(m) => m,
+                    Err(Pending) => {
+                        vm.pc = at;
+                        return Ok(false);
+                    }
+                };
                 if let Some(b) = self.battle() {
                     b.intro = Some(0);
-                    self.wait = Wait::Ticks(45);
+                    b.intro_mask = Some(m);
+                    self.wait = Wait::Ticks(31);
                 }
             }
             0x62 => {
@@ -2228,13 +2295,16 @@ impl<A: Assets> Engine<A> {
                     let m = a(1);
                     // 걸리는 틱 (원작 대기 수): 9 = 2장 × 6번 × 8, 6·7 공격 4장, 8·10·12 짧은 반복, 그 외 한 장
                     // 연출 길이 (스크립트 대기). 그림은 원작처럼 다시 그릴 때까지 남음
-                    let dur = match m {
+                    // 원작 FUN_0045976f 의 대기 (단위 1/20 초): 6 4장×1, 7 2번×4장×2, 8 16장×2, 9 6장×8, 10 2+3, 11 9장×2 (레벨업 돌기), 12 5장×2
+                    let dur_units: u32 = match m {
+                        6 => 4,
+                        7 => 16,
+                        8 => 32,
                         9 => 48,
-                        6 | 7 => 16,
-                        8 | 10 | 12 => 16,
-                        // 11 레벨업 돌기 (원작 9번 × 2틱 뒤 승리 자세)
-                        11 => 19,
-                        _ => 8,
+                        10 => 5,
+                        11 => 18,
+                        12 => 10,
+                        _ => 0,
                     };
                     b.units[u].pose = None;
                     b.units[u].motion = (1..=12).contains(&m).then_some((m as u8, if m == 11 { b.anim_tick } else { u32::MAX }));
@@ -2248,9 +2318,10 @@ impl<A: Assets> Engine<A> {
                         b.sounds.push(se.into());
                     }
                     // 앞뒤 대기 (인자 3·4, 동작 0·11 제외)
-                    if m != 0 && m != 11 {
-                        let w = dur + if a(2) != 0 { 8 } else { 0 } + if a(3) != 0 { 8 } else { 0 };
-                        self.wait = Wait::Ticks(w);
+                    let extra = if m != 0 && m != 11 { (if a(2) != 0 { 8 } else { 0 }) + (if a(3) != 0 { 8 } else { 0 }) } else { 0 };
+                    let w = dur_units + extra;
+                    if w > 0 {
+                        self.wait = Wait::Ticks((w * 3).div_ceil(2));
                     }
                 }
             }
@@ -2485,6 +2556,32 @@ impl<A: Assets> Engine<A> {
                 });
             }
         }
+        // 차례 알림 큰 글자 준비 (원작 FUN_0044cc86: "아군 차례"/"적군 차례", 아군이면 "제 n턴" 또는 "마지막 차례")
+        let need = self.battle().and_then(|b| match b.phase {
+            battle::Phase::TurnBanner { t: 0, side } if b.banner.is_none() && side != battle::Side::Ally => {
+                Some((side, b.turn, b.turn_limit, if b.cols * battle::CELL < 0x2d0 { 48 } else { 64 }))
+            }
+            _ => None,
+        });
+        if let Some((side, turn, lim, h)) = need {
+            let first = if side == battle::Side::Enemy { "적군 차례" } else { "아군 차례" };
+            let m1 = match self.text_mask(first, h) {
+                Ok(m) => m,
+                Err(Pending) => return,
+            };
+            let m2 = if side == battle::Side::Player {
+                let s = if turn < lim { format!("제{turn:2}턴") } else { "마지막 차례".to_string() };
+                match self.text_mask(&s, h) {
+                    Ok(m) => Some(m),
+                    Err(Pending) => return,
+                }
+            } else {
+                None
+            };
+            if let Some(b) = self.battle() {
+                b.banner = Some((m1, m2));
+            }
+        }
         let Some(b) = self.battle() else { return };
         if !b.started {
             return;
@@ -2514,8 +2611,14 @@ impl<A: Assets> Engine<A> {
                 if t == 1 {
                     check = true;
                 }
+                // 차례 표시 길이 (원작 FUN_0044cc86): 아군 10+20 단위, 적군 20 단위, 우군은 표시 없음
+                let end = match side {
+                    battle::Side::Player => 45,
+                    battle::Side::Enemy => 30,
+                    battle::Side::Ally => 1,
+                };
                 // 차례 표시가 끝날 무렵 상태 회복 처리 (연출이 있으면 재생)
-                if t == 35 {
+                if t + 1 == end {
                     b.start_side(side);
                     if b.next_status_fx() {
                         b.phase = battle::Phase::TurnBanner { side, t: t + 1 };
@@ -2523,7 +2626,8 @@ impl<A: Assets> Engine<A> {
                         return;
                     }
                 }
-                if t >= 36 {
+                if t >= end {
+                    b.banner = None;
                     if side == battle::Side::Player {
                         for u in &mut b.units {
                             // 혼란이면 행동 못함

@@ -59,6 +59,8 @@ pub struct Story {
     pub card: Option<String>,
     /// 누르면 지우는 자막 (op69)
     pub card_key: bool,
+    /// 장 제목 카드 (op67, 원작 FUN_0040bd20): 검은 화면 가운데 큰 글자
+    pub big_card: Option<super::duel::Mask>,
     /// 전투 중 말하는 부대의 화면 y (창 위치 결정)
     pub speaker_y: Option<i32>,
     /// 전투 중 말하는 부대의 칸 — 창을 그 옆에 붙이고 화살표로 가리킴 (원작 FUN_0042efde)
@@ -93,6 +95,7 @@ impl Default for Story {
             title_timer: 0,
             card: None,
             card_key: false,
+            big_card: None,
             speaker_y: None,
             speaker_cell: None,
             cam: (0, 0),
@@ -302,6 +305,20 @@ impl Story {
 
     pub fn render(&mut self, scr: &mut Screen, font: Option<&Font>, tick: u32) {
         scr.clear(0);
+        if let Some(m) = &self.big_card {
+            // 큰 글자 층 (원작 FUN_004212a8 2·1 칸 밀어 0x18·0x15, 위 0x12) — 화면 위 40 아래 가운데
+            let (x, y) = (320 - m.w / 2, (40 + 480) / 2 - m.h / 2);
+            for (k, c) in [(2, 0x18u8), (1, 0x15), (0, 0x12)] {
+                for yy in 0..m.h {
+                    for xx in 0..m.w {
+                        if m.px[(yy * m.w + xx) as usize] != 0 {
+                            scr.fill(x + xx + k, y + yy + k, 1, 1, c);
+                        }
+                    }
+                }
+            }
+            return;
+        }
         if let Some(bg) = &self.bg {
             scr.blit(bg, 0, 40, None);
         }
@@ -350,8 +367,13 @@ impl Story {
                 }
             }
             if let Some(c) = &self.card {
-                frame_box(scr, 160, 200, 320, 64);
-                draw_text(scr, f, 320 - c.chars().count() as i32 * 7, 224, c, NAME);
+                // 원작 FUN_00431a4d: 가운데 (이야기 y 160), 폭 = 글자 수에 맞춘 32 단위, 높이 48, 글자 0xAC
+                let n = encoding_rs::EUC_KR.encode(c).0.len();
+                let chars = n.div_ceil(2);
+                let (units, pad) = if chars % 2 == 0 { ((chars / 2 + 1).max(2), 16) } else { ((chars / 2 + 2).max(2), 24) };
+                let x = 320 - units as i32 * 16;
+                frame_box(scr, x, 160, units as i32 * 32, 48);
+                draw_text(scr, f, x + pad, 176, c, 0xAC);
             }
             if let Some(p) = self.pages.get(self.page) {
                 if self.narration {
