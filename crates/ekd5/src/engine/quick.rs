@@ -219,7 +219,8 @@ impl<A: Assets> Engine<A> {
             b.targets = bs.targets;
             b.objective = bs.objective;
             b.inventory = bs.inventory;
-            b.rng = bs.rng;
+            // 원작은 불러와도 난수가 이어지지 않음 (전투마다 시각 씨앗) → 웹에서는 새로
+            b.rng = self.fresh_seed().unwrap_or(bs.rng);
             b.objs = bs.objs;
             b.goal_zone = bs.goal_zone;
             b.list47 = bs.list47;

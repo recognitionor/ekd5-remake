@@ -133,6 +133,12 @@ pub unsafe extern "C" fn set_common(ptr: *const u8, len: usize) {
     with(|app| app.engine.set_common(&s))
 }
 
+/// 난수 씨앗 (시각)
+#[no_mangle]
+pub extern "C" fn seed(v: u32) {
+    with(|app| app.engine.entropy = v.max(1))
+}
+
 /// 동영상 재생 가능 알림 / 끝남
 #[no_mangle]
 pub extern "C" fn enable_movies() {

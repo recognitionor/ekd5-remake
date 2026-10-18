@@ -46,9 +46,32 @@
   #status:empty { display: none; }
   #rotate { display: none; position: fixed; inset: 0; z-index: 20; background: #000;
     flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; font-size: 17px; }
-  @media (orientation: portrait) and (max-width: 900px) { #rotate { display: flex; } }
+  /* 세로 배치: 위 화면, 아래 명성 막대와 버튼 */
+  body.port #app { flex-direction: column; justify-content: flex-start; gap: 6px; }
+  body.port #screen { order: 0; width: var(--vw); height: calc(var(--vw) * 3 / 4); }
+  body.port.fill #screen { width: var(--vw); height: min(calc(var(--vh) - 170px), calc(var(--vw) * 1.1)); }
+  body.port #fame { order: 1; width: var(--vw); height: 22px; flex-direction: row; gap: 8px; }
+  body.port #fameBox { width: 204px; height: 12px; }
+  body.port #fameCv { transform: translate(-50%, -50%); }
+  body.port #fameLabel { writing-mode: horizontal-tb; letter-spacing: 0; }
+  body.port #bar { order: 2; width: var(--vw); height: auto; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 6px 10px; box-sizing: border-box; }
+  body.port #bar button { width: 100%; height: 52px; font-size: 15px; }
+  body.port #bar #cancel { height: 52px; }
+  /* 폰이 화면 방향 고정을 못 하면 (아이폰) 앱 전체를 90도 돌려서 맞춤 */
+  body.rotcw #app, body.rotccw #app { inset: auto; width: 100vh; height: 100vw; top: 0; padding: 0; transform-origin: top left; }
+  body.rotcw #app { left: 100vw; transform: rotate(90deg); }
+  body.rotccw #app { left: 0; top: 100vh; transform: rotate(-90deg); }
 
   .tog { font-size: 15px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--btn-bd); background: var(--btn-bg); color: var(--fg); font-weight: 600; text-align: left; }
+  #slots { position: fixed; inset: 0; z-index: 45; background: rgba(0,0,0,.6); align-items: center; justify-content: center; }
+  .slotBox { background: #1c1712; border: 1px solid #8a6a3b; border-radius: 14px; padding: 14px; width: min(420px, 90vw); max-height: 90vh; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+  #slotList, #slotExtra { display: flex; flex-direction: column; gap: 6px; }
+  #slotExtra { flex-direction: row; flex-wrap: wrap; }
+  .slot { text-align: left; font-size: 15px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--btn-bd); background: var(--btn-bg); color: var(--fg); }
+  .slot b { display: inline-block; width: 22px; color: #e0b060; }
+  .slot small { display: block; opacity: .6; font-size: 12px; margin-left: 22px; }
+  .slot:disabled { opacity: .5; }
+  .slot.small { flex: 1; text-align: center; font-size: 14px; }
 </style>
 </head>
 <body>
@@ -60,13 +83,10 @@
     <button id="menu">메뉴</button>
     <button id="save">저장</button>
     <button id="map">지도</button>
-    <button id="snd">소리</button>
+    <button id="snd">설정</button>
     <button id="cancel">취소</button>
     <button id="skip">넘기기</button>
-    <button id="fit">꽉<br>채우기</button>
-    <button id="full">전체<br>화면</button>
   </div>
-</div>
 
 <video id="movie" playsinline preload="none"></video>
 <div id="soundHint" style="position:fixed;left:8px;bottom:8px;font-size:12px;opacity:.7;pointer-events:none">🔇 화면을 누르면 소리가 켜집니다</div>
@@ -76,10 +96,18 @@
   <button id="sndBgm" class="tog"></button>
   <button id="sndSfx" class="tog"></button>
   <div style="font-size:12px;opacity:.75;line-height:1.4">배경음악을 끄면 폰에서 듣던<br>다른 음악이 멈추지 않고 같이 납니다</div>
+  <button id="orient" class="tog"></button>
+  <button id="fit" class="tog"></button>
+  <button id="full" class="tog">전체 화면</button>
   <button id="sndClose" class="tog">닫기</button>
 </div>
+<div id="slots" style="display:none"><div class="slotBox">
+  <div id="slotTitle" style="font-size:16px;font-weight:700;margin-bottom:4px"></div>
+  <div id="slotList"></div>
+  <div id="slotExtra"></div>
+</div></div>
 <div id="status">불러오는 중…</div>
-<div id="rotate"><div style="font-size:56px">📱</div><div>폰을 <b>가로</b>로 돌려주세요</div></div>
+</div>
 <script src="ekd5.js"></script>
 </body>
 </html>

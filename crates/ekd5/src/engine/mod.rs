@@ -210,6 +210,8 @@ pub struct Engine<A: Assets> {
     camp_pending: bool,
     /// 웹 메뉴 단추: 본진 보조 메뉴 열기
     pub camp_menu: bool,
+    /// 난수 씨앗 (웹이 시각으로 줌, 0 = 시험용 고정). 원작은 전투마다 GetTickCount 로 씨앗 (FUN_00482060)
+    pub entropy: u32,
     /// MARK.E5 (막대 무늬 등, 전투 밖에서도)
     pub mark_data: Rc<Vec<u8>>,
     /// 출진 고르기
@@ -298,6 +300,7 @@ impl<A: Assets> Engine<A> {
             camp_rule: None,
             camp_pending: false,
             camp_menu: false,
+            entropy: 0,
             mark_data: Rc::new(Vec::new()),
             sortie_ui: None,
             sortie_sort: (1, 2),
@@ -482,6 +485,11 @@ impl<A: Assets> Engine<A> {
             Scene::Battle(b) => Some(b),
             _ => None,
         }
+    }
+
+    /// 새 난수 씨앗 (웹에서만): 시각 씨앗 + 지금까지 틱
+    pub fn fresh_seed(&self) -> Option<u32> {
+        (self.entropy != 0).then(|| self.entropy.wrapping_mul(2654435761).wrapping_add(self.tick.wrapping_mul(40503)) | 1)
     }
 
     pub fn tick(&mut self) {
@@ -703,6 +711,9 @@ impl<A: Assets> Engine<A> {
                             None => self.saved = Some((self.flags.clone(), self.roster.clone(), self.officers.clone(), self.inventory.clone(), self.gold)),
                         }
                         let mut b = battle::Battle::new((n / 2) as usize, self.jobs.clone(), self.terrain_tab.clone());
+                        if let Some(r) = self.fresh_seed() {
+                            b.rng = r;
+                        }
                         b.cheat = self.cheat;
                         b.icons = self.icons.clone();
                         b.names = Rc::new(self.persons.iter().map(|p| p.name.clone()).collect());
@@ -881,6 +892,9 @@ impl<A: Assets> Engine<A> {
                 if decided {
                     if st.caption_clear_after {
                         st.caption.clear();
+                    }
+                    if std::mem::take(&mut st.card_key) {
+                        st.card = None;
                     }
                     self.wait = Wait::None;
                 }
@@ -1463,11 +1477,12 @@ impl<A: Assets> Engine<A> {
                 self.sprite_over.insert(a(0) as usize, a(1) as u16);
             }
             0x69 => {
-                // 시간 경과 자막 ("잠시 후…….", 원작 FUN_00415e04)
+                // 시간 경과 자막 ("잠시 후…….", 원작 FUN_00415e04 → FUN_00431c4c(2): 글을 띄우고 누를 때까지 기다린 뒤 지움)
                 let (t, _, _) = encoding_rs::EUC_KR.decode(args[0].bytes());
                 if let Scene::Story(st) = &mut self.scene {
                     st.card = Some(t.to_string());
-                    self.wait = Wait::Ticks(45);
+                    st.card_key = true;
+                    self.wait = Wait::Key;
                 }
             }
             0x31 if self.battle().is_none() => {

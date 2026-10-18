@@ -57,6 +57,8 @@ pub struct Story {
     pub chapter_name: String,
     pub title_timer: u32,
     pub card: Option<String>,
+    /// 누르면 지우는 자막 (op69)
+    pub card_key: bool,
     /// 전투 중 말하는 부대의 화면 y (창 위치 결정)
     pub speaker_y: Option<i32>,
     /// 전투 중 말하는 부대의 칸 — 창을 그 옆에 붙이고 화살표로 가리킴 (원작 FUN_0042efde)
@@ -90,6 +92,7 @@ impl Default for Story {
             chapter_name: String::new(),
             title_timer: 0,
             card: None,
+            card_key: false,
             speaker_y: None,
             speaker_cell: None,
             cam: (0, 0),

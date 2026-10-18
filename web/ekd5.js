@@ -15,6 +15,8 @@
 
   const { instance } = await WebAssembly.instantiateStreaming(fetch("ekd5_web.wasm"), {});
   const w = instance.exports;
+  // 난수 씨앗 (원작은 전투마다 시각으로 정함)
+  w.seed(((Date.now() ^ (Math.random() * 0x7fffffff)) >>> 0) || 1);
   const mem = () => new Uint8Array(w.memory.buffer);
   const enc = new TextEncoder(), dec = new TextDecoder();
   function putBytes(bytes) { const p = w.alloc(bytes.length); mem().set(bytes, p); return p; }
@@ -106,6 +108,11 @@
   addEventListener("keyup", (e) => { const b = KEYMAP[e.code]; if (b) held &= ~b; });
   function toGame(e) {
     const r = canvas.getBoundingClientRect();
+    // 앱을 돌려 그렸으면 (세로 폰에서 가로 고정 등) 좌표도 돌림
+    if (document.body.classList.contains("rotcw"))
+      return [Math.round((e.clientY - r.top) * 640 / r.height), Math.round((r.right - e.clientX) * 480 / r.width)];
+    if (document.body.classList.contains("rotccw"))
+      return [Math.round((r.bottom - e.clientY) * 640 / r.height), Math.round((e.clientX - r.left) * 480 / r.width)];
     return [Math.round((e.clientX - r.left) * 640 / r.width), Math.round((e.clientY - r.top) * 480 / r.height)];
   }
   // 누르고 있는 동안 결정 키를 계속 누른 것으로 보냄 (전장 끌어서 스크롤)
@@ -151,9 +158,48 @@
   const fitBtn = document.getElementById("fit");
   let fill = false;
   try { fill = localStorage.getItem("ekd5-fill") === "1"; } catch (_) {}
-  const applyFit = () => { document.body.classList.toggle("fill", fill); fitBtn.classList.toggle("on", fill); fitBtn.innerHTML = fill ? "비율<br>유지" : "꽉<br>채우기"; };
+  const applyFit = () => { document.body.classList.toggle("fill", fill); fitBtn.textContent = "화면 맞춤: " + (fill ? "꽉 채우기" : "비율 유지"); };
   applyFit();
   fitBtn.addEventListener("click", (e) => { e.preventDefault(); fill = !fill; applyFit(); try { localStorage.setItem("ekd5-fill", fill ? "1" : "0"); } catch (_) {} });
+  // 화면 방향: 자동 (폰 방향대로) / 세로 고정 / 가로 고정. 폰이 고정을 못 하면 (아이폰 등) 앱을 90도 돌려 그림
+  const orientBtn = document.getElementById("orient");
+  let orient = "auto";
+  try { orient = localStorage.getItem("ekd5-orient") || "auto"; } catch (_) {}
+  function applyOrient() {
+    const devPort = innerHeight > innerWidth;
+    const want = orient === "auto" ? (devPort ? "port" : "land") : orient;
+    const devWant = want === "port" ? devPort : !devPort;
+    let rot = "";
+    if (!devWant) {
+      // 전체 화면이면 진짜 방향 고정을 먼저 시도 (안드로이드)
+      try { screen.orientation && screen.orientation.lock && screen.orientation.lock(want === "port" ? "portrait" : "landscape").catch(() => {}); } catch (_) {}
+      rot = devPort ? "rotcw" : "rotccw";
+    }
+    const b = document.body.classList;
+    b.toggle("port", want === "port");
+    b.toggle("rotcw", rot === "rotcw");
+    b.toggle("rotccw", rot === "rotccw");
+    // 돌릴 때는 실제 창 크기로 (100vh 가 주소창 등으로 실제와 다를 수 있음)
+    const app = document.getElementById("app"), bs = document.body.style;
+    if (rot) {
+      const W = innerWidth, H = innerHeight;
+      app.style.width = H + "px"; app.style.height = W + "px";
+      app.style.left = rot === "rotcw" ? W + "px" : "0px"; app.style.top = rot === "rotcw" ? "0px" : H + "px";
+      bs.setProperty("--vw", H + "px"); bs.setProperty("--vh", W + "px");
+    } else {
+      app.style.width = app.style.height = app.style.left = app.style.top = "";
+      bs.removeProperty("--vw"); bs.removeProperty("--vh");
+    }
+    orientBtn.textContent = "화면 방향: " + ({ auto: "자동 (폰 방향대로)", port: "세로 고정", land: "가로 고정" })[orient];
+  }
+  applyOrient();
+  addEventListener("resize", applyOrient);
+  addEventListener("orientationchange", () => setTimeout(applyOrient, 200));
+  orientBtn.addEventListener("click", () => {
+    orient = ({ auto: "land", land: "port", port: "auto" })[orient];
+    try { localStorage.setItem("ekd5-orient", orient); } catch (_) {}
+    applyOrient();
+  });
   // 홈 화면 앱 (PWA)
   if ("serviceWorker" in navigator) { navigator.serviceWorker.register("sw.js").catch(() => {}); }
   // 빨리 감기: 4배 속도 + 대사·자막 자동 넘김 (선택지·전투 조작은 그대로)
@@ -210,36 +256,84 @@
   // ---------- 회차 공통 기록 (엔딩·보물도감) ----------
   try { const c = localStorage.getItem("ekd5-common"); if (c) withStr(c, (p, n) => w.set_common(p, n)); } catch (_) {}
 
-  // ---------- 중간 저장 (그 화면 그대로: 전투 중 내 차례·본진 메뉴) ----------
+  // ---------- 저장 슬롯 (그 화면 그대로: 전투 중 내 차례·본진) — 5칸 + 단계 시작 자동 저장 ----------
   const toastEl = document.getElementById("toast");
   let toastTimer = 0;
   function toast(t) { toastEl.textContent = t; toastEl.style.display = "block"; clearTimeout(toastTimer); toastTimer = setTimeout(() => toastEl.style.display = "none", 1800); }
-  document.getElementById("save").addEventListener("click", (e) => {
-    e.preventDefault();
-    const s = readOut(w.quick_save());
-    if (!s) { toast("지금은 저장할 수 없습니다 (전투 중 내 차례 · 본진에서 저장)"); return; }
-    try { localStorage.setItem("ekd5-quick", s); localStorage.setItem("ekd5-quick-time", new Date().toLocaleString("ko-KR")); toast("저장했습니다"); }
-    catch (_) { toast("저장 실패 (브라우저 저장소)"); }
-  });
-  let quickDone = false;
-  try {
-    const q = localStorage.getItem("ekd5-quick");
-    if (q) {
-      const when = localStorage.getItem("ekd5-quick-time") || "";
-      let stage = "?"; try { stage = JSON.parse(q).stage; } catch (_) {}
-      if (confirm(`중간 저장(${stage}단계, ${when})에서 이어서 할까요?\n취소를 누르면 다른 저장/처음부터를 고릅니다.`)) {
-        quickDone = !!withStr(q, (p, n) => w.quick_restore(p, n));
-      }
+  const NSLOT = 5;
+  const ls = { get: (k) => { try { return localStorage.getItem(k); } catch (_) { return null; } },
+    set: (k, v) => { try { localStorage.setItem(k, v); return true; } catch (_) { return false; } },
+    del: (k) => { try { localStorage.removeItem(k); } catch (_) {} } };
+  // 예전 한 칸 저장 → 1번 칸
+  if (ls.get("ekd5-quick") && !ls.get("ekd5-slot-1")) {
+    ls.set("ekd5-slot-1", ls.get("ekd5-quick")); ls.set("ekd5-slot-1-time", ls.get("ekd5-quick-time") || "");
+    ls.del("ekd5-quick"); ls.del("ekd5-quick-time");
+  }
+  function slotInfo(i) {
+    const q = ls.get("ekd5-slot-" + i);
+    if (!q) return null;
+    let d = "";
+    try { const j = JSON.parse(q); const where = j.battle ? (j.battle.objective ? "전투 · " + j.battle.objective : "전투") : (j.place && (j.place[1] || j.place[0])) || "본진"; d = `${j.stage}단계 · ${where}`; } catch (_) { d = "?"; }
+    return { text: d, time: ls.get("ekd5-slot-" + i + "-time") || "" };
+  }
+  let paused = false;
+  const slotsEl = document.getElementById("slots"), slotList = document.getElementById("slotList"), slotTitle = document.getElementById("slotTitle");
+  const slotExtra = document.getElementById("slotExtra");
+  function closeSlots() { slotsEl.style.display = "none"; paused = false; }
+  // mode: "save" | "load" | "start"
+  function openSlots(mode) {
+    paused = true;
+    slotTitle.textContent = mode === "save" ? "어느 칸에 저장할까요?" : "어느 칸을 불러올까요?";
+    slotList.innerHTML = "";
+    for (let i = 1; i <= NSLOT; i++) {
+      const info = slotInfo(i);
+      const b = document.createElement("button");
+      b.className = "slot";
+      b.innerHTML = `<b>${i}</b> ${info ? info.text + "<small>" + info.time + "</small>" : "<span style='opacity:.5'>비어 있음</span>"}`;
+      if (mode !== "save" && !info) b.disabled = true;
+      b.addEventListener("click", () => {
+        if (mode === "save") {
+          const s = readOut(w.quick_save());
+          if (!s) { toast("지금은 저장할 수 없습니다 (전투 중 내 차례 · 본진에서 저장)"); return; }
+          if (info && !confirm(`${i}번 칸에 덮어쓸까요?`)) return;
+          if (ls.set("ekd5-slot-" + i, s)) { ls.set("ekd5-slot-" + i + "-time", new Date().toLocaleString("ko-KR")); toast(`${i}번 칸에 저장했습니다`); closeSlots(); }
+          else toast("저장 실패 (브라우저 저장소)");
+        } else if (mode === "start") {
+          withStr(ls.get("ekd5-slot-" + i), (p, n) => w.quick_restore(p, n));
+          closeSlots();
+        } else {
+          // 게임 도중 불러오기: 처음부터 다시 띄워서 그 칸으로
+          try { sessionStorage.setItem("ekd5-load", String(i)); } catch (_) {}
+          location.reload();
+        }
+      });
+      slotList.appendChild(b);
     }
-  } catch (_) {}
-
-  // ---------- 이어하기 ----------
-  let save = null;
-  try { save = localStorage.getItem("ekd5-save"); } catch (_) {}
-  if (!quickDone && save && !/^[123];0;/.test(save)) {
-    const stage = save.split(";")[1];
-    const ok = confirm(`저장된 진행(${stage}단계)이 있습니다. 이어서 할까요?\n취소를 누르면 처음부터 시작합니다.`);
-    if (ok) withStr(save, (p, n) => w.restore(p, n));
+    slotExtra.innerHTML = "";
+    const add = (label, fn) => { const b = document.createElement("button"); b.className = "slot small"; b.textContent = label; b.addEventListener("click", fn); slotExtra.appendChild(b); };
+    if (mode === "save") add("불러오기로", () => openSlots("load"));
+    if (mode === "load") add("저장으로", () => openSlots("save"));
+    const auto = ls.get("ekd5-save");
+    if (mode !== "save" && auto && !/^[123];0;/.test(auto)) {
+      add(`자동 저장 (${auto.split(";")[1]}단계 시작)`, () => {
+        if (mode === "start") { withStr(auto, (p, n) => w.restore(p, n)); closeSlots(); }
+        else { try { sessionStorage.setItem("ekd5-load", "auto"); } catch (_) {} location.reload(); }
+      });
+    }
+    if (mode === "start") add("처음부터", closeSlots);
+    else add("닫기", closeSlots);
+    slotsEl.style.display = "flex";
+  }
+  document.getElementById("save").addEventListener("click", (e) => { e.preventDefault(); openSlots("save"); });
+  // 시작: 도중에 고른 칸이 있으면 그것, 아니면 저장이 있을 때 고르기 창
+  let want = null;
+  try { want = sessionStorage.getItem("ekd5-load"); sessionStorage.removeItem("ekd5-load"); } catch (_) {}
+  if (want === "auto" && ls.get("ekd5-save")) withStr(ls.get("ekd5-save"), (p, n) => w.restore(p, n));
+  else if (want && ls.get("ekd5-slot-" + want)) withStr(ls.get("ekd5-slot-" + want), (p, n) => w.quick_restore(p, n));
+  else {
+    const any = [...Array(NSLOT)].some((_, k) => ls.get("ekd5-slot-" + (k + 1)));
+    const auto = ls.get("ekd5-save");
+    if (any || (auto && !/^[123];0;/.test(auto))) openSlots("start");
   }
 
   // ---------- 동영상 (원작 LOGO/OPEN/END.AVI → mp4). 탭하면 건너뜀 ----------
@@ -315,7 +409,7 @@
   }
   const soundHint = document.getElementById("soundHint");
   function loop(now) {
-    if (started) {
+    if (started && !paused) {
       acc += Math.min(250, now - last);
       while (acc >= TICK_MS) { for (let k = fast ? 4 : 1; k > 0; k--) step(); acc -= TICK_MS; }
       const p = w.frame();
