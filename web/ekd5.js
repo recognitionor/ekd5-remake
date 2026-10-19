@@ -129,9 +129,20 @@
   function setSession() { try { if (navigator.audioSession) navigator.audioSession.type = bgmOn ? "playback" : "ambient"; } catch (_) {} }
   setSession();
   // 아이폰은 AudioContext 도 터치 안에서 만들거나 다시 깨워야 소리가 남
-  const unlockAudio = () => {
-    if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {} }
+  // 아이폰은 앱 전환·화면 잠금·전화 뒤 AudioContext 가 멈춘 채(interrupted, 또는 running 인데 소리 없음) 남는 일이 있음
+  // → 화면에 다시 돌아온 뒤 첫 터치 때 새로 만듦 (풀어 둔 소리 버퍼는 그대로 씀)
+  let ctxStale = false;
+  document.addEventListener("visibilitychange", () => { if (document.hidden) ctxStale = true; });
+  function newCtx() {
+    const old = actx;
+    try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) { actx = null; }
+    if (old) try { old.close().catch(() => {}); } catch (_) {}
     if (actx && actx.state !== "running") actx.resume().catch(() => {});
+    if (loopWant) setLoop(loopWant);
+  }
+  const unlockAudio = () => {
+    if (!actx || ctxStale || actx.state === "closed" || actx.state === "interrupted") { ctxStale = false; newCtx(); }
+    else if (actx.state !== "running") actx.resume().then(() => { if (actx.state !== "running") newCtx(); }).catch(newCtx);
     if (!audioOk) { audioOk = true; if (bgmWant >= 0) setMusic(bgmWant); }
   };
 
@@ -171,7 +182,7 @@
   }
   // 터치는 손을 뗄 때(pointerup)에야 '사용자 동작'으로 인정됨
   canvas.addEventListener("pointerup", tryAutoFull);
-  addEventListener("touchend", () => { if (actx && actx.state !== "running") actx.resume().catch(() => {}); }, { capture: true });
+  addEventListener("touchend", () => { if (audioOk) unlockAudio(); }, { capture: true });
   addEventListener("touchend", tryAutoFull, { capture: true });
   addEventListener("click", tryAutoFull, { capture: true });
   canvas.addEventListener("pointerdown", (e) => {
