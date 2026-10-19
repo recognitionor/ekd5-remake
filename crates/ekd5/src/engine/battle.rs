@@ -105,6 +105,8 @@ pub enum Phase {
     /// 도구 고르기 (소지품 번호들)
     ToolList { unit: usize, from: (i32, i32), list: Vec<usize> },
     ToolTarget { unit: usize, from: (i32, i32), inv: usize, cells: Vec<(i32, i32)> },
+    /// 도구 쓰기 연출 (원작 FUN_0041ecb2): 아이템을 들고 (5단위) → SE41, 머리 위로 (10단위) → 상대에게 스며듦 (16단위) → 효과·HP 창
+    ToolUse { unit: usize, target: usize, inv: usize, t: u32 },
     Ai { side: Side, idx: usize, stage: u8 },
     /// 원작 전투 메뉴 (0 메뉴, 1 장수 일람, 2 소유 아이템, 3 지형 정보, 4 승리 조건) — 목록과 줄별 부대
     Sys { kind: u8, list: Box<super::ui::ListBox>, units: Vec<usize> },
@@ -282,6 +284,10 @@ pub struct Battle {
     pub retire_said: Vec<usize>,
     /// 회심 공격 외침을 할 장수 (원작 FUN_00405aa4: 회심이면 25 %) / 이번 타격은 이미 정함
     pub shout: Option<usize>,
+    /// 도구 쓰기 연출의 아이템 그림 (32×32, 엔진이 넣어 줌)
+    pub tool_pic: Option<Rc<Pic>>,
+    /// 맞은 부대 위 데미지 숫자 (원작 FUN_00451ad1: 부대, 값, MP 면 true)
+    pub dmg_num: Option<(usize, i32, bool)>,
     shout_checked: bool,
 }
 
@@ -449,6 +455,8 @@ impl Battle {
             cast_log: Vec::new(),
             retire_said: Vec::new(),
             shout: None,
+            tool_pic: None,
+            dmg_num: None,
             shout_checked: false,
         }
     }
@@ -2104,13 +2112,10 @@ impl Battle {
                 } else if let Some(c) = tapped {
                     match self.at(c.0, c.1).filter(|&t| cells.contains(&c) && !self.units[t].side.hostile(Side::Player) && self.tool_ok(inv, t)) {
                         Some(t) => {
-                            let msg = self.use_tool(inv, t);
-                            let (tx, ty) = (self.units[t].x, self.units[t].y);
-                            self.popup = Some((tx * CELL + 4 - self.cam.0, ty * CELL - 8 - self.cam.1, msg, 30));
-                            self.units[unit].acted = true;
-                            self.phase = Phase::PlayerIdle;
-                            self.after_player_action();
-                            return true;
+                            self.units[unit].dir = 0;
+                            self.units[unit].pose = Some(6);
+                            self.tool_pic = None;
+                            self.phase = Phase::ToolUse { unit, target: t, inv, t: 0 };
                         }
                         None => self.message = Some(("대상이 없습니다".into(), 40)),
                     }
@@ -2147,6 +2152,37 @@ impl Battle {
                         self.phase = Phase::Menu { unit, from };
                     }
                 }
+            }
+            Phase::ToolUse { unit, target, inv, t } => {
+                // 원작 단위 ×1.5: 들기 5 (8틱) → SE41, 머리 위 10 (15틱), 스며듦 16 (24틱)
+                if t == 8 {
+                    self.sounds.push("SE41.WAV".into());
+                    self.units[unit].pose = None;
+                    self.units[unit].motion = Some((1, self.anim_tick));
+                }
+                if t == 23 {
+                    self.units[unit].motion = None;
+                }
+                if t == 47 {
+                    let before = (self.units[target].hp, self.units[target].mp);
+                    let msg = self.use_tool(inv, target);
+                    let un = &self.units[target];
+                    if (un.hp, un.mp) != before {
+                        self.dmg_win = Some(DmgWin { u: target, hp: (before.0, un.hp), mp: (before.1, un.mp), ex: (un.off.exp as i32, un.off.exp as i32), t: 0 });
+                    } else {
+                        let (tx, ty) = (un.x, un.y);
+                        self.popup = Some((tx * CELL + 4 - self.cam.0, ty * CELL - 8 - self.cam.1, msg, 30));
+                    }
+                }
+                if t >= 47 + 40 {
+                    self.dmg_win = None;
+                    self.tool_pic = None;
+                    self.units[unit].acted = true;
+                    self.phase = Phase::PlayerIdle;
+                    self.after_player_action();
+                    return true;
+                }
+                self.phase = Phase::ToolUse { unit, target, inv, t: t + 1 };
             }
             Phase::Attack { unit, target, t } => {
                 if self.attack_step(unit, target, t) {
@@ -2362,7 +2398,14 @@ impl Battle {
                     self.popup = Some((vx * CELL + 8 - self.cam.0, vy * CELL - 8 - self.cam.1, text, 24));
                 }
             }
+            // 데미지 숫자 (원작 FUN_00404849 단위 17 → FUN_00451ad1): 맞은 부대 칸 위에, 타격이 끝날 때까지
+            if st == 26 {
+                if let Some(v) = dmg.filter(|&v| v > 0) {
+                    self.dmg_num = Some((y, v, false));
+                }
+            }
             if st >= if self.dmg_win.is_some() { 60 } else { 41 } {
+                self.dmg_num = None;
                 self.dmg_win = None;
                 self.units[x].pose = None;
                 self.units[y].pose = None;
@@ -2604,7 +2647,8 @@ impl Battle {
                                     self.attack_target = Some((t, 0));
                                 }
                                 _ => {
-                                    self.phase = Phase::Ai { side, idx: idx + 1, stage: 0 };
+                                    self.units[u].acted = true;
+                    self.phase = Phase::Ai { side, idx: idx + 1, stage: 0 };
                                     return (true, false);
                                 }
                             }
@@ -2614,6 +2658,7 @@ impl Battle {
             }
             3 => {
                 let Some(AiPlan::Strat(sid, cell)) = self.ai_plan.clone() else {
+                    self.units[u].acted = true;
                     self.phase = Phase::Ai { side, idx: idx + 1, stage: 0 };
                     return (true, false);
                 };
@@ -2621,12 +2666,14 @@ impl Battle {
                 self.cast_t += 1;
                 if self.cast_step(u, sid, cell, t) {
                     self.ai_plan = None;
+                    self.units[u].acted = true;
                     self.phase = Phase::Ai { side, idx: idx + 1, stage: 0 };
                     return (true, false);
                 }
             }
             _ => {
                 let Some((t, tt)) = self.attack_target else {
+                    self.units[u].acted = true;
                     self.phase = Phase::Ai { side, idx: idx + 1, stage: 0 };
                     return (true, false);
                 };
@@ -2635,6 +2682,7 @@ impl Battle {
                 if done {
                     self.attack_target = None;
                     // 죽은 부대가 목록에서 빠지므로 같은 번호를 다시 (자기 자신이 죽지는 않음)
+                    self.units[u].acted = true;
                     self.phase = Phase::Ai { side, idx: idx + 1, stage: 0 };
                     return (true, false);
                 }
@@ -2718,7 +2766,6 @@ impl Battle {
         };
         let dark_lut = tint(&scr.pal, 4, 4, 4);
         let poison_lut = tint(&scr.pal, 6, 0, 6);
-        let mark_phase = matches!(self.phase, Phase::PlayerIdle | Phase::Selected { .. } | Phase::Menu { .. } | Phase::Targeting { .. } | Phase::Moving { .. });
         let mut icons_at: Vec<(i32, i32, u8)> = Vec::new();
         // 부대
         let mut order: Vec<usize> = (0..self.units.len()).filter(|&i| self.units[i].visible).collect();
@@ -2788,8 +2835,8 @@ impl Battle {
             // 사망: 무릎 꿇은 그림 (원작 UNIT_MOV +0x5100)
             let frame = if matches!(u.leave, Some((2, _))) { 9 } else { frame };
             let (sx, sy) = (u.px as i32 - self.cam.0, u.py as i32 - self.cam.1);
-            // 행동 끝 = 어둡게, 독 = 4틱 중 2틱 초록빛 (원작 FUN_00440c8f)
-            let lut_dark = u.acted && u.side == Side::Player && u.hp > 0 && mark_phase;
+            // 행동 끝 = 어둡게 (진영·차례 상관없이, 그 진영 차례가 다시 올 때까지), 독 = 4틱 중 2틱 초록빛 (원작 FUN_00440c8f)
+            let lut_dark = u.acted && u.hp > 0;
             let lut_poison = u.status & status::POISON != 0 && (tick / 4) % 4 > 1;
             // 공격 동작 (UNIT_ATK) · 맞음 (UNIT_SPC 3)
             let striking = self.strikes.front().is_some_and(|s| s.0 == i);
@@ -2914,7 +2961,33 @@ impl Battle {
             scr.fill(cx, cy, 2, 48, 18);
             scr.fill(cx + 46, cy, 2, 48, 18);
         }
+        // 도구 쓰기: 아이템 그림 (들기: 부대 앞 / 머리 위 / 상대에게 스며듦 — 원작 FUN_0043230a 16단계)
+        if let (Phase::ToolUse { unit, target, t, .. }, Some(pic)) = (&self.phase, &self.tool_pic) {
+            let (u, oy, fade) = if *t < 8 { (*unit, 16, 0) } else if *t < 23 { (*unit, 0, 0) } else { (*target, 0, ((*t - 23) * 16 / 24) as i32) };
+            if *t < 47 {
+                let (sx, sy) = (self.units[u].px as i32 - self.cam.0 + 8, self.units[u].py as i32 - self.cam.1 + oy);
+                for yy in 0..pic.h as i32 {
+                    for xx in 0..pic.w as i32 {
+                        let c = pic.px[(yy as usize) * pic.w + xx as usize];
+                        if c != 0 && ((xx * 7 + yy * 13) % 16) >= fade {
+                            scr.fill(sx + xx, sy + yy, 1, 1, c);
+                        }
+                    }
+                }
+            }
+        }
         let Some(f) = font else { return };
+        // 데미지 숫자: 전각 숫자, 글자 0x12 테두리 0x18 (MP 는 0x45)
+        if let Some((u, v, mp)) = self.dmg_num {
+            if let Some(un) = self.units.get(u) {
+                let s: String = v.to_string().chars().map(|c| char::from_u32(0xFF10 + c.to_digit(10).unwrap_or(0)).unwrap_or(c)).collect();
+                let (x, y) = (un.px as i32 - self.cam.0, un.py as i32 - self.cam.1);
+                for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    draw_text(scr, f, x + dx, y + dy, &s, 0x18);
+                }
+                draw_text(scr, f, x, y, &s, if mp { 0x45 } else { 0x12 });
+            }
+        }
         if let Some((x, y, s, _)) = &self.popup {
             draw_text(scr, f, *x, *y, s, 251);
         }

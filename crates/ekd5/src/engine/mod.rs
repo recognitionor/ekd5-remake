@@ -2540,6 +2540,17 @@ impl<A: Assets> Engine<A> {
                 }
             }
         }
+        // 도구 쓰기 연출의 아이템 그림
+        let pal = self.screen.pal;
+        let icons = self.icons.clone();
+        let items = self.items.clone();
+        if let Some(b) = self.battle() {
+            if let battle::Phase::ToolUse { inv, .. } = b.phase {
+                if b.tool_pic.is_none() {
+                    b.tool_pic = b.inventory.get(inv).and_then(|&(id, _)| icons.item_big(&items, id, &pal));
+                }
+            }
+        }
         // 쓰러진 부대: 사건(사망 대사 등)이 먼저 처리된 뒤 남은 부대만 퇴각. 조조군 주요 장수는 먼저 퇴각 대사
         if self.imsg.is_none() {
             match self.assets.get("IMSG.E5") {
@@ -2677,7 +2688,7 @@ impl<A: Assets> Engine<A> {
                 if t >= end {
                     b.banner = None;
                     if side == battle::Side::Player {
-                        for u in &mut b.units {
+                        for u in b.units.iter_mut().filter(|u| u.side == battle::Side::Player) {
                             // 혼란이면 행동 못함
                             u.acted = u.status & crate::strategy::status::CONFUSE != 0;
                         }
@@ -2703,6 +2714,9 @@ impl<A: Assets> Engine<A> {
                             b.focus(x, y);
                         }
                     } else {
+                        for u in b.units.iter_mut().filter(|u| u.side == side) {
+                            u.acted = false;
+                        }
                         b.phase = battle::Phase::Ai { side, idx: 0, stage: 0 };
                     }
                 } else if let battle::Phase::TurnBanner { t: tt, .. } = &mut b.phase {
