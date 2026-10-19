@@ -278,6 +278,11 @@ pub struct Battle {
     cast_t: u32,
     /// 시험 기록용
     pub cast_log: Vec<String>,
+    /// 퇴각 대사를 이미 한 장수 (원작 FUN_004438a5 → FUN_00443ad0)
+    pub retire_said: Vec<usize>,
+    /// 회심 공격 외침을 할 장수 (원작 FUN_00405aa4: 회심이면 25 %) / 이번 타격은 이미 정함
+    pub shout: Option<usize>,
+    shout_checked: bool,
 }
 
 /// 컴퓨터 행동 계획
@@ -442,7 +447,14 @@ impl Battle {
             ai_plan: None,
             cast_t: 0,
             cast_log: Vec::new(),
+            retire_said: Vec::new(),
+            shout: None,
+            shout_checked: false,
         }
+    }
+
+    pub fn rand3(&mut self) -> usize {
+        self.rand(3) as usize
     }
 
     fn rand(&mut self, n: i32) -> i32 {
@@ -2274,6 +2286,16 @@ impl Battle {
         if let Phase::Attack { t: tt, .. } = &mut self.phase {
             *tt += 1;
         }
+        if let Some(&(x, _, Some(dmg), true)) = self.strikes.front() {
+            // 회심 공격 외침 (원작 FUN_00405aa4 → FUN_0040c4b2): 타격 전에 25 % 로 대사
+            if self.strike_t == 0 && dmg >= 0 && !self.shout_checked {
+                self.shout_checked = true;
+                if self.rand(100) < 25 {
+                    self.shout = Some(self.units[x].person);
+                    return false;
+                }
+            }
+        }
         if let Some(&(x, y, dmg, crit)) = self.strikes.front() {
             let st = self.strike_t;
             self.strike_t += 1;
@@ -2346,6 +2368,7 @@ impl Battle {
                 self.units[y].pose = None;
                 self.strikes.pop_front();
                 self.strike_t = 0;
+                self.shout_checked = false;
                 if self.units[y].hp <= 0 {
                     self.strikes.retain(|s| s.0 != y && s.1 != y);
                 }
@@ -2428,13 +2451,27 @@ impl Battle {
 
     /// 쓰러졌는데 스크립트가 따로 처리하지 않은 부대를 퇴각시킴 (원작: 사건 → 기본 퇴각 FUN_004438a5).
     /// 반환: 걸리는 틱 (0 = 없음)
-    pub fn retreat_fallen(&mut self) -> u32 {
+    fn leave_busy(&self) -> bool {
         // 공격·책략 연출이 끝나고 사건 검사까지 지난 뒤에만
-        let busy = !self.strikes.is_empty()
+        !self.strikes.is_empty()
             || self.dmg_win.is_some()
             || self.attack_target.is_some()
-            || matches!(self.phase, Phase::Attack { .. } | Phase::Cast { .. } | Phase::Ai { stage: 2 | 3, .. });
-        if busy {
+            || matches!(self.phase, Phase::Attack { .. } | Phase::Cast { .. } | Phase::Ai { stage: 2 | 3, .. })
+    }
+
+    /// 퇴각 대사를 할 장수 (원작 FUN_004438a5: 조조군 부대, 주요 장수 0..0x19 → IMSG 650+인물). 한 번만
+    pub fn retire_speaker(&mut self) -> Option<usize> {
+        if self.leave_busy() {
+            return None;
+        }
+        let u = self.units.iter().find(|u| u.visible && u.hp <= 0 && u.leave.is_none() && u.side == Side::Player && u.person < 0x1A && !self.retire_said.contains(&u.person))?;
+        let p = u.person;
+        self.retire_said.push(p);
+        Some(p)
+    }
+
+    pub fn retreat_fallen(&mut self) -> u32 {
+        if self.leave_busy() {
             return 0;
         }
         let mut w = 0;

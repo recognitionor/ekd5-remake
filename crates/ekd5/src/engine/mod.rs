@@ -1303,32 +1303,9 @@ impl<A: Assets> Engine<A> {
             }
             0x14 => {
                 let pages = self.parse_dialog(args[0].bytes());
-                // 전투 중이면 말하는 부대에 화면을 맞춤
-                if let (Some(pid), Scene::Battle(b)) = (pages.first().and_then(|p| p.person), &mut self.scene) {
-                    if let Some(u) = b.unit_of(pid).filter(|&u| b.units[u].visible) {
-                        let (x, y) = (b.units[u].x, b.units[u].y);
-                        if x * battle::CELL < b.cam.0 + 24 || x * battle::CELL > b.cam.0 + 568 || y * battle::CELL < b.cam.1 + 24 || y * battle::CELL > b.cam.1 + 408 {
-                            b.focus(x, y);
-                        }
-                        b.ui.speaker_y = Some(y * battle::CELL - b.cam.1 + 24);
-                        b.ui.speaker_cell = Some((x, y));
-                    } else {
-                        b.ui.speaker_y = None;
-                        b.ui.speaker_cell = None;
-                    }
-                }
-                let (packs, assets) = (&mut self.packs, &mut self.assets);
-                let st = match &mut self.scene {
-                    Scene::Story(s) => Some(&mut **s),
-                    Scene::Battle(b) => Some(&mut b.ui),
-                    _ => None,
-                };
-                if let Some(st) = st {
-                    if st.show_dialog(packs, assets, pages).is_err() {
-                        vm.pc = at;
-                        return Ok(false);
-                    }
-                    self.wait = Wait::Dialog;
+                if !self.battle_dialog(pages) {
+                    vm.pc = at;
+                    return Ok(false);
                 }
             }
             0x12 => self.start_choice(&args),
@@ -2563,7 +2540,41 @@ impl<A: Assets> Engine<A> {
                 }
             }
         }
-        // 쓰러진 부대: 사건(사망 대사 등)이 먼저 처리된 뒤 남은 부대만 퇴각
+        // 쓰러진 부대: 사건(사망 대사 등)이 먼저 처리된 뒤 남은 부대만 퇴각. 조조군 주요 장수는 먼저 퇴각 대사
+        if self.imsg.is_none() {
+            match self.assets.get("IMSG.E5") {
+                Asset::Pending => return,
+                Asset::Ready(d) => self.imsg = Some(d),
+                Asset::Missing => {}
+            }
+        }
+        if let Some(pid) = self.battle().and_then(|b| b.shout.take()) {
+            let r3 = self.battle().map_or(0, |b| b.rand3());
+            if let Some(pages) = self.shout_dialog(pid, r3) {
+                if self.autoplay {
+                    self.log.push(format!("회심 외침 {}: {}", pages[0].name, pages[0].lines.join(" / ")));
+                }
+                if !self.battle_dialog(pages) {
+                    if let Some(b) = self.battle() {
+                        b.shout = Some(pid);
+                    }
+                }
+                return;
+            }
+        }
+        if let Some(pid) = self.battle().and_then(|b| b.retire_speaker()) {
+            if let Some(pages) = self.retire_dialog(pid) {
+                if self.autoplay {
+                    self.log.push(format!("퇴각 대사 {}: {}", pages[0].name, pages[0].lines.join(" / ")));
+                }
+                if !self.battle_dialog(pages) {
+                    if let Some(b) = self.battle() {
+                        b.retire_said.retain(|&p| p != pid);
+                    }
+                }
+                return;
+            }
+        }
         let w = self.battle().map_or(0, |b| b.retreat_fallen());
         if w > 0 {
             self.wait = Wait::Ticks(w);
@@ -2773,6 +2784,66 @@ impl<A: Assets> Engine<A> {
             st.choice_sel = 0;
         }
         self.wait = Wait::Choice;
+    }
+
+    /// 대사 창 열기 (전투 중이면 말하는 부대에 화면을 맞추고 말풍선). 얼굴을 받는 중이면 false
+    fn battle_dialog(&mut self, pages: Vec<story::Page>) -> bool {
+        if let (Some(pid), Scene::Battle(b)) = (pages.first().and_then(|p| p.person), &mut self.scene) {
+            if let Some(u) = b.unit_of(pid).filter(|&u| b.units[u].visible) {
+                let (x, y) = (b.units[u].x, b.units[u].y);
+                if x * battle::CELL < b.cam.0 + 24 || x * battle::CELL > b.cam.0 + 568 || y * battle::CELL < b.cam.1 + 24 || y * battle::CELL > b.cam.1 + 408 {
+                    b.focus(x, y);
+                }
+                b.ui.speaker_y = Some(y * battle::CELL - b.cam.1 + 24);
+                b.ui.speaker_cell = Some((x, y));
+            } else {
+                b.ui.speaker_y = None;
+                b.ui.speaker_cell = None;
+            }
+        }
+        let (packs, assets) = (&mut self.packs, &mut self.assets);
+        let st = match &mut self.scene {
+            Scene::Story(s) => Some(&mut **s),
+            Scene::Battle(b) => Some(&mut b.ui),
+            _ => None,
+        };
+        if let Some(st) = st {
+            if st.show_dialog(packs, assets, pages).is_err() {
+                return false;
+            }
+            self.wait = Wait::Dialog;
+        }
+        true
+    }
+
+    /// 퇴각 대사 (원작 FUN_0040c3fd: IMSG 650+인물, "\n" 은 줄바꿈)
+    fn retire_dialog(&mut self, pid: usize) -> Option<Vec<story::Page>> {
+        let m = self.imsg.as_ref()?;
+        let r = m.get((650 + pid) * 216..(651 + pid) * 216)?;
+        let e = r.iter().position(|&b| b == 0).unwrap_or(r.len());
+        let t = encoding_rs::EUC_KR.decode(&r[..e]).0.to_string();
+        let lines: Vec<String> = t.split("\\n").filter(|l| !l.is_empty()).map(|l| l.to_string()).collect();
+        if lines.is_empty() {
+            return None;
+        }
+        let name = self.persons.get(pid).map(|p| p.name.clone()).unwrap_or_default();
+        Some(vec![story::Page { person: Some(pid), face: Some(self.face_of(pid)), name, lines }])
+    }
+
+    /// 회심 공격 외침 (원작 FUN_0040c4b2: 고유 대사 21명은 IMSG 700+순번, 그 외는 721 + 인물 +16 목소리 종류×3 + 난수 3)
+    fn shout_dialog(&mut self, pid: usize, r3: usize) -> Option<Vec<story::Page>> {
+        const OWN: [usize; 21] = [0, 1, 2, 3, 6, 7, 9, 13, 15, 16, 17, 33, 34, 36, 57, 84, 95, 108, 109, 119, 32];
+        let k = match OWN.iter().rposition(|&p| p == pid) {
+            Some(i) => 700 + i,
+            None => 721 + self.person_data.get(pid * 32 + 16).copied().unwrap_or(0) as usize * 3 + r3,
+        };
+        let m = self.imsg.as_ref()?;
+        let r = m.get(k * 216..(k + 1) * 216)?;
+        let e = r.iter().position(|&b| b == 0).unwrap_or(r.len());
+        let t = encoding_rs::EUC_KR.decode(&r[..e]).0.to_string();
+        let lines: Vec<String> = t.split("\\n").filter(|l| !l.is_empty()).map(|l| l.trim_end().to_string()).collect();
+        let name = self.persons.get(pid).map(|p| p.name.clone()).unwrap_or_default();
+        Some(vec![story::Page { person: Some(pid), face: Some(self.face_of(pid)), name, lines }])
     }
 
     /// 대사 "&이름\n글…&이름\n글…" → 쪽들 (원작 FUN_00415a60: '&' 마다 한 창)
