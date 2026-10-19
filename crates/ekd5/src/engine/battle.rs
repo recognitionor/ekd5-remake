@@ -182,6 +182,8 @@ pub struct Battle {
     /// 승리 목표 장수 (원작 op45 인자 5 → +0x3d04/06: 이 장수가 퇴각하면 승리) · 패배 목표 장수 (인자 7 → +0x3d08/0a: 대개 조조)
     pub win_target: Option<usize>,
     pub lose_target: Option<usize>,
+    /// 전투 전체 레벨 보정 (원작 op45 인자 3 → DAT_004a159b: 50 이하 +값, 그 위 −(값−50))
+    pub level_bias: i32,
     pub message: Option<(String, u32)>,
     pub popup: Option<(i32, i32, String, u32)>,
     pub objective: String,
@@ -381,6 +383,7 @@ impl Battle {
             slots: vec![(0, 0); 16],
             targets: Vec::new(),
             win_target: None,
+            level_bias: 0,
             lose_target: None,
             message: None,
             popup: None,

@@ -479,9 +479,14 @@ impl<A: Assets> Engine<A> {
         o
     }
 
-    /// 조조군 평균 레벨 (원작 FUN_0041adb4: 위아래 1/4 빼고 평균)
+    /// 조조군 평균 레벨 (원작 FUN_0041adb4: 출진 장수 목록 DAT_00495498 에서 위아래 1/4 빼고 평균).
+    /// 아직 출진을 안 골랐으면 동료 전체
     fn army_level(&mut self) -> u8 {
-        let roster = if self.roster.is_empty() { vec![0] } else { self.roster.clone() };
+        let roster = match &self.sortie_chosen {
+            Some(c) if !c.is_empty() => c.clone(),
+            _ if self.roster.is_empty() => vec![0],
+            _ => self.roster.clone(),
+        };
         let mut lv: Vec<u8> = roster.iter().map(|&p| self.officer(p).level).collect();
         lv.sort_unstable_by(|a, b| b.cmp(a));
         let q = lv.len() / 4;
@@ -2033,14 +2038,21 @@ impl<A: Assets> Engine<A> {
             }
         }
         let Some(b) = self.battle() else { return };
-        // 레벨 조정치 (원작: 50 이하 = 평균 + 값, 그 위 = 평균 − (값−50))
+        // op45 인자 3 = 전투 전체 레벨 보정 (원작 FUN_004146c1: 0xFFFF 0, 50 이하 +값, 그 위 −(값−50))
+        if op == 0x45 {
+            let v = a(3);
+            b.level_bias = if v == 0xFFFF { 0 } else if v <= 50 { v } else { -(v - 50) };
+        }
+        // 기준 레벨 = 평균 + 보정 (1 이상). 부대 조정치: 0xFFFF 0, 50 이하 = 기준 + 값 (최대 50), 그 위 = 기준 − (값−50) (최소 1)
+        // (원작 FUN_00414995 op46 / FUN_00414d74 op47)
+        let base = (avg + b.level_bias).max(1);
         let level_of = |adj: i32| -> u8 {
             if adj == 0xFFFF {
-                avg.max(1) as u8
+                base.min(50) as u8
             } else if adj <= 50 {
-                (avg + adj).clamp(1, 50) as u8
+                (base + adj).clamp(1, 50) as u8
             } else {
-                (avg - (adj - 50)).clamp(1, 50) as u8
+                (base - (adj - 50)).clamp(1, 50) as u8
             }
         };
         match op {
