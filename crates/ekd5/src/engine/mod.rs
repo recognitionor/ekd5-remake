@@ -426,6 +426,7 @@ impl<A: Assets> Engine<A> {
                     o.armor = ar;
                     o.acc = ac;
                     o.gear_exp = ge;
+                    o.fix_legacy_gear();
                 }
                 self.officers.insert(p, o);
             }
@@ -1687,28 +1688,35 @@ impl<A: Assets> Engine<A> {
             // 전투 끝 상태 (원작 FUN_00457fdd: 2 승리, 3 패배). 승패 처리는 스크립트 플래그(0·1)로 함
             0x49 | 0x0E => {}
             0x3E => {
-                // 장수 장비 지정 (원작 FUN_0041871f): 인물, 무기, 레벨, 방어구, 레벨, 보조 (0 = 그대로, 1 = 빼기)
+                // 장수 장비 지정 (원작 FUN_0041871f → FUN_004081dc): 인물, 무기, 레벨, 방어구, 레벨, 보조.
+                // 값 0 = 그대로, 1 = 빼기, 그 외 = 무기 값−2 / 방어구 값+36 / 보조 값+51 (원작은 빼기 판정을 늘 무기 값으로 함)
+                let (items, jobs) = (self.items.clone(), self.jobs.clone());
                 let mut i = 0;
                 while i + 5 < args.len() {
-                    let v = |k: usize| args[i + k].i();
-                    let pid = v(0) as usize;
+                    let v = |k: usize| {
+                        let x = args[i + k].i();
+                        if x == 0xFFFF { 0 } else { x }
+                    };
+                    let pid = args[i].i() as usize;
                     if pid < self.persons.len() {
                         let mut o = self.officer(pid);
-                        for (slot, id, lv) in [(0usize, v(1), v(2)), (1, v(3), v(4))] {
-                            let g = match id {
-                                0 | 0xFFFF => continue,
-                                1 => None,
-                                id => Some((id as u8, if lv == 0xFFFF { 1 } else { lv.max(1) as u8 })),
-                            };
-                            if slot == 0 { o.weapon = g } else { o.armor = g }
-                            o.gear_exp[slot] = 0;
-                        }
-                        match v(5) {
-                            0 | 0xFFFF => {}
-                            1 => o.acc = None,
-                            id => o.acc = Some(id as u8),
+                        let (w, wl, ar, al, ac) = (v(1), v(2), v(3), v(4), v(5));
+                        for (slot, val, lv) in [(0u8, w, wl), (1, ar, al), (2, ac, 0)] {
+                            if val == 0 {
+                                continue;
+                            }
+                            if w == 1 {
+                                match slot {
+                                    0 => o.weapon = None,
+                                    1 => o.armor = None,
+                                    _ => o.acc = None,
+                                }
+                            } else {
+                                o.script_equip(&items, &jobs, slot, val, lv);
+                            }
                         }
                         self.officers.insert(pid, o);
+                        self.note_treasures();
                     }
                     i += 6;
                 }
@@ -1759,31 +1767,25 @@ impl<A: Assets> Engine<A> {
             // 화면 갱신 (원작 반환 2: 이번 틱 끝)
             0x1E => return Ok(false),
             0x48 if self.battle().is_some() => {
-                // 목록 부대 장비 (원작 FUN_004151a6): 인물, 무기, 무기 레벨, 방어구, 방어구 레벨, 보조. 0 = 기본 장비, 1 = 없음
-                let jobs = self.jobs.clone();
+                // 목록 부대 장비 (원작 FUN_004151a6 → FUN_00444b4e): 인물, 무기, 무기 레벨, 방어구, 방어구 레벨, 보조.
+                // 0 = 기본 장비 (FUN_004083d7), 1 = 없음, 그 외 = FUN_004081dc (무기 값−2 / 방어구 값+36 / 보조 값+51)
+                let (items, jobs) = (self.items.clone(), self.jobs.clone());
                 let v = |i: usize| if a(i) == 0xFFFF { 0 } else { a(i) };
                 let (pid, w, wl, ar, al, ac) = (a(0) as usize, v(1), v(2), v(3), v(4), v(5));
                 if let Some(b) = self.battle() {
                     if let Some(u) = b.units.iter_mut().find(|u| u.person == pid && u.side != battle::Side::Player) {
                         let o = &mut u.off;
-                        for (slot, id, lv) in [(0u8, w, wl), (1, ar, al)] {
-                            match id {
-                                0 => o.auto_equip(&jobs, slot),
-                                1 => {
-                                    if slot == 0 { o.weapon = None } else { o.armor = None }
-                                }
-                                id if id < 0x68 => {
-                                    let g = Some((id as u8, (lv as u8).max(1)));
-                                    if slot == 0 { o.weapon = g } else { o.armor = g }
-                                }
-                                _ => {}
+                        for (slot, val, lv) in [(0u8, w, wl), (1, ar, al), (2, ac, 0)] {
+                            match val {
+                                0 if slot < 2 => o.auto_equip(&jobs, slot),
+                                0 => {}
+                                1 => match slot {
+                                    0 => o.weapon = None,
+                                    1 => o.armor = None,
+                                    _ => o.acc = None,
+                                },
+                                _ => o.script_equip(&items, &jobs, slot, val, lv),
                             }
-                        }
-                        match ac {
-                            0 => {}
-                            1 => o.acc = None,
-                            id if id < 0x68 => o.acc = Some(id as u8),
-                            _ => {}
                         }
                     }
                 }

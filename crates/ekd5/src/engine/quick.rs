@@ -166,6 +166,10 @@ impl<A: Assets> Engine<A> {
         }
         self.roster = q.roster.clone();
         self.officers = q.officers.iter().map(|o| (o.person, o.clone())).collect();
+        // 예전 판의 잘못 들어간 장비 고치기
+        for o in self.officers.values_mut() {
+            o.fix_legacy_gear();
+        }
         self.gold = q.gold;
         self.inventory = q.inventory.clone();
         self.fame = q.fame;
@@ -207,6 +211,11 @@ impl<A: Assets> Engine<A> {
             b.job_names = self.job_names.clone();
             b.terrain_names = self.terrain_names.clone();
             b.units = bs.units;
+            for u in &mut b.units {
+                if u.side == battle::Side::Player {
+                    u.off.fix_legacy_gear();
+                }
+            }
             for u in &mut b.units {
                 u.px = (u.x * battle::CELL) as f32;
                 u.py = (u.y * battle::CELL) as f32;

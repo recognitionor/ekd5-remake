@@ -170,6 +170,74 @@ impl Officer {
         up
     }
 
+    /// 스크립트 장비 지정 (원작 FUN_004081dc): 칸 0 무기 = 값 − 2, 1 방어구 = 값 + 36, 2 보조 = 값 + 51.
+    /// 아이템 종류가 그 칸이 아니거나 직업이 못 쓰면 무시. 레벨 0 = 자동 (일반: 레벨 < 36 이면 (레벨%12)/4+1, 아니면 3 /
+    /// 고유: 레벨/4+1, 최대 9), 그 외 = 최대 레벨까지
+    pub fn script_equip(&mut self, items: &[u8], jobs: &[u8], slot: u8, v: i32, lv: i32) {
+        let id = match slot {
+            0 => v - 2,
+            1 => v + 0x24,
+            _ => v + 0x33,
+        };
+        if !(0..0x68).contains(&id) {
+            return;
+        }
+        let id = id as u8;
+        let t = items.get(id as usize * 25 + 17).copied().unwrap_or(0xFF);
+        let cat = if t < 0x0E { 0 } else if t < 0x12 { 1 } else if t < 0x3F { 2 } else { 3 };
+        if cat != slot {
+            return;
+        }
+        // 직업이 쓸 수 있나 (원작 FUN_00407cf7: 직업 표 +9+종류, 보조는 언제나)
+        if t < 0x12 && jobs.get(self.job as usize * 27 + 9 + t as usize).copied().unwrap_or(0) == 0 {
+            return;
+        }
+        let unique = t < 0x12 && t & 1 == 1;
+        let max = if unique { 9 } else { 3 };
+        let level = if lv == 0 {
+            if !unique {
+                if self.level < 36 { (self.level % 12) / 4 + 1 } else { 3 }
+            } else {
+                (self.level / 4 + 1).min(9)
+            }
+        } else {
+            (lv.clamp(1, 255) as u8).min(max)
+        };
+        match slot {
+            0 => {
+                self.weapon = Some((id, level));
+                self.gear_exp[0] = 0;
+            }
+            1 => {
+                self.armor = Some((id, level));
+                self.gear_exp[1] = 0;
+            }
+            _ => self.acc = Some(id),
+        }
+    }
+
+    /// 예전 판에서 스크립트 장비 번호를 그대로 써서 잘못 들어간 장비 고치기 (저장 불러올 때)
+    pub fn fix_legacy_gear(&mut self) {
+        match self.person {
+            // R_00 op3e [0, 25]: 의천검 (23) 인데 청룡언월도 (25)
+            0 if self.weapon.map(|w| w.0) == Some(25) => self.weapon = self.weapon.map(|w| (23, w.1)),
+            // R_48 op3e [3, 27, .., 11]: 청룡언월도 (25) + 적토마 (62)
+            3 => {
+                if self.weapon.map(|w| w.0) == Some(27) {
+                    self.weapon = self.weapon.map(|w| (25, w.1));
+                }
+                if self.acc == Some(11) {
+                    self.acc = Some(62);
+                }
+            }
+            // R_22 op3e [8, .., 23]: 맹덕신서 (74)
+            8 if self.acc == Some(23) => self.acc = Some(74),
+            // R_33·R_46 op3e [9, .., 15]: 철투구 (66)
+            9 if self.acc == Some(15) => self.acc = Some(66),
+            _ => {}
+        }
+    }
+
     /// 레벨에 맞는 기본 장비 (원작 FUN_004083d7): 직업이 쓸 수 있는 첫 무기 계열(직업 +9..+22) / 방어구 계열(+23..+26) 에서
     /// 등급 = min(레벨/12, 2), 아이템 레벨 = 레벨 < 36 이면 (레벨%12)/4+1, 아니면 3. 무기 = 계열/2×3+등급, 방어구 = 0x26 + 같은 식
     pub fn auto_equip(&mut self, jobs: &[u8], slot: u8) {
