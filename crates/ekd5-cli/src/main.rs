@@ -250,6 +250,14 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
             Some(&(tt, x, y)) => eng.set_input(if tt == t { held | 0x20 } else { held & !0x20 }, Some((x, y)), tt == t),
             None => eng.set_input(held, None, false),
         }
+        // 정보 보기 (오른쪽 클릭·길게 누르기): EKD5_ALT="틱:x:y,..."
+        if let Some(&(_, x, y)) = std::env::var("EKD5_ALT").unwrap_or_default().split(',').filter_map(|s| {
+            let v: Vec<&str> = s.split(':').collect();
+            Some((v.first()?.parse::<u32>().ok()?, v.get(1)?.parse::<i32>().ok()?, v.get(2)?.parse::<i32>().ok()?))
+        }).collect::<Vec<_>>().iter().find(|p| p.0 == t) {
+            eng.set_input(held, Some((x, y)), false);
+            eng.set_pointer_kind(true, false);
+        }
         // 시험: EKD5_FX="틱:연출번호" — 그 틱에 화면 가운데에 연출
         if let Some((ft, id)) = std::env::var("EKD5_FX").ok().and_then(|v| { let (a, b) = v.split_once(':')?; Some((a.parse::<u32>().ok()?, b.parse::<u8>().ok()?)) }) {
             if ft == t {

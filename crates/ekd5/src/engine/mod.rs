@@ -5,6 +5,7 @@ pub mod assets;
 pub mod battle;
 pub mod camp;
 pub mod duel;
+pub mod equip;
 pub mod fx;
 pub mod icons;
 pub mod quick;
@@ -42,6 +43,10 @@ pub struct Input {
     pub pressed: u32,
     pub mouse: Option<(i32, i32)>,
     pub click: bool,
+    /// 정보 보기 (원작 오른쪽 단추 놓기 0x205 — 웹: 오른쪽 클릭·길게 누르기), 이번 틱만
+    pub alt: bool,
+    /// 마우스처럼 올려 두기만 해도 되는 포인터 (터치는 아님)
+    pub hover: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -230,6 +235,10 @@ pub struct Engine<A: Assets> {
     pub mark_data: Rc<Vec<u8>>,
     /// 출진 고르기
     pub sortie_ui: Option<sortie::SortieUi>,
+    /// 장비 화면 (원작 대화상자 328)
+    pub equip_ui: Option<equip::EquipUi>,
+    /// 아이템·책략·열전 설명 (IMSG.E5, 216바이트 기록)
+    pub imsg: Option<Rc<Vec<u8>>>,
     /// 출진 화면 정렬 (원작 전역 DAT_00498c30 / DAT_00498c3c)
     sortie_sort: (u8, u8),
     sortie_rule: Option<camp::SortieRule>,
@@ -320,6 +329,8 @@ impl<A: Assets> Engine<A> {
             force_block: None,
             mark_data: Rc::new(Vec::new()),
             sortie_ui: None,
+            equip_ui: None,
+            imsg: None,
             sortie_sort: (1, 2),
             sortie_rule: None,
             sortie_max: 0,
@@ -341,6 +352,13 @@ impl<A: Assets> Engine<A> {
         self.input.held = held;
         self.input.mouse = mouse;
         self.input.click = click;
+        self.input.alt = false;
+    }
+
+    /// 정보 보기 신호와 올려 두기 가능 여부 (set_input 다음에)
+    pub fn set_pointer_kind(&mut self, alt: bool, hover: bool) {
+        self.input.alt = alt;
+        self.input.hover = hover;
     }
 
     /// 기본 자료 (글꼴, 인물) 적재. 받는 중이면 false
@@ -673,6 +691,10 @@ impl<A: Assets> Engine<A> {
                 }
                 // 중간 저장에서: 장면 그림·인물 다시 놓기
                 if self.restore_story() {
+                    return;
+                }
+                if self.equip_ui.is_some() {
+                    self.update_equip();
                     return;
                 }
                 if self.camp.is_some() && self.update_camp() {
@@ -1672,10 +1694,11 @@ impl<A: Assets> Engine<A> {
             }
             0x51 => {
                 // 전원 회복·상태 풀기 (원작 FUN_0041867a)
+                let items = self.items.clone();
                 if let Some(b) = self.battle() {
                     for u in b.units.iter_mut().filter(|u| u.visible && u.hp > 0) {
                         u.hp = u.max_hp;
-                        u.mp = u.off.max_mp as i32;
+                        u.mp = u.off.mp_max(&items) as i32;
                         u.status = 0;
                         u.state = [3; 5];
                     }
@@ -2830,6 +2853,7 @@ impl<A: Assets> Engine<A> {
             }
         }
         self.render_camp();
+        self.render_equip();
         self.render_sortie();
         let scr = &mut self.screen;
         if let Some(e) = &self.error {

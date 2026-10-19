@@ -48,6 +48,68 @@ pub fn item_name(items: &[u8], id: u8) -> String {
     encoding_rs::EUC_KR.decode(&r[..e]).0.to_string()
 }
 
+/// 아이템 갈래 (원작 FUN_0040cb6d): 0 무기 1 방어구 2 보조 3 소모품
+pub fn item_cat(t: u8) -> u8 {
+    match t {
+        0..=0x0D => 0,
+        0x0E..=0x11 => 1,
+        0x12..=0x3E => 2,
+        _ => 3,
+    }
+}
+
+/// 고유 무기·방어구 (원작 FUN_0040cbf1: 무기·방어구 중 종류가 홀수)
+pub fn item_unique(items: &[u8], id: u8) -> bool {
+    let t = items.get(id as usize * 25 + 17).copied().unwrap_or(0xFF);
+    t < 0x12 && t & 1 == 1
+}
+
+/// 병종 (원작 FUN_00407bc0 / FUN_00406ca6): 직업 0x27 미만은 /3 (0 군주계 .. 12 무희계)
+pub fn job_group(job: u8) -> usize {
+    if job < 0x27 { job as usize / 3 } else if job < 0x35 { job as usize - 0x1A } else { 0x1B }
+}
+
+/// 무기·방어구 레벨 보정치 (원작 FUN_0040caf7): 기본치에 성장치를 레벨−1 번 (255 넘지 않게)
+pub fn item_power(items: &[u8], id: u8, lv: u8) -> u16 {
+    let rec = |i: usize| items.get(id as usize * 25 + i).copied().unwrap_or(0) as u16;
+    if item_cat(rec(17) as u8) >= 2 {
+        return rec(21);
+    }
+    let mut v = rec(21);
+    for _ in 1..lv.max(1) {
+        v = (v + rec(23)).min(255);
+    }
+    v
+}
+
+/// 아이템 하나가 능력 stat 에 더하는 값 (원작 FUN_00463dfb): 종류 능력이 같으면 item_power (보조는 기본치),
+/// 고유 무기·방어구는 특수 종류(+18) 0x18..0x20 이 가리키는 능력에 특수치(+22)를 더함 (FUN_00406b2e)
+pub fn item_bonus(items: &[u8], id: u8, lv: u8, stat: u8) -> u16 {
+    let mut b = 0;
+    if item_stat(items, id) == Some(stat) {
+        b += item_power(items, id, lv);
+    }
+    if item_unique(items, id) {
+        let r = |i: usize| items.get(id as usize * 25 + i).copied().unwrap_or(0);
+        let ks = match r(18) {
+            0x18 => 0,
+            0x19 => 2,
+            0x1A => 1,
+            0x1B => 3,
+            0x1C => 4,
+            0x1D => 5,
+            0x1E => 6,
+            0x1F => 8,
+            0x20 => 7,
+            _ => 0xFF,
+        };
+        if ks == stat {
+            b += r(22) as u16;
+        }
+    }
+    b
+}
+
 impl Officer {
     pub fn from_data(person: usize, r: &[u8]) -> Self {
         let g = |i: usize| r.get(i).copied().unwrap_or(0);
@@ -101,21 +163,36 @@ impl Officer {
         }
     }
 
-    /// 장비 보정 (원작 FUN_00407ffe): 무기·방어구는 기본치 + 성장치×(레벨−1), 보조는 기본치
+    /// 장비 보정 (원작 FUN_00407ffe): 무기·방어구·보조 각각 item_bonus 합
     pub fn equip_bonus(&self, items: &[u8], stat: u8) -> u16 {
-        let rec = |id: u8, i: usize| items.get(id as usize * 25 + i).copied().unwrap_or(0) as u16;
         let mut b = 0;
         for (id, lv) in [self.weapon, self.armor].into_iter().flatten() {
-            if item_stat(items, id) == Some(stat) {
-                b += rec(id, 21) + rec(id, 23) * (lv.max(1) as u16 - 1);
-            }
+            b += item_bonus(items, id, lv, stat);
         }
         if let Some(id) = self.acc {
-            if item_stat(items, id) == Some(stat) {
-                b += rec(id, 21);
-            }
+            b += item_bonus(items, id, 1, stat);
         }
         b
+    }
+
+    /// 장비를 넣은 최대 HP·MP (원작 FUN_004075bb / FUN_004075ea: 보정 5·6, 상한 500·250)
+    pub fn hp_max(&self, items: &[u8]) -> u16 {
+        (self.max_hp + self.equip_bonus(items, 5)).min(500)
+    }
+
+    pub fn mp_max(&self, items: &[u8]) -> u16 {
+        (self.max_mp + self.equip_bonus(items, 6)).min(250)
+    }
+
+    /// 이 장수가 장비할 수 있나 (원작 FUN_00407cf7): 소모품 불가, 보조는 +23 제한 부대(0xFF 모두)가 병종과 같아야,
+    /// 무기·방어구는 직업 표 +9+종류
+    pub fn can_equip(&self, items: &[u8], jobs: &[u8], id: u8) -> bool {
+        let Some(r) = items.get(id as usize * 25..id as usize * 25 + 25) else { return false };
+        match item_cat(r[17]) {
+            3 => false,
+            2 => r[23] == 0xFF || r[23] as usize == job_group(self.job),
+            _ => jobs.get(self.job as usize * 27 + 9 + r[17] as usize).copied().unwrap_or(0) != 0,
+        }
     }
 
     /// 실제 능력치 (상한 400, 사기·순발 300)
@@ -188,8 +265,7 @@ impl Officer {
         if cat != slot {
             return;
         }
-        // 직업이 쓸 수 있나 (원작 FUN_00407cf7: 직업 표 +9+종류, 보조는 언제나)
-        if t < 0x12 && jobs.get(self.job as usize * 27 + 9 + t as usize).copied().unwrap_or(0) == 0 {
+        if !self.can_equip(items, jobs, id) {
             return;
         }
         let unique = t < 0x12 && t & 1 == 1;

@@ -114,7 +114,9 @@ pub extern "C" fn out_len() -> usize {
 #[no_mangle]
 pub extern "C" fn tick(held: u32, mx: i32, my: i32, has_mouse: i32, click: i32) {
     with(|app| {
-        app.engine.set_input(held, if has_mouse != 0 { Some((mx, my)) } else { None }, click != 0);
+        // has_mouse: 1 터치·펜, 2 마우스 (올려 두기 됨). click: 1 누름, 2 정보 보기 (오른쪽 클릭·길게 누르기)
+        app.engine.set_input(held, if has_mouse != 0 { Some((mx, my)) } else { None }, click & 1 != 0);
+        app.engine.set_pointer_kind(click & 2 != 0, has_mouse == 2);
         app.engine.tick();
     })
 }

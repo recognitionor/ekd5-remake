@@ -150,7 +150,14 @@
   }
   // 누르고 있는 동안 결정 키를 계속 누른 것으로 보냄 (전장 끌어서 스크롤)
   let ptrDown = 0;
-  canvas.addEventListener("pointermove", (e) => { mouse = toGame(e); });
+  // 정보 보기 (원작 오른쪽 클릭): 오른쪽 단추 또는 길게 누르기 (0.45초, 거의 안 움직이면)
+  let alt = 0, hover = 0, longT = null, longAt = null;
+  const stopLong = () => { if (longT) { clearTimeout(longT); longT = null; } };
+  canvas.addEventListener("pointermove", (e) => {
+    mouse = toGame(e);
+    if (e.pointerType === "mouse") hover = 1;
+    if (longT && longAt && Math.abs(mouse[0] - longAt[0]) + Math.abs(mouse[1] - longAt[1]) > 12) stopLong();
+  });
   // 터치 기기에서 링크로 들어왔으면 첫 터치 때 자동 전체 화면 (브라우저는 사용자 동작이 있어야 허락)
   const standalone = matchMedia("(display-mode: fullscreen), (display-mode: standalone)").matches || navigator.standalone;
   // 홈 화면 앱으로 실행했으면 전체화면 버튼 필요 없음 (전체 화면 API 의 fullscreen 과 구별하려고 시작 때 한 번만 판정)
@@ -171,9 +178,15 @@
     e.preventDefault(); unlockAudio(); started = true;
     mouse = toGame(e);
     try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
-    if (e.button === 2) { pulse = KEY.CANCEL; pulseTicks = 3; } else { ptrDown = KEY.DECIDE; click = 1; pulse = KEY.DECIDE; pulseTicks = 2; }
+    hover = e.pointerType === "mouse" ? 1 : 0;
+    stopLong();
+    if (e.button === 2) { pulse = KEY.CANCEL; pulseTicks = 3; alt = 1; } else {
+      ptrDown = KEY.DECIDE; click = 1; pulse = KEY.DECIDE; pulseTicks = 2;
+      longAt = mouse;
+      longT = setTimeout(() => { longT = null; if (ptrDown) alt = 1; }, 450);
+    }
   });
-  const ptrUp = (e) => { if (e) mouse = toGame(e); ptrDown = 0; };
+  const ptrUp = (e) => { if (e) mouse = toGame(e); ptrDown = 0; stopLong(); };
   canvas.addEventListener("pointerup", ptrUp);
   canvas.addEventListener("pointercancel", () => ptrUp());
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
@@ -425,8 +438,8 @@
     // 빨리 감기 중 대사 대기면 8틱마다 결정 키
     let auto = 0;
     if (speed >= 4 && w.waiting_text()) { if (++fastTick >= 8) { fastTick = 0; auto = KEY.DECIDE; } } else fastTick = 0;
-    w.tick(held | pulseBits | ptrDown | auto, m[0], m[1], mouse ? 1 : 0, click);
-    click = 0;
+    w.tick(held | pulseBits | ptrDown | auto, m[0], m[1], mouse ? (hover ? 2 : 1) : 0, click | (alt ? 2 : 0));
+    click = 0; alt = 0;
     updateFame(w.fame());
     const req = readOut(w.take_requests());
     if (req) req.split("\n").forEach(fetchFile);

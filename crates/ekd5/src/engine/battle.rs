@@ -545,11 +545,11 @@ impl Battle {
             py: (y * CELL) as f32,
             path: VecDeque::new(),
             dir: 0,
-            hp: off.max_hp as i32,
-            max_hp: off.max_hp as i32,
+            hp: off.hp_max(&self.items) as i32,
+            max_hp: off.hp_max(&self.items) as i32,
             level: off.level as i32,
             job: off.job,
-            mp: off.max_mp as i32,
+            mp: off.mp_max(&self.items) as i32,
             state: [3; 5],
             status: 0,
             acted: false,
@@ -1123,8 +1123,9 @@ impl Battle {
                     format!("+{h}")
                 }
                 Effect::Mp(n) => {
+                    let items = self.items.clone();
                     let un = &mut self.units[t];
-                    let m = (n as i32).min(un.off.max_mp as i32 - un.mp).max(0);
+                    let m = (n as i32).min(un.off.mp_max(&items) as i32 - un.mp).max(0);
                     un.mp += m;
                     format!("MP+{m}")
                 }
@@ -1478,9 +1479,10 @@ impl Battle {
                     self.gear_exp(i, 1, v as u32);
                 }
             }
+            let items = self.items.clone();
             let un = &mut self.units[i];
             let heal = heal.min(un.max_hp - un.hp).max(0);
-            let mp = mp.min(un.off.max_mp as i32 - un.mp).max(0);
+            let mp = mp.min(un.off.mp_max(&items) as i32 - un.mp).max(0);
             un.hp += heal;
             un.mp += mp;
             if heal > 0 || mp > 0 {
@@ -2183,6 +2185,7 @@ impl Battle {
         let rec = |i: usize| self.items.get(it as usize * 25 + i).copied().unwrap_or(0);
         let (ty, v) = (rec(17), rec(21) as i32);
         let jobs = self.jobs.clone();
+        let items = self.items.clone();
         let un = &mut self.units[t];
         match ty {
             0x3F => {
@@ -2191,7 +2194,7 @@ impl Battle {
                 format!("+{h}")
             }
             0x40 => {
-                let m = v.min(un.off.max_mp as i32 - un.mp);
+                let m = v.min(un.off.mp_max(&items) as i32 - un.mp);
                 un.mp += m;
                 format!("MP+{m}")
             }
@@ -2224,12 +2227,12 @@ impl Battle {
             0x4B => {
                 un.off.gain_exp(&jobs, v as u32);
                 un.level = un.off.level as i32;
-                un.max_hp = un.off.max_hp as i32;
+                un.max_hp = un.off.hp_max(&items) as i32;
                 format!("경험+{v}")
             }
             _ => {
                 un.hp = un.max_hp;
-                un.mp = un.off.max_mp as i32;
+                un.mp = un.off.mp_max(&items) as i32;
                 "완전 회복".into()
             }
         }
@@ -2387,9 +2390,10 @@ impl Battle {
         if self.lvup.is_none() {
             let Some((u, lv)) = self.levelups.pop_front() else { return false };
             // 레벨·최대 HP 는 여기서 반영 (경험치 창까지는 옛 레벨)
+            let items = self.items.clone();
             let un = &mut self.units[u];
             let old_max = un.max_hp;
-            un.max_hp = un.off.max_hp as i32;
+            un.max_hp = un.off.hp_max(&items) as i32;
             un.hp += un.max_hp - old_max;
             un.level = lv;
             let un = &self.units[u];
@@ -3204,8 +3208,9 @@ impl Battle {
         self.gauge(scr, wx + 40, wy + 48, 0x80, hp, un.max_hp);
         let mp = w.at(w.mp);
         self.mark_pic(scr, 0x3C0, 24, 24, wx + 8, wy + 56);
-        draw_text(scr, f, wx + 64, wy + 54, &format!("{mp:3}/{:3}", un.off.max_mp), story::TEXT);
-        self.gauge(scr, wx + 40, wy + 72, 0x40, mp, un.off.max_mp as i32);
+        let mp_max = un.off.mp_max(&self.items) as i32;
+        draw_text(scr, f, wx + 64, wy + 54, &format!("{mp:3}/{mp_max:3}"), story::TEXT);
+        self.gauge(scr, wx + 40, wy + 72, 0x40, mp, mp_max);
         if player {
             let ex = w.at(w.ex);
             self.mark_pic(scr, 0x600, 24, 24, wx + 8, wy + 80);
@@ -3234,8 +3239,9 @@ impl Battle {
         self.gauge(scr, bx + 40, by + 36, 0x80, un.hp, un.max_hp);
         draw_text(scr, f, bx + 176, by + 32, &format!("{:3}/{:3}", un.hp.max(0), un.max_hp), story::TEXT);
         self.mark_pic(scr, 0x3C0, 24, 24, bx + 8, by + 54);
-        self.gauge(scr, bx + 40, by + 62, 0x40, un.mp, un.off.max_mp as i32);
-        draw_text(scr, f, bx + 176, by + 58, &format!("{:3}/{:3}", un.mp.max(0), un.off.max_mp), story::TEXT);
+        let mp_max = un.off.mp_max(&self.items) as i32;
+        self.gauge(scr, bx + 40, by + 62, 0x40, un.mp, mp_max);
+        draw_text(scr, f, bx + 176, by + 58, &format!("{:3}/{mp_max:3}", un.mp.max(0)), story::TEXT);
         // 경험치
         self.gauge(scr, bx + 40, by + 84, 0x140, un.off.exp as i32, 100);
         draw_text(scr, f, bx + 12, by + 78, "EXP", story::TEXT);

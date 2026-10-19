@@ -9,7 +9,7 @@
 - `python3 -I scripts/extract-cd.py <CD.ccd> data` (CD 음악 트랙 2~22 → BGMnn.m4a(afconvert), 설치본에 없는 MCALL09.. 등, AVI → mp4(ffmpeg))
 
 ## 구조
-- `crates/ekd5`: ls12(Ls12 해제), palette(B,R,G 4비트), font(ALL_FONT.16P/ANKFONT.DAT), eex(컨테이너), vm(인자 해석·블록), officer(능력·레벨업·장비·장비 경험치·기본 장비), strategy(책략 표·공식), engine/{mod, story, battle, camp(본진·보물도감), sortie(출진 장수 선택 = 원작 대화상자 236, U_SELECT.E5), duel(일기토), fx(책략·맵 연출 MEFF/MCALL), icons(DLL 아이콘), tutor(관상가 노인·회차 기록), ui, screen, assets}
+- `crates/ekd5`: ls12(Ls12 해제), palette(B,R,G 4비트), font(ALL_FONT.16P/ANKFONT.DAT), eex(컨테이너), vm(인자 해석·블록), officer(능력·레벨업·장비·장비 경험치·기본 장비), strategy(책략 표·공식), engine/{mod, story, battle, camp(본진·보물도감), equip(장비 화면 = 원작 대화상자 328 + 아이템 정보 167), sortie(출진 장수 선택 = 원작 대화상자 236, U_SELECT.E5), duel(일기토), fx(책략·맵 연출 MEFF/MCALL), icons(DLL 아이콘), tutor(관상가 노인·회차 기록), ui, screen, assets}
 - `crates/ekd5-cli`: `ekd5 extract <원본> data`, `ekd5 shots data <out> <틱> [간격]` (EKD5_STAGE, EKD5_AUTO, EKD5_PRESS, EKD5_TAPS, EKD5_AUTOPLAY, EKD5_CHEAT, EKD5_AUTO_END, EKD5_DUMP(턴마다 부대 위치), EKD5_FLAGS, EKD5_SNAP(단계마다 저장 문자열), EKD5_RESTORE)
 - 빌드: cargo 는 PATH 에 없을 수 있음 → `~/.cargo/bin/cargo`
 - `crates/ekd5-web` + `web/ekd5.js`: WASM 글루 (진행 자동 저장 → localStorage `ekd5-save`)
@@ -27,6 +27,9 @@
 - 책략 (피해/회복/상태/능력, 성공률, 지형 제한, 연출 MEFF·MCALL + 효과음 SE_M), 도구, 턴 시작: 상태이상·능력 상태 복귀·지형 회복(0x12~0x16)·장비 회복/경험치
 - 본진: 원작처럼 화면의 장수를 눌러 대화(op2d) + 오른쪽 아래 단추 4개(출진·장비·구입·매각, EKD5.EXE 비트맵 0x155~0x158 → ICONS.BIN 묶음 4). 웹 메뉴 단추 = 보조 목록(대화 상대·도구 보기·보물도감). 가격: 구입 = 파일+19 ×100, 매각 ×75 (무기·방어구 ×(Lv+1)/2, 255 팔 수 없음)
 - 스크립트 장비 (op3e FUN_0041871f / op48 FUN_004151a6 → FUN_004081dc): 값 0 그대로(op48 은 기본 장비), 1 빼기, 그 외 무기 값−2 / 방어구 +36 / 보조 +51, 레벨 0 = 자동. 예전 판 저장은 불러올 때 Officer::fix_legacy_gear 로 고침
+- 장비 보정 (원작 FUN_00407ffe / FUN_00463dfb = officer::item_bonus): 종류 능력이 같으면 무기·방어구 기본치+성장치×(Lv−1) (255 상한), 보조 기본치. 고유 무기·방어구는 특수 종류(+18) 0x18~0x20 이 가리키는 능력에 특수치(+22) 더함 (고정도·비룡도복 순발 +10 등). 최대 HP/MP = 기본 + 보정 5/6 (상한 500/250, Officer::hp_max/mp_max)
+- 장비 가능 (원작 FUN_00407cf7 = Officer::can_equip): 무기·방어구 = 직업 표 +9+종류, 보조 = +23 제한 병종(job_group, 0xFF 모두), 소모품 불가. 스크립트 장비도 같은 검사
+- 장비 화면 (equip.rs, 원작 대화상자 328): 창고 일람(이름·속성·Lv·Exp·효과·장비○×) + 장수 콤보·앞의/다음 장수로 + 얼굴·능력(장비하면 ± 미리 보기 FUN_0046aeab) + 무기·방어구·보조 칸. 원작 조작: 마우스 올리기 = 미리 보기, 목록 클릭 = 장비(원래 것은 창고 그 자리), 칸 클릭 = 벗기(창고 200 차면 안 됨), 오른쪽 클릭 = 아이템 정보(대화상자 167: 속성·가격·효과·추가효과·IMSG 설명·장비 가능 부대), 목록→칸 끌어다 놓기. 터치: 한 번 = 고르기, 고른 것 다시 = 장비/벗기, 길게 누르기 = 정보 (웹 tick click 비트 2 = 정보, has_mouse 2 = 마우스). 창고 Exp 는 저장 안 함 (원작은 창고에도 Exp)
 - 장수 정보 창 (원작 대화상자 0xa6, 탭 능력·장비·책략·장수열전·부대특성, 전투 중 오른쪽 클릭) 미구현. 글은 IMSG.E5 (216바이트 기록: 아이템 0.., 책략 150.., 250.., 부대특성 350.., 열전 450+인물, 650.., 700.., 800..)
 - 출진 규칙 (원작 FUN_00417f55/FUN_0041aac4): op06 [본진, 최대(0→1), 반드시×5, 불가×5(0=조조 불가)] 는 본진 여닫기와 상관없이 정함, op4a 는 반드시·불가만. 조조는 불가가 아니면 반드시. 최대 = max(최대, 반드시 수), 후보가 적으면 후보 수. 최소 = 최대의 2/3. 출진 선택은 본진 출진 단추에서 (취소 = 본진), 고른 장수는 다음 전투 단계까지 유지
 - 승패 (원작 FUN_004146c1/FUN_0044e6af/FUN_0044e7a4/FUN_00450f0b): op45 인자 2 턴 제한, 5 승리 목표 장수, 7 패배 목표 장수(대개 조조, 없는 전투도 있음). op42 = 승리 목표(아군 아님)가 물러났거나 맵 위 적 없음, op43 = 패배 목표(아군)가 물러났거나 아군 모두 물러남(안 나온 부대는 남은 것). 승패는 스크립트 사건이 정하고, 엔진은 턴 제한 초과만 패배. op5c 는 부대 보여 주기(목표 아님). 치트 자동 진행만 적 전멸 = 승리

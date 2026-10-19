@@ -85,4 +85,10 @@ impl Icons {
         let k = *items.get(id as usize * 25 + 20)? as usize;
         self.pic(ITEM, k * 2, pal)
     }
+
+    /// 아이템 큰 아이콘 32×32 (작은 것 다음 번호)
+    pub fn item_big(&self, items: &[u8], id: u8, pal: &Palette) -> Option<Rc<Pic>> {
+        let k = *items.get(id as usize * 25 + 20)? as usize;
+        self.pic(ITEM, k * 2 + 1, pal)
+    }
 }

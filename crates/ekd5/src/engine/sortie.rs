@@ -414,8 +414,8 @@ impl<A: Assets> Engine<A> {
         // 막대 (원작 FUN_0046342f: HP 무늬 0x80 /500, MP 0x40 /250, Exp 0x140 /100, 나머지 0xC0 /400)
         let mv = jobs.get(o.job as usize * 27).copied().unwrap_or(0) as u16 + o.equip_bonus(&items, 7);
         let rows: [(&str, Option<usize>, i32, i32, String); 9] = [
-            ("HP", Some(0x80), o.max_hp as i32, 500, format!("{}", o.max_hp)),
-            ("MP", Some(0x40), o.max_mp as i32, 250, format!("{}", o.max_mp)),
+            ("HP", Some(0x80), o.hp_max(&items) as i32, 500, format!("{}", o.hp_max(&items))),
+            ("MP", Some(0x40), o.mp_max(&items) as i32, 250, format!("{}", o.mp_max(&items))),
             ("Exp", Some(0x140), o.exp as i32, 100, if o.exp == 0xFF { "MAX".into() } else { format!("{}", o.exp) }),
             ("공격력", Some(0xC0), o.value(&items, 0) as i32, 400, format!("{}", o.value(&items, 0))),
             ("정신력", Some(0xC0), o.value(&items, 2) as i32, 400, format!("{}", o.value(&items, 2))),
@@ -454,7 +454,7 @@ impl<A: Assets> Engine<A> {
     }
 }
 
-fn rect(scr: &mut Screen, x: i32, y: i32, w: i32, h: i32, c: u8) {
+pub(super) fn rect(scr: &mut Screen, x: i32, y: i32, w: i32, h: i32, c: u8) {
     scr.fill(x, y, w, 1, c);
     scr.fill(x, y + h - 1, w, 1, c);
     scr.fill(x, y, 1, h, c);
@@ -462,7 +462,7 @@ fn rect(scr: &mut Screen, x: i32, y: i32, w: i32, h: i32, c: u8) {
 }
 
 /// 윈도 묶음 상자 테두리 (오목한 두 줄)
-fn etched(scr: &mut Screen, x: i32, y: i32, w: i32, h: i32, light: u8, dark: u8) {
+pub(super) fn etched(scr: &mut Screen, x: i32, y: i32, w: i32, h: i32, light: u8, dark: u8) {
     rect(scr, x + 1, y + 1, w - 1, h - 1, light);
     rect(scr, x, y, w - 1, h - 1, dark);
 }

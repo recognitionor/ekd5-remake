@@ -39,9 +39,6 @@ pub enum CampView {
     Sell(ListBox, Vec<usize>),
     SellConfirm(ListBox, usize),
     Talk(ListBox, Vec<usize>),
-    EquipWho(ListBox, Vec<usize>),
-    EquipSlot(ListBox, usize),
-    EquipPick(ListBox, usize, u8, Vec<usize>),
     ShopKind(ListBox),
     Shop(ListBox, Vec<u8>, bool),
     Items(ListBox),
@@ -130,15 +127,6 @@ impl<A: Assets> Engine<A> {
             0x12..=0x3E => Some(2),
             _ => None,
         }
-    }
-
-    /// 직업이 장비할 수 있나 (직업 표 +9.. 종류별 가능)
-    fn can_equip(&self, job: u8, id: u8) -> bool {
-        let t = self.item_type(id);
-        if t > 0x11 {
-            return self.item_slot(id) == Some(2);
-        }
-        self.jobs.get(job as usize * 27 + 9 + t as usize).copied().unwrap_or(0) != 0
     }
 
     /// 본진 열기 (원작 op06 1)
@@ -252,10 +240,7 @@ impl<A: Assets> Engine<A> {
                 }
                 match act {
                     Some(0) => return self.camp_depart(camp),
-                    Some(1) => {
-                        let (l, ps) = self.officer_list("누구의 장비를 바꿀까");
-                        camp.view = CampView::EquipWho(l, ps);
-                    }
+                    Some(1) => self.open_equip(),
                     Some(2) => {
                         let mut l = ListBox::new("구입", 220);
                         l.y = 120;
@@ -287,8 +272,8 @@ impl<A: Assets> Engine<A> {
                     camp.view = CampView::Talk(l, ps);
                 }
                 Pick::Row(1) => {
-                    let (l, ps) = self.officer_list("누구의 장비를 바꿀까");
-                    camp.view = CampView::EquipWho(l, ps);
+                    self.open_equip();
+                    camp.view = CampView::Field;
                 }
                 Pick::Row(2) => {
                     let mut l = ListBox::new("구입", 220);
@@ -354,43 +339,6 @@ impl<A: Assets> Engine<A> {
                 Pick::Cancel => camp.view = CampView::Field,
                 Pick::None => camp.view = CampView::Talk(l, ps),
             },
-            CampView::EquipWho(mut l, ps) => match l.update(&inp, tapped) {
-                Pick::Row(k) => camp.view = CampView::EquipSlot(self.slot_box(ps[k]), ps[k]),
-                Pick::Cancel => camp.view = CampView::Field,
-                Pick::None => camp.view = CampView::EquipWho(l, ps),
-            },
-            CampView::EquipSlot(mut l, p) => match l.update(&inp, tapped) {
-                Pick::Row(k) => {
-                    let o = self.officer(p);
-                    let mut b = ListBox::new(&format!("{} — 무엇을 장비할까", name(p)), 360);
-                    let mut idx = Vec::new();
-                    b.push("(벗기)", "", true);
-                    idx.push(usize::MAX);
-                    for (i, &(it, lv)) in self.inventory.iter().enumerate() {
-                        if self.item_slot(it) == Some(k as u8) {
-                            let ok = self.can_equip(o.job, it);
-                            b.push(format!("{} Lv{}", item_name(&self.items, it), lv), if ok { "" } else { "불가" }, ok);
-                            idx.push(i);
-                        }
-                    }
-                    let ids: Vec<Option<u8>> = idx.iter().map(|&i| self.inventory.get(i).map(|x| x.0)).collect();
-                    self.item_icons(&mut b, &ids);
-                    camp.view = CampView::EquipPick(b, p, k as u8, idx);
-                }
-                Pick::Cancel => {
-                    let (l, ps) = self.officer_list("누구의 장비를 바꿀까");
-                    camp.view = CampView::EquipWho(l, ps);
-                }
-                Pick::None => camp.view = CampView::EquipSlot(l, p),
-            },
-            CampView::EquipPick(mut l, p, slot, idx) => match l.update(&inp, tapped) {
-                Pick::Row(k) => {
-                    self.equip(p, slot, idx[k]);
-                    camp.view = CampView::EquipSlot(self.slot_box(p), p);
-                }
-                Pick::Cancel => camp.view = CampView::EquipSlot(self.slot_box(p), p),
-                Pick::None => camp.view = CampView::EquipPick(l, p, slot, idx),
-            },
             CampView::ShopKind(mut l) => match l.update(&inp, tapped) {
                 Pick::Row(k) => {
                     let (b, ids) = self.shop_box(k == 1);
@@ -403,7 +351,7 @@ impl<A: Assets> Engine<A> {
                 Pick::Row(k) => {
                     let it = ids[k];
                     let price = self.item_price(it);
-                    if self.gold >= price && self.inventory.len() < 99 {
+                    if self.gold >= price && self.inventory.len() < super::equip::STORE_MAX {
                         self.gold -= price;
                         self.inventory.push((it, 1));
                         // 사기 (원작 FUN_0046fd73: SE10)
@@ -454,54 +402,6 @@ impl<A: Assets> Engine<A> {
                 true
             }
         }
-    }
-
-    fn officer_list(&mut self, title: &str) -> (ListBox, Vec<usize>) {
-        let mut l = ListBox::new(title, 300);
-        let roster = if self.roster.is_empty() { vec![0] } else { self.roster.clone() };
-        for &p in &roster {
-            let o = self.officer(p);
-            let n = self.persons.get(p).map(|x| x.name.clone()).unwrap_or_default();
-            l.push(n, format!("Lv{}", o.level), true);
-        }
-        (l, roster)
-    }
-
-    fn slot_box(&mut self, p: usize) -> ListBox {
-        let o = self.officer(p);
-        let n = self.persons.get(p).map(|x| x.name.clone()).unwrap_or_default();
-        let mut l = ListBox::new(&format!("{n} 장비"), 360);
-        let w = o.weapon.map_or("-".into(), |(i, lv)| format!("{} Lv{lv}", item_name(&self.items, i)));
-        let a = o.armor.map_or("-".into(), |(i, lv)| format!("{} Lv{lv}", item_name(&self.items, i)));
-        let c = o.acc.map_or("-".into(), |i| item_name(&self.items, i));
-        l.push("무기", w, true);
-        l.push("방어구", a, true);
-        l.push("보조", c, true);
-        l.footer = format!("공{} 방{} 정{} 순{} 사{}", o.value(&self.items, 0), o.value(&self.items, 1), o.value(&self.items, 2), o.value(&self.items, 3), o.value(&self.items, 4));
-        l
-    }
-
-    /// 장비 바꾸기 (inv_idx = usize::MAX 이면 벗기)
-    fn equip(&mut self, p: usize, slot: u8, inv_idx: usize) {
-        let mut o = self.officer(p);
-        let old: Option<(u8, u8)> = match slot {
-            0 => o.weapon,
-            1 => o.armor,
-            _ => o.acc.map(|i| (i, 1)),
-        };
-        let new = if inv_idx == usize::MAX { None } else { Some(self.inventory.remove(inv_idx)) };
-        if slot < 2 {
-            o.gear_exp[slot as usize] = 0;
-        }
-        match slot {
-            0 => o.weapon = new,
-            1 => o.armor = new,
-            _ => o.acc = new.map(|n| n.0),
-        }
-        if let Some(it) = old {
-            self.inventory.push(it);
-        }
-        self.officers.insert(p, o);
     }
 
     fn shop_box(&self, tools: bool) -> (ListBox, Vec<u8>) {
@@ -581,7 +481,7 @@ impl<A: Assets> Engine<A> {
             }
         }
         let box_ = match &c.view {
-            CampView::Menu(l) | CampView::Talk(l, _) | CampView::EquipWho(l, _) | CampView::EquipSlot(l, _) | CampView::EquipPick(l, ..) | CampView::ShopKind(l) | CampView::Shop(l, ..) | CampView::Items(l) | CampView::Sell(l, _) => Some(l),
+            CampView::Menu(l) | CampView::Talk(l, _) | CampView::ShopKind(l) | CampView::Shop(l, ..) | CampView::Items(l) | CampView::Sell(l, _) => Some(l),
             CampView::SellConfirm(l, _) => Some(l),
             CampView::Field | CampView::Running => None,
         };

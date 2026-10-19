@@ -240,9 +240,9 @@ impl<A: Assets> Engine<A> {
                         let un = &mut b.units[u];
                         un.off = o.clone();
                         un.level = o.level as i32;
-                        un.max_hp = o.max_hp as i32;
+                        un.max_hp = o.hp_max(&self.items) as i32;
                         un.hp = un.max_hp;
-                        un.mp = o.max_mp as i32;
+                        un.mp = o.mp_max(&self.items) as i32;
                     }
                 }
             }
