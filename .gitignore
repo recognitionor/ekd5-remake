@@ -10,3 +10,4 @@
 __pycache__/
 /web/ekd5_web.wasm
 /deploy/
+/LOCAL.md
