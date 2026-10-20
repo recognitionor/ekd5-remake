@@ -37,6 +37,8 @@
 
 ## 어떻게 만들었나
 
+> 전 과정을 기술적으로 자세히 정리한 문서는 **[docs/](docs/README.md)** 에 있습니다: 역공학 준비, 데이터 형식, 스크립트 엔진, 함수 옮기는 법, 시험 체계, 웹·PWA, AI 와 일한 방식, 사례 연구.
+
 ### 1. 원작 분석 (역공학)
 - `EKD5.EXE`를 [Ghidra](https://ghidra-sre.org/)로 디컴파일했습니다. 전체 덤프와 스크립트 명령 처리 함수 표를 뽑는 Ghidra 스크립트는 [`re/scripts/`](re/scripts)에 있습니다.
 - 데이터 형식은 코드와 파일을 대조해 풀었습니다.
@@ -127,7 +129,8 @@ crates/
   ekd5-cli/      자료 꺼내기, 화면 없는 자동 진행·스크린샷 시험
   ekd5-web/      WebAssembly 바인딩
 web/             index.html, ekd5.js(입력·소리·저장), install.js(설치 안내), PWA 매니페스트
-re/              역공학 도구: Ghidra 스크립트, Python 시제품 (덤프 결과는 미포함)
+re/              역공학 도구: Ghidra 스크립트, Python 시제품·PE 리소스/문자열 읽기 (덤프 결과는 미포함)
+docs/            기술 문서 (전 과정 정리)
 scripts/         웹 빌드, 배포, CD 자료 꺼내기
 AGENTS.md        개발 노트: 원작 함수 ↔ 구현 대응, 형식 메모, 근사·미구현 목록
 ```
