@@ -175,7 +175,7 @@
   if (standalone) document.getElementById("full").style.display = "none";
   let autoFull = !standalone && matchMedia("(pointer: coarse)").matches && !!document.documentElement.requestFullscreen;
   function tryAutoFull() {
-    if (!autoFull || document.fullscreenElement) return;
+    if (!autoFull || document.fullscreenElement || (window.ekd5Install && window.ekd5Install.isOpen)) return;
     document.documentElement.requestFullscreen({ navigationUI: "hide" })
       .then(() => { autoFull = false; screen.orientation && screen.orientation.lock && screen.orientation.lock("landscape").catch(() => {}); })
       .catch(() => {});
@@ -289,6 +289,10 @@
   sndLabels();
   document.getElementById("snd").addEventListener("click", (e) => { e.preventDefault(); unlockAudio(); sndPanel.style.display = sndPanel.style.display === "flex" ? "none" : "flex"; });
   document.getElementById("sndClose").addEventListener("click", () => { sndPanel.style.display = "none"; });
+  // 홈 화면 설치 안내 다시 보기 (설치된 앱으로 열었으면 숨김)
+  const installBtn = document.getElementById("installBtn");
+  if (!window.ekd5Install || window.ekd5Install.standalone) installBtn.style.display = "none";
+  else installBtn.addEventListener("click", () => { sndPanel.style.display = "none"; window.ekd5Install.open(); });
   sndBgm.addEventListener("click", () => {
     bgmOn = !bgmOn; try { localStorage.setItem("ekd5-bgm", bgmOn ? "1" : "0"); } catch (_) {}
     setSession(); setMusic(bgmWant); sndLabels();

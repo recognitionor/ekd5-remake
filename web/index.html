@@ -74,6 +74,21 @@
   .slot small { display: block; opacity: .6; font-size: 12px; margin-left: 22px; }
   .slot:disabled { opacity: .5; }
   .slot.small { flex: 1; text-align: center; font-size: 14px; }
+  /* 홈 화면 설치 안내 (install.js) — 앱을 돌려도 실제 화면 기준 */
+  #installPanel { display: none; position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.65); align-items: center; justify-content: center; touch-action: auto; }
+  .installBox { background: #1c1712; border: 1px solid #8a6a3b; border-radius: 14px; padding: 16px; width: min(400px, 88vw); max-height: 86vh; overflow: auto; font-size: 15px; line-height: 1.5; }
+  .installTitle { font-size: 18px; font-weight: 700; color: #e0b060; margin-bottom: 6px; }
+  .installBody p { margin: 6px 0; } .installBody ol { margin: 6px 0; padding-left: 22px; } .installBody li { margin: 4px 0; }
+  .installNote { font-size: 13px; opacity: .7; }
+  .installIcon { display: inline-block; border: 1px solid #aaa; border-radius: 4px; padding: 0 4px; font-size: 13px; }
+  .installActions { display: flex; gap: 8px; margin-top: 12px; }
+  .installBtn { flex: 1; font-size: 16px; padding: 12px; border-radius: 10px; border: 1px solid var(--btn-bd); background: var(--btn-bg); color: var(--fg); font-weight: 600; }
+  .installBtn.primary { background: #8a5a2b; border-color: #c08040; color: #fff; }
+  .installArrow { position: fixed; font-size: 40px; color: #e0b060; animation: installBob 1s ease-in-out infinite; pointer-events: none; }
+  .installArrow.bottom { left: 50%; bottom: 10px; transform: translateX(-50%); }
+  .installArrow.top { right: 18px; top: 6px; }
+  @keyframes installBob { 50% { translate: 0 8px; } }
+  .installArrow.top { animation-name: installBobUp; } @keyframes installBobUp { 50% { translate: 0 -8px; } }
 </style>
 </head>
 <body>
@@ -101,6 +116,7 @@
   <button id="orient" class="tog"></button>
   <button id="fit" class="tog"></button>
   <button id="full" class="tog">전체 화면</button>
+  <button id="installBtn" class="tog">📲 홈 화면에 설치</button>
   <button id="sndClose" class="tog">닫기</button>
 </div>
 <div id="slots" style="display:none"><div class="slotBox">
@@ -110,6 +126,7 @@
 </div></div>
 <div id="status">불러오는 중…</div>
 </div>
+<script src="install.js"></script>
 <script src="ekd5.js"></script>
 </body>
 </html>
