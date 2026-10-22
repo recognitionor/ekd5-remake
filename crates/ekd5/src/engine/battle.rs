@@ -712,34 +712,43 @@ impl Battle {
         Some(if self.sp(u, 0x22).is_some() { 1 } else { c })
     }
 
-    /// 이동 가능한 칸들 (적이 막음)
-    pub fn reachable(&self, ui: usize) -> Vec<(i32, i32)> {
+    /// 이동 비용 지도 (원작 FUN_0043a4a8 → 버퍼 +0x12c0): 출발 칸 0, 칸마다 지형 소모 이동력의 합이 가장 작은 값.
+    /// 보통 이동은 이동력 안에서, 적이 있는 칸은 못 지나고, 적 옆 칸(ZOC)에서는 멈춤 (원작 FUN_00439ef9, 적토마 '!' 예외).
+    /// 스크립트 이동은 이동력·부대·ZOC 상관없이 지형만 봄. 못 가는 칸 = i32::MAX
+    fn cost_map(&self, ui: usize, script: bool) -> Vec<i32> {
         let u = &self.units[ui];
+        let mut best = vec![i32::MAX; (self.cols * self.rows).max(0) as usize];
         if u.x < 0 || u.y < 0 || u.x >= self.cols || u.y >= self.rows {
-            return Vec::new();
+            return best;
         }
         // 이동력 = 직업 + 이동 장비 (바람바퀴 등, 능력 종류 7)
-        let mp = if u.status & status::PARALYZE != 0 { 0 } else { self.job_byte(u.job, 0) as i32 + u.off.equip_bonus(&self.items, 7) as i32 };
+        let mp = if script {
+            i32::MAX / 4
+        } else if u.status & status::PARALYZE != 0 {
+            0
+        } else {
+            self.job_byte(u.job, 0) as i32 + u.off.equip_bonus(&self.items, 7) as i32
+        };
         let start = (u.x, u.y);
-        let mut best = vec![i32::MAX; (self.cols * self.rows) as usize];
         let mut q = VecDeque::new();
         best[(u.y * self.cols + u.x) as usize] = 0;
         q.push_back((u.x, u.y));
         while let Some((x, y)) = q.pop_front() {
             let c = best[(y * self.cols + x) as usize];
-            // 적 옆 칸(ZOC)에서는 더 못 감 (원작 FUN_00439ef9, 적토마 '!' 는 예외)
-            if (x, y) != start && self.zoc(ui, x, y) {
+            if !script && (x, y) != start && self.zoc(ui, x, y) {
                 continue;
             }
-            for (dx, dy) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
+            for (dx, dy) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
                 let (nx, ny) = (x + dx, y + dy);
                 if nx < 0 || ny < 0 || nx >= self.cols || ny >= self.rows {
                     continue;
                 }
                 let Some(cost) = self.move_cost_of(ui, nx, ny) else { continue };
-                if let Some(o) = self.at(nx, ny) {
-                    if self.units[o].side.hostile(u.side) {
-                        continue;
+                if !script {
+                    if let Some(o) = self.at(nx, ny) {
+                        if self.units[o].side.hostile(u.side) {
+                            continue;
+                        }
                     }
                 }
                 let nc = c + cost;
@@ -749,6 +758,13 @@ impl Battle {
                 }
             }
         }
+        best
+    }
+
+    /// 이동 가능한 칸들 (적이 막음)
+    pub fn reachable(&self, ui: usize) -> Vec<(i32, i32)> {
+        let best = self.cost_map(ui, false);
+        let u = &self.units[ui];
         let mut out = Vec::new();
         for y in 0..self.rows {
             for x in 0..self.cols {
@@ -788,35 +804,55 @@ impl Battle {
     }
 
     /// 경로 (BFS, 이동 비용 무시한 칸 경로)
-    fn path_to(&self, ui: usize, to: (i32, i32), allowed: &[(i32, i32)]) -> VecDeque<(i32, i32)> {
+    /// 이동 경로 (원작 FUN_00439fce): 도착 칸에서 거꾸로, 위·오른쪽·아래·왼쪽 중 비용 지도 값이 가장 작은 (같으면 앞 순서) 칸으로
+    /// 한 칸씩 되짚어 출발 칸까지 → 뒤집음. 늘 상하좌우 한 칸씩, 이동력을 가장 적게 쓰는 길.
+    /// 길이 없으면 (스크립트 이동이 지형에 막힌 경우) 가로 먼저 그다음 세로로 한 칸씩 (대각선으로 미끄러지지 않게)
+    fn route(&self, ui: usize, to: (i32, i32), script: bool) -> VecDeque<(i32, i32)> {
         let u = &self.units[ui];
-        let mut prev = std::collections::HashMap::new();
-        let mut q = VecDeque::new();
-        q.push_back((u.x, u.y));
-        prev.insert((u.x, u.y), (u.x, u.y));
-        while let Some(p) = q.pop_front() {
-            if p == to {
-                break;
-            }
-            if p != (u.x, u.y) && self.zoc(ui, p.0, p.1) {
-                continue;
-            }
-            for (dx, dy) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
-                let n = (p.0 + dx, p.1 + dy);
-                if !prev.contains_key(&n) && (allowed.contains(&n) || n == to) {
-                    prev.insert(n, p);
-                    q.push_back(n);
+        let start = (u.x, u.y);
+        let mut path = VecDeque::new();
+        if to == start {
+            return path;
+        }
+        let best = self.cost_map(ui, script);
+        let idx = |x: i32, y: i32| (y * self.cols + x) as usize;
+        let inb = |x: i32, y: i32| x >= 0 && y >= 0 && x < self.cols && y < self.rows;
+        if inb(to.0, to.1) && best[idx(to.0, to.1)] != i32::MAX {
+            let mut c = to;
+            while c != start {
+                path.push_front(c);
+                let mut next: Option<((i32, i32), i32)> = None;
+                for (dx, dy) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
+                    let n = (c.0 + dx, c.1 + dy);
+                    if !inb(n.0, n.1) {
+                        continue;
+                    }
+                    let v = best[idx(n.0, n.1)];
+                    if v < best[idx(c.0, c.1)] && next.is_none_or(|(_, bv)| v < bv) {
+                        next = Some((n, v));
+                    }
+                }
+                match next {
+                    Some((n, _)) => c = n,
+                    None => break,
                 }
             }
-        }
-        let mut path = VecDeque::new();
-        let mut c = to;
-        while c != (u.x, u.y) {
-            path.push_front(c);
-            match prev.get(&c) {
-                Some(&p) => c = p,
-                None => return VecDeque::from(vec![to]),
+            if c == start {
+                return path;
             }
+            path.clear();
+        }
+        if std::env::var("EKD5_ROUTE_LOG").is_ok() {
+            eprintln!("경로 없음: 부대 {} {:?} → {:?} (스크립트 {script})", u.person, start, to);
+        }
+        let (mut x, mut y) = start;
+        while x != to.0 {
+            x += (to.0 - x).signum();
+            path.push_back((x, y));
+        }
+        while y != to.1 {
+            y += (to.1 - y).signum();
+            path.push_back((x, y));
         }
         path
     }
@@ -1898,8 +1934,7 @@ impl Battle {
     pub fn walk_to(&mut self, ui: usize, x: i32, y: i32) {
         // 도착 칸에 다른 부대가 있으면 가장 가까운 빈 칸으로 (원작 FUN_0045b467 → FUN_004411b0)
         let (x, y) = if (self.units[ui].x, self.units[ui].y) == (x, y) { (x, y) } else { self.free_cell(ui, x, y) };
-        let all: Vec<(i32, i32)> = (0..self.rows).flat_map(|yy| (0..self.cols).map(move |xx| (xx, yy))).collect();
-        let p = self.path_to(ui, (x, y), &all);
+        let p = self.route(ui, (x, y), true);
         self.units[ui].path = p;
     }
 
@@ -2053,7 +2088,7 @@ impl Battle {
                 } else if let Some(c) = tapped {
                     if cells.contains(&c) {
                         let from = (self.units[unit].x, self.units[unit].y);
-                        let p = self.path_to(unit, c, &cells);
+                        let p = self.route(unit, c, false);
                         self.units[unit].path = p;
                         self.phase = Phase::Moving { unit, from };
                     } else {
@@ -2727,7 +2762,7 @@ impl Battle {
                         }
                     }
                 };
-                let p = self.path_to(u, dest, &cells);
+                let p = self.route(u, dest, false);
                 self.units[u].path = p;
                 if self.units[u].x * CELL < self.cam.0 || self.units[u].x * CELL > self.cam.0 + 592 || self.units[u].y * CELL < self.cam.1 || self.units[u].y * CELL > self.cam.1 + 432 {
                     let (x, y) = (self.units[u].x, self.units[u].y);
