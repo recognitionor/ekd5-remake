@@ -172,6 +172,8 @@ pub struct Engine<A: Assets> {
     /// 불러온 장수 레벨 (자료 적재 뒤 적용)
     pending_offs: Vec<(usize, u8, u8, Option<(u8, u8)>, Option<(u8, u8)>, Option<u8>, [u8; 2])>,
     pub items: Rc<Vec<u8>>,
+    /// 장(이야기 단계)마다 상점 목록 (DATA.E5[2], 36바이트 × 58: u16 무기상 주인, u16 도구상 주인, 무기·방어구 16, 도구 16, 0xFF 없음 — 원작 FUN_0041dd5e / FUN_0040e13c)
+    pub shops: Rc<Vec<u8>>,
     pub strategies: Rc<Vec<crate::strategy::Strategy>>,
     /// 돈, 소지 아이템 (아이템, 레벨), 명성(op3a 2)
     pub gold: i32,
@@ -294,6 +296,7 @@ impl<A: Assets> Engine<A> {
             person_data: Rc::new(Vec::new()),
             pending_offs: Vec::new(),
             items: Rc::new(Vec::new()),
+            shops: Rc::new(Vec::new()),
             strategies: Rc::new(Vec::new()),
             gold: 0,
             inventory: Vec::new(),
@@ -426,8 +429,9 @@ impl<A: Assets> Engine<A> {
             }
         }
         if self.jobs.is_empty() {
-            match (self.packs.get(&mut self.assets, "DATA.E5", 3), self.packs.get(&mut self.assets, "DATA.E5", 4), self.packs.get(&mut self.assets, "DATA.E5", 1), self.packs.get(&mut self.assets, "DATA.E5", 5)) {
-                (Ok(j), Ok(t), Ok(i), Ok(st)) => {
+            match (self.packs.get(&mut self.assets, "DATA.E5", 3), self.packs.get(&mut self.assets, "DATA.E5", 4), self.packs.get(&mut self.assets, "DATA.E5", 1), self.packs.get(&mut self.assets, "DATA.E5", 5), self.packs.get(&mut self.assets, "DATA.E5", 2)) {
+                (Ok(j), Ok(t), Ok(i), Ok(st), Ok(sh)) => {
+                    self.shops = Rc::new(sh.unwrap_or_default());
                     self.strategies = Rc::new(crate::strategy::parse(&st.unwrap_or_default()));
                     self.jobs = Rc::new(j.unwrap_or_default());
                     self.terrain_tab = Rc::new(t.unwrap_or_default());

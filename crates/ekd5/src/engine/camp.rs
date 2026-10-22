@@ -109,24 +109,9 @@ impl<A: Assets> Engine<A> {
         self.items.get(id as usize * 25 + 17).copied().unwrap_or(0xFF)
     }
 
-    /// 고유 아이템 (팔지 않음, +24 = 1)
-    fn item_unique(&self, id: u8) -> bool {
-        self.items.get(id as usize * 25 + 24).copied().unwrap_or(1) != 0
-    }
-
     /// 소모품 (회복 등, 종류 0x3f..)
     pub fn item_consumable(&self, id: u8) -> bool {
         self.item_type(id) >= 0x3F
-    }
-
-    /// 장비 칸 (0 무기, 1 방어구, 2 보조)
-    fn item_slot(&self, id: u8) -> Option<u8> {
-        match self.item_type(id) {
-            0..=0xD => Some(0),
-            0xE..=0x11 => Some(1),
-            0x12..=0x3E => Some(2),
-            _ => None,
-        }
     }
 
     /// 본진 열기 (원작 op06 1)
@@ -413,20 +398,17 @@ impl<A: Assets> Engine<A> {
 
     fn shop_box(&self, tools: bool) -> (ListBox, Vec<u8>) {
         let mut l = ListBox::new(&format!("{}   소지금 {}", if tools { "도구점" } else { "무기·방어구점" }, self.gold), 400);
-        let mut ids = Vec::new();
-        // 진행에 따라 파는 물건이 늘어난다 (가격 상한 — 원작 판매 목록은 미분석, 근사)
-        let cap = (300 + self.stage as i32 * 120) * 10;
-        for id in 0..(self.items.len() / 25) as u8 {
-            if self.item_unique(id) || self.item_price(id) <= 0 {
-                continue;
-            }
-            let cons = self.item_consumable(id);
-            if cons != tools || (!tools && self.item_price(id) > cap) || (!tools && self.item_slot(id).is_none()) {
-                continue;
-            }
+        // 원작: 이야기 단계(장)마다 정해진 목록 (DATA.E5[2] 의 단계/2 번째, FUN_00468af9 무기·방어구 / FUN_00468c53 도구)
+        let k = (self.stage as usize / 2).min(57);
+        let rec = self.shops.get(k * 36..k * 36 + 36).unwrap_or(&[]);
+        let list = if rec.len() == 36 { if tools { &rec[20..36] } else { &rec[4..20] } } else { &[][..] };
+        let ids: Vec<u8> = list.iter().copied().filter(|&id| id != 0xFF).collect();
+        for &id in &ids {
             let have = self.inventory.iter().filter(|x| x.0 == id).count();
             l.push(item_name(&self.items, id), format!("{}금{}", self.item_price(id), if have > 0 { format!(" ({have})") } else { String::new() }), self.gold >= self.item_price(id));
-            ids.push(id);
+        }
+        if ids.is_empty() {
+            l.push("파는 물건이 없다", "", false);
         }
         l.footer = "누르면 하나 삽니다".into();
         self.item_icons(&mut l, &ids.iter().map(|&i| Some(i)).collect::<Vec<_>>());
