@@ -36,8 +36,6 @@ pub enum CampView {
     Field,
     Menu(ListBox),
     /// 매각 (소지품 번호)
-    Sell(ListBox, Vec<usize>),
-    SellConfirm(ListBox, usize),
     Talk(ListBox, Vec<usize>),
     /// 단추 첫 사용 지시 대사 중 (원작 FUN_0041c4b2: 0 매각, 1 구입, 2 장비) — 끝나면 그 화면
     Order(u8),
@@ -85,26 +83,6 @@ impl<A: Assets> Engine<A> {
         }
         let p = v as i32 * 300 / 4;
         Some(if self.item_type(id) < 0x12 { p * (lv as i32 + 1) / 2 } else { p })
-    }
-
-    fn sell_box(&self) -> (ListBox, Vec<usize>) {
-        let mut l = ListBox::new("매각", 400);
-        let mut idx = Vec::new();
-        let mut ids = Vec::new();
-        for (i, &(it, lv)) in self.inventory.iter().enumerate() {
-            let lvs = if self.item_type(it) < 0x12 { format!(" Lv{lv}") } else { String::new() };
-            match self.sell_price(it, lv) {
-                Some(p) => l.push(format!("{}{lvs}", item_name(&self.items, it)), format!("{p}"), true),
-                None => l.push(format!("{}{lvs}", item_name(&self.items, it)), "팔 수 없음", false),
-            }
-            idx.push(i);
-            ids.push(Some(it));
-        }
-        if idx.is_empty() {
-            l.push("팔 물건이 없다", "", false);
-        }
-        self.item_icons(&mut l, &ids);
-        (l, idx)
     }
 
     fn item_type(&self, id: u8) -> u8 {
@@ -187,7 +165,7 @@ impl<A: Assets> Engine<A> {
                 return false;
             }
             camp.view = CampView::Field;
-            self.camp_action(&mut camp, k);
+            self.camp_action(k);
         }
         // 대화 블록이 끝나면 메뉴로
         if matches!(camp.view, CampView::Running) {
@@ -283,40 +261,6 @@ impl<A: Assets> Engine<A> {
                 Pick::Cancel => camp.view = CampView::Field,
                 _ => camp.view = CampView::Menu(m),
             },
-            CampView::Sell(mut l, idx) => match l.update(&inp, tapped) {
-                Pick::Row(k) => {
-                    if let Some(&i) = idx.get(k) {
-                        let (it, lv) = self.inventory[i];
-                        let p = self.sell_price(it, lv).unwrap_or(0);
-                        // 원작: "… 금 n 입니다. 매각해도 좋습니까?"
-                        let mut c = ListBox::new(&format!("{} 금 {p} — 매각할까", item_name(&self.items, it)), 360);
-                        c.y = 160;
-                        c.push("예", "", true);
-                        c.push("아니오", "", true);
-                        camp.view = CampView::SellConfirm(c, i);
-                    }
-                }
-                Pick::Cancel => camp.view = CampView::Field,
-                Pick::None => camp.view = CampView::Sell(l, idx),
-            },
-            CampView::SellConfirm(mut c, i) => match c.update(&inp, tapped) {
-                Pick::Row(0) => {
-                    if let Some(&(it, lv)) = self.inventory.get(i) {
-                        if let Some(p) = self.sell_price(it, lv) {
-                            self.inventory.remove(i);
-                            self.gold = (self.gold + p).min(999_999);
-                            self.sounds.push(super::Sound::Effect("SE10.WAV".into()));
-                        }
-                    }
-                    let (l, idx) = self.sell_box();
-                    camp.view = CampView::Sell(l, idx);
-                }
-                Pick::Row(_) | Pick::Cancel => {
-                    let (l, idx) = self.sell_box();
-                    camp.view = CampView::Sell(l, idx);
-                }
-                Pick::None => camp.view = CampView::SellConfirm(c, i),
-            },
             CampView::Talk(mut l, ps) => match l.update(&inp, tapped) {
                 Pick::Row(k) => {
                     if let Some(&(_, body)) = camp.talks.iter().find(|t| Some(&t.0) == ps.get(k)) {
@@ -364,15 +308,12 @@ impl<A: Assets> Engine<A> {
                 }
             }
         }
-        self.camp_action(camp, k);
+        self.camp_action(k);
     }
 
-    fn camp_action(&mut self, camp: &mut Camp, k: u8) {
+    fn camp_action(&mut self, k: u8) {
         match k {
-            0 => {
-                let (l, idx) = self.sell_box();
-                camp.view = CampView::Sell(l, idx);
-            }
+            0 => self.open_sell(),
             1 => self.open_shop(),
             _ => self.open_equip(),
         }
@@ -454,8 +395,7 @@ impl<A: Assets> Engine<A> {
             }
         }
         let box_ = match &c.view {
-            CampView::Menu(l) | CampView::Talk(l, _) | CampView::Items(l) | CampView::Sell(l, _) => Some(l),
-            CampView::SellConfirm(l, _) => Some(l),
+            CampView::Menu(l) | CampView::Talk(l, _) | CampView::Items(l) => Some(l),
             CampView::Field | CampView::Running | CampView::Order(_) => None,
         };
         if let Some(l) = box_ {

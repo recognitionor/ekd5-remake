@@ -260,6 +260,12 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
             eng.set_input(held, Some((x, y)), false);
             eng.set_pointer_kind(true, false);
         }
+        // 시험: EKD5_GIVE=틱:아이템:레벨 — 그 틱에 창고에 아이템 넣기
+        if let Some((gt, gid, glv)) = std::env::var("EKD5_GIVE").ok().and_then(|v| { let x: Vec<u32> = v.split(':').filter_map(|s| s.parse().ok()).collect(); (x.len() == 3).then(|| (x[0], x[1] as u8, x[2] as u8)) }) {
+            if gt == t {
+                eng.inventory.insert(0, (gid, glv));
+            }
+        }
         // 시험: EKD5_LIMIT=턴 — 전투 턴 제한을 그 값으로 (턴 제한 초과 퇴각 시험)
         if let Some(n) = std::env::var("EKD5_LIMIT").ok().and_then(|v| v.parse::<i32>().ok()) {
             if let ekd5::engine::Scene::Battle(b) = &mut eng.scene {

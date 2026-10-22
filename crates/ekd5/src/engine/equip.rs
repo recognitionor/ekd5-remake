@@ -81,11 +81,15 @@ pub struct EquipUi {
 pub struct Shop {
     pub tools: bool,
     pub ids: Vec<u8>,
-    /// 확인 창 (아이템, 개수)
-    pub confirm: Option<(u8, u32)>,
+    /// 확인 창 (아이템, 개수, 목록 줄)
+    pub confirm: Option<(u8, u32, usize)>,
+    /// 매각 (원작 대화상자 329: 무기 일람 / 도구 일람 탭, FUN_0046d030 / FUN_0046d4e7)
+    pub sell: bool,
+    /// 상인 말 (원작 FUN_0046fa12 0: 담당 얼굴과 글)
+    pub notice: Option<Vec<String>>,
 }
 
-const TABS: [(i32, i32, i32, i32); 2] = [(LIST.0 + 6, LIST.1 - 10, 72, 18), (LIST.0 + 82, LIST.1 - 10, 72, 18)];
+const TABS: [(i32, i32, i32, i32); 2] = [(LIST.0 + 6, LIST.1 - 10, 88, 18), (LIST.0 + 98, LIST.1 - 10, 88, 18)];
 const CONFIRM: (i32, i32, i32, i32) = (150, 170, 340, 140);
 const YES_BTN: (i32, i32, i32, i32) = (CONFIRM.0 + 60, CONFIRM.1 + 98, 90, 28);
 const NO_BTN: (i32, i32, i32, i32) = (CONFIRM.0 + 190, CONFIRM.1 + 98, 90, 28);
@@ -167,7 +171,89 @@ impl<A: Assets> Engine<A> {
         self.open_equip();
         let ids = self.shop_ids(false);
         if let Some(ui) = self.equip_ui.as_mut() {
-            ui.shop = Some(Shop { tools: false, ids, confirm: None });
+            ui.shop = Some(Shop { tools: false, ids, confirm: None, sell: false, notice: None });
+        }
+    }
+
+    /// 매각 열기 (본진 매각 단추·메뉴)
+    pub fn open_sell(&mut self) {
+        self.open_equip();
+        if let Some(ui) = self.equip_ui.as_mut() {
+            ui.shop = Some(Shop { tools: false, ids: Vec::new(), confirm: None, sell: true, notice: None });
+        }
+    }
+
+    /// 매각 목록 (아이템, 레벨, 창고 번호, 개수): 무기 일람 = 무기·방어구·보조 하나씩, 도구 일람 = 종류마다 묶어 재고
+    fn sell_rows(&self, tools: bool) -> Vec<(u8, u8, usize, u32)> {
+        let cat = |id: u8| item_cat(self.items.get(id as usize * 25 + 17).copied().unwrap_or(0xFF));
+        if !tools {
+            return self.inventory.iter().enumerate().filter(|(_, &(id, _))| cat(id) < 3).map(|(i, &(id, lv))| (id, lv, i, 1)).collect();
+        }
+        let mut out: Vec<(u8, u8, usize, u32)> = Vec::new();
+        for (i, &(id, _)) in self.inventory.iter().enumerate() {
+            if cat(id) < 3 {
+                continue;
+            }
+            match out.iter_mut().find(|r| r.0 == id) {
+                Some(r) => r.3 += 1,
+                None => out.push((id, 1, i, 1)),
+            }
+        }
+        out.sort_by_key(|r| r.0);
+        out
+    }
+
+    /// 이 장의 매각·구입 담당 (상점 자료 +4)
+    fn merchant(&self) -> Option<usize> {
+        let k = (self.stage as usize / 2).min(57);
+        let r = self.shops.get(k * 36 + 2..k * 36 + 4)?;
+        let p = r[0] as usize | (r[1] as usize) << 8;
+        (p != 0 && p < self.persons.len()).then_some(p)
+    }
+
+    /// 팔기 (원작 FUN_0046d030: 돈 더하기, Lv3 일반 무기·방어구는 상인이 열매를 줌 FUN_0040d989 / FUN_0046d4e7 도구 개수)
+    fn shop_sell(&mut self, ui: &mut EquipUi, row: usize, qty: u32) {
+        let tools = ui.shop.as_ref().is_some_and(|s| s.tools);
+        let Some(&(id, lv, idx, _)) = self.sell_rows(tools).get(row) else { return };
+        let Some(price) = self.sell_price(id, lv) else { return };
+        if tools {
+            for _ in 0..qty {
+                if let Some(i) = self.inventory.iter().position(|x| x.0 == id) {
+                    self.inventory.remove(i);
+                }
+            }
+        } else {
+            self.inventory.remove(idx);
+        }
+        self.gold = (self.gold + price * qty as i32).min(999_999);
+        self.sounds.push(super::Sound::Effect("SE10.WAV".into()));
+        let t = self.items.get(id as usize * 25 + 17).copied().unwrap_or(0xFF);
+        if !tools && item_cat(t) < 2 && !item_unique(&self.items, id) && lv == 3 {
+            let fruit = match t {
+                0 => Some(103u8),
+                2 | 8 => Some(98),
+                4 | 6 => Some(102),
+                10 | 12 => Some(99),
+                14 => Some(100),
+                16 => Some(101),
+                _ => None,
+            };
+            if let Some(fr) = fruit {
+                let (nm, fn_) = (item_name(&self.items, id), item_name(&self.items, fr));
+                let obj = |s: &str| if super::battle::has_batchim(s) { "을" } else { "를" };
+                if self.inventory.len() < STORE_MAX {
+                    self.inventory.push((fr, 1));
+                }
+                if let Some(sh) = ui.shop.as_mut() {
+                    sh.notice = Some(vec![format!("상인은 Lv.{lv:2}의 {nm}{}", obj(&nm)), "몹시 마음에 들었는지".into(), format!("{fn_}{} 주었습니다.", obj(&fn_))]);
+                }
+            }
+        }
+        if let Some(Sel::Row(k)) = ui.sel {
+            let n = self.sell_rows(tools).len();
+            if k >= n {
+                ui.sel = n.checked_sub(1).map(Sel::Row);
+            }
         }
     }
 
@@ -182,6 +268,7 @@ impl<A: Assets> Engine<A> {
     /// 목록 줄 (아이템, 레벨): 창고 또는 상점 (상점 무기·방어구는 레벨 1)
     fn equip_rows(&self, ui: &EquipUi) -> Vec<(u8, u8)> {
         match &ui.shop {
+            Some(sh) if sh.sell => self.sell_rows(sh.tools).into_iter().map(|r| (r.0, r.1)).collect(),
             Some(sh) => sh.ids.iter().map(|&id| (id, 1)).collect(),
             None => self.inventory.clone(),
         }
@@ -189,6 +276,20 @@ impl<A: Assets> Engine<A> {
 
     /// 상점 줄을 누름: 확인 창 (무기·방어구는 그 장수가 쓸 수 있을 때만, 창고가 차면 안 됨)
     fn shop_pick(&mut self, ui: &mut EquipUi, p: usize, k: usize) {
+        if ui.shop.as_ref().is_some_and(|s| s.sell) {
+            let tools = ui.shop.as_ref().is_some_and(|s| s.tools);
+            let row = self.sell_rows(tools).get(k).copied();
+            match row.filter(|r| self.sell_price(r.0, r.1).is_some()) {
+                Some((id, _, _, _)) => {
+                    if let Some(sh) = ui.shop.as_mut() {
+                        sh.confirm = Some((id, 1, k));
+                    }
+                    self.sounds.push(super::Sound::Effect("SE02.WAV".into()));
+                }
+                None => self.sounds.push(super::Sound::Effect("SE00.WAV".into())),
+            }
+            return;
+        }
         let Some(sh) = ui.shop.as_mut() else { return };
         let Some(&id) = sh.ids.get(k) else { return };
         let price = self.item_price(id) as u32;
@@ -199,7 +300,7 @@ impl<A: Assets> Engine<A> {
             o.can_equip(&self.items, &self.jobs, id) && self.gold as u32 >= price && self.inventory.len() < STORE_MAX
         };
         if ok {
-            sh.confirm = Some((id, 1));
+            sh.confirm = Some((id, 1, k));
             self.sounds.push(super::Sound::Effect("SE02.WAV".into()));
         } else {
             self.sounds.push(super::Sound::Effect("SE00.WAV".into()));
@@ -349,20 +450,34 @@ impl<A: Assets> Engine<A> {
             }
         }
         let p = ui.pids[ui.cur.min(ui.pids.len() - 1)];
-        if !ui.faces.contains_key(&p) {
-            let face = self.face_of(p);
-            if let Ok(d) = self.packs.get(&mut self.assets, "FACE.E5", face as usize) {
-                ui.faces.insert(p, Pic::new(64, 80, d.unwrap_or_default()));
+        let merchant = if ui.shop.is_some() { self.merchant() } else { None };
+        for q in std::iter::once(p).chain(merchant) {
+            if !ui.faces.contains_key(&q) {
+                let face = self.face_of(q);
+                if let Ok(d) = self.packs.get(&mut self.assets, "FACE.E5", face as usize) {
+                    ui.faces.insert(q, Pic::new(64, 80, d.unwrap_or_default()));
+                }
             }
         }
         let inp = self.input.clone();
         let rows = self.equip_rows(&ui);
         let n = rows.len();
         let released = inp.held & key::DECIDE == 0;
-        // 구입 확인 창
-        if let Some((id, qty)) = ui.shop.as_ref().and_then(|s| s.confirm) {
+        // 상인 말: 누르면 닫음
+        if ui.shop.as_ref().is_some_and(|s| s.notice.is_some()) {
+            if inp.click || inp.pressed & (key::DECIDE | key::CANCEL) != 0 {
+                if let Some(sh) = ui.shop.as_mut() {
+                    sh.notice = None;
+                }
+            }
+            self.equip_ui = Some(ui);
+            return;
+        }
+        // 구입·매각 확인 창
+        if let Some((id, qty, row)) = ui.shop.as_ref().and_then(|s| s.confirm) {
             let tools = ui.shop.as_ref().is_some_and(|s| s.tools);
-            let max = if tools { self.shop_max(id) } else { 1 };
+            let selling = ui.shop.as_ref().is_some_and(|s| s.sell);
+            let max = if !tools { 1 } else if selling { self.sell_rows(true).get(row).map_or(1, |r| r.3) } else { self.shop_max(id) };
             let mut q = qty;
             let mut answer = None;
             if inp.click {
@@ -393,9 +508,11 @@ impl<A: Assets> Engine<A> {
                 }
             }
             if let Some(sh) = ui.shop.as_mut() {
-                sh.confirm = if answer.is_some() { None } else { Some((id, q.clamp(1, max))) };
+                sh.confirm = if answer.is_some() { None } else { Some((id, q.clamp(1, max), row)) };
             }
-            if answer == Some(true) {
+            if answer == Some(true) && selling {
+                self.shop_sell(&mut ui, row, q.clamp(1, max));
+            } else if answer == Some(true) {
                 self.shop_buy(&mut ui, p, id, q.clamp(1, max));
             } else if answer == Some(false) {
                 self.sounds.push(super::Sound::Effect("SE01.WAV".into()));
@@ -463,7 +580,7 @@ impl<A: Assets> Engine<A> {
         let mut close = false;
         if inp.click {
             if let Some(m) = inp.mouse {
-                if let Some(h) = Self::equip_hit(&ui, m, n) {
+                if let Some(h) = Self::equip_hit(&ui, m, n).filter(|h| !(matches!(h, Sel::Slot(_)) && ui.shop.as_ref().is_some_and(|s| s.sell))) {
                     if ui.sel == Some(h) || inp.hover {
                         ui.pending = Some(h);
                     }
@@ -475,8 +592,9 @@ impl<A: Assets> Engine<A> {
                     // 무기상 / 도구상
                     let tools = t == 1;
                     if ui.shop.as_ref().is_some_and(|s| s.tools != tools) {
-                        let ids = self.shop_ids(tools);
-                        ui.shop = Some(Shop { tools, ids, confirm: None });
+                        let sell = ui.shop.as_ref().is_some_and(|s| s.sell);
+                        let ids = if sell { Vec::new() } else { self.shop_ids(tools) };
+                        ui.shop = Some(Shop { tools, ids, confirm: None, sell, notice: None });
                         ui.sel = None;
                         ui.top = 0;
                         self.sounds.push(super::Sound::Effect("SE00.WAV".into()));
@@ -600,16 +718,38 @@ impl<A: Assets> Engine<A> {
         let small: Vec<Option<Rc<Pic>>> = inventory.iter().map(|&(id, _)| self.icons.item(&items, id, &pal)).collect();
         let big: Vec<Option<Rc<Pic>>> = (0..3u8).map(|s| Self::slot_item(&o, s).and_then(|(id, _)| self.icons.item_big(&items, id, &pal))).collect();
         let name = self.persons.get(p).map(|x| x.name.clone()).unwrap_or_default();
-        let confirm_text = shop.as_ref().and_then(|sh| sh.confirm).map(|(id, q)| {
+        let selling = shop.as_ref().is_some_and(|s| s.sell);
+        let tools_tab = shop.as_ref().is_some_and(|s| s.tools);
+        let sell_info: Vec<(Option<i32>, u32)> = if selling { self.sell_rows(tools_tab).iter().map(|r| (self.sell_price(r.0, r.1), r.3)).collect() } else { Vec::new() };
+        // 확인 글 (원작 구입 "%s%s 금 %d 입니다." / 매각 무기·방어구 "%s Lv.%2d%s 금 %d 입니다.", 보조 "%s%s 금 %d 입니다." + "매각해도 좋습니까?")
+        let confirm_text = shop.as_ref().and_then(|sh| sh.confirm).map(|(id, q, row)| {
             let nm = item_name(&items, id);
-            let ptc = if super::battle::has_batchim(&nm) { "은" } else { "는" };
-            let total = self.item_price(id) as u32 * q;
-            if shop.as_ref().is_some_and(|s| s.tools) { (format!("{nm}{ptc} {q}개로 금 {total} 입니다."), q) } else { (format!("{nm}{ptc} 금 {total} 입니다."), q) }
+            let ptc = |s: &str| if super::battle::has_batchim(s) { "은" } else { "는" };
+            if selling {
+                let lv = inventory.get(row).map_or(1, |r| r.1);
+                let price = self.sell_price(id, lv).unwrap_or(0) * q as i32;
+                let t = items.get(id as usize * 25 + 17).copied().unwrap_or(0xFF);
+                let num = |n: u8| ["영", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"][(n % 10) as usize];
+                let line = if tools_tab {
+                    format!("{nm}{} {q}개로 금 {price} 입니다.", ptc(&nm))
+                } else if item_cat(t) < 2 {
+                    format!("{nm} Lv.{lv:2}{} 금 {price} 입니다.", ptc(num(lv)))
+                } else {
+                    format!("{nm}{} 금 {price} 입니다.", ptc(&nm))
+                };
+                (line, q, "매각해도 좋습니까?")
+            } else {
+                let total = self.item_price(id) as u32 * q;
+                let line = if tools_tab { format!("{nm}{} {q}개로 금 {total} 입니다.", ptc(&nm)) } else { format!("{nm}{} 금 {total} 입니다.", ptc(&nm)) };
+                (line, q, "구입해도 좋습니까?")
+            }
         });
+        let merchant = self.merchant();
+        let merchant_name = merchant.and_then(|m| self.persons.get(m)).map(|x| x.name.clone()).unwrap_or_default();
         let scr = &mut self.screen;
         frame_box(scr, 4, 2, 632, 476);
         scr.fill(6, 4, 628, 20, navy);
-        draw_text(scr, f, 14, 6, if shop.is_some() { "구입" } else { "장비" }, white);
+        draw_text(scr, f, 14, 6, if selling { "매각" } else if shop.is_some() { "구입" } else { "장비" }, white);
 
         // 창고 일람 / 상품 일람 (무기상·도구상 탭)
         etched(scr, LIST.0, LIST.1, LIST.2, LIST.3, white, dark);
@@ -619,10 +759,15 @@ impl<A: Assets> Engine<A> {
                 let on = sh.tools == (t == 1);
                 scr.fill(x, y, w, h, if on { white } else { gray });
                 rect(scr, x, y, w, h, dark);
-                draw_text(scr, f, x + 12, y + 1, ["무기상", "도구상"][t], TEXT);
+                let label = if sh.sell { ["무기 일람", "도구 일람"][t] } else { ["무기상", "도구상"][t] };
+                draw_text(scr, f, x + (w - text_w(label)) / 2, y + 1, label, TEXT);
             }
             scr.fill(LIST.0 + 4, hy, LIST.2 - 8, 20, gray);
-            let cols: &[(&str, i32, bool)] = if sh.tools { &[("이름", 30, false), ("효과", 200, true), ("가격", 262, true), ("소지", 320, true)] } else { &[("이름", 30, false), ("속성", 150, false), ("효과", 222, true), ("가격", 280, true), ("장비", 300, false)] };
+            let cols: &[(&str, i32, bool)] = if sh.sell && sh.tools {
+                &[("이름", 30, false), ("효과", 200, true), ("재고", 250, true), ("판매가", 320, true)]
+            } else if sh.sell {
+                &[("이름", 30, false), ("속성", 150, false), ("Lv", 206, true), ("효과", 262, true), ("판매가", 320, true)]
+            } else if sh.tools { &[("이름", 30, false), ("효과", 200, true), ("가격", 262, true), ("소지", 320, true)] } else { &[("이름", 30, false), ("속성", 150, false), ("효과", 222, true), ("가격", 280, true), ("장비", 300, false)] };
             for &(label, x, right) in cols {
                 let x = LIST.0 + if right { x - text_w(label) } else { x };
                 draw_text(scr, f, x, hy + 2, label, TEXT);
@@ -650,6 +795,25 @@ impl<A: Assets> Engine<A> {
             let t = items.get(id as usize * 25 + 17).copied().unwrap_or(0xFF);
             let gear = item_cat(t) < 2;
             draw_text(scr, f, LIST.0 + 30, y + 3, &item_name(&items, id), col);
+            if selling {
+                let (pr, cnt) = sell_info.get(i).copied().unwrap_or((None, 1));
+                let col = if selected { white } else if pr.is_some() { TEXT } else { dark };
+                let ef = effect_col(&items, id, lv);
+                let ps = pr.map_or("--".to_string(), |v| v.to_string());
+                if tools_tab {
+                    draw_text(scr, f, LIST.0 + 200 - text_w(&ef), y + 3, &ef, col);
+                    let cs = format!("{cnt}");
+                    draw_text(scr, f, LIST.0 + 250 - text_w(&cs), y + 3, &cs, col);
+                } else {
+                    let tn = TYPE_NAMES[if t < 0x12 { t as usize >> 1 } else if t < 0x3F { 9 } else { 10 }];
+                    draw_text(scr, f, LIST.0 + 150, y + 3, tn, col);
+                    let lv_s = if gear { format!("{lv}") } else { "--".into() };
+                    draw_text(scr, f, LIST.0 + 206 - text_w(&lv_s), y + 3, &lv_s, col);
+                    draw_text(scr, f, LIST.0 + 262 - text_w(&ef), y + 3, &ef, col);
+                }
+                draw_text(scr, f, LIST.0 + 320 - text_w(&ps), y + 3, &ps, col);
+                continue;
+            }
             if let Some(sh) = &shop {
                 let pr = prices[i];
                 let pcol = if selected { white } else if gold < pr { red } else { col };
@@ -680,7 +844,7 @@ impl<A: Assets> Engine<A> {
             draw_text(scr, f, LIST.0 + 308, y + 3, if ok { "○" } else { "×" }, if selected { white } else if ok { TEXT } else { red });
         }
         if inventory.is_empty() {
-            draw_text(scr, f, LIST.0 + 30, ROW_Y + 3, if shop.is_some() { "(파는 물건이 없다)" } else { "(창고가 비어 있다)" }, dark);
+            draw_text(scr, f, LIST.0 + 30, ROW_Y + 3, if selling { "(팔 물건이 없다)" } else if shop.is_some() { "(파는 물건이 없다)" } else { "(창고가 비어 있다)" }, dark);
         }
         // 넘기기
         for (b, label, on) in [(UP_BTN, "▲", ui.top > 0), (DOWN_BTN, "▼", ui.top + ROWS < inventory.len())] {
@@ -693,6 +857,17 @@ impl<A: Assets> Engine<A> {
             draw_text(scr, f, LIST.0 + 8, LIST.1 + LIST.3 - 22, &format!("{} / {STORE_MAX}", inventory.len()), TEXT);
         }
 
+        // 매각은 장수 칸 대신 담당 상인
+        if selling {
+            etched(scr, RX, 30, 256, 140, white, dark);
+            if let Some(face) = merchant.and_then(|m| ui.faces.get(&m)) {
+                scr.blit(face, RX + 10, 44, None);
+            }
+            draw_text(scr, f, RX + 84, 48, &merchant_name, NAME);
+            draw_text(scr, f, RX + 84, 76, "상인", TEXT);
+            draw_text(scr, f, RX + 10, 190, &format!("소지금  {gold}"), TEXT);
+        }
+        if !selling {
         // 장수 콤보
         scr.fill(COMBO.0, COMBO.1, COMBO.2, COMBO.3, white);
         rect(scr, COMBO.0, COMBO.1, COMBO.2, COMBO.3, dark);
@@ -772,23 +947,27 @@ impl<A: Assets> Engine<A> {
                 }
             }
         }
+        }
         // 단추
         let can_prev = ui.cur > 0;
         let can_next = ui.cur + 1 < ui.pids.len();
         for (b, label, on) in [(PREV_BTN, "앞의 장수로", can_prev), (NEXT_BTN, "다음 장수로", can_next), (END_BTN, "종료", true)] {
+            if selling && b != END_BTN {
+                continue;
+            }
             frame_box(scr, b.0, b.1, b.2, b.3);
             draw_text(scr, f, b.0 + (b.2 - text_w(label)) / 2, b.1 + 5, label, if on { TEXT } else { dark });
         }
         draw_text(scr, f, LIST.0 + 120, LIST.1 + LIST.3 - 22, "길게 누르기 = 정보", dark);
         // 구입 확인 (원작 "%s%s 금 %d 입니다.\n구입해도 좋습니까?", 도구는 개수)
-        if let Some((msg, q)) = &confirm_text {
+        if let Some((msg, q, ask)) = &confirm_text {
             let (x, y, w, h) = CONFIRM;
             frame_box(scr, x, y, w, h);
             scr.fill(x + 2, y + 2, w - 4, 20, navy);
             draw_text(scr, f, x + 10, y + 4, "확인", white);
             draw_text(scr, f, x + 16, y + 30, msg, TEXT);
-            draw_text(scr, f, x + 16, y + 48, "구입해도 좋습니까?", TEXT);
-            if shop.as_ref().is_some_and(|s| s.tools) {
+            draw_text(scr, f, x + 16, y + 48, ask, TEXT);
+            if tools_tab {
                 for (b, label) in [(QTY_DOWN, "◀"), (QTY_UP, "▶")] {
                     frame_box(scr, b.0, b.1, b.2, b.3);
                     draw_text(scr, f, b.0 + 8, b.1 + 5, label, TEXT);
@@ -799,6 +978,18 @@ impl<A: Assets> Engine<A> {
             for (b, label) in [(YES_BTN, "예"), (NO_BTN, "아니오")] {
                 frame_box(scr, b.0, b.1, b.2, b.3);
                 draw_text(scr, f, b.0 + (b.2 - text_w(label)) / 2, b.1 + 6, label, TEXT);
+            }
+        }
+        // 상인 말 (원작 FUN_0046fa12 0: 담당 얼굴)
+        if let Some(lines) = shop.as_ref().and_then(|s| s.notice.clone()) {
+            let (x, y, w, h) = (120, 170, 400, 120);
+            frame_box(scr, x, y, w, h);
+            if let Some(face) = merchant.and_then(|m| ui.faces.get(&m)) {
+                scr.blit(face, x + 10, y + 20, None);
+            }
+            draw_text(scr, f, x + 84, y + 10, &merchant_name, NAME);
+            for (i, l) in lines.iter().enumerate() {
+                draw_text(scr, f, x + 84, y + 34 + i as i32 * 20, l, TEXT);
             }
         }
         if let Some(l) = &ui.pick {
