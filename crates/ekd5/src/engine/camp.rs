@@ -39,8 +39,8 @@ pub enum CampView {
     Sell(ListBox, Vec<usize>),
     SellConfirm(ListBox, usize),
     Talk(ListBox, Vec<usize>),
-    ShopKind(ListBox),
-    Shop(ListBox, Vec<u8>, bool),
+    /// 단추 첫 사용 지시 대사 중 (원작 FUN_0041c4b2: 0 매각, 1 구입, 2 장비) — 끝나면 그 화면
+    Order(u8),
     Items(ListBox),
     /// 대화 블록 실행 중
     Running,
@@ -54,6 +54,8 @@ pub struct Camp {
     /// 블록 머리 (op07 출진 / op2d 대화 장수) → 본문 위치
     pub depart: Option<usize>,
     pub talks: Vec<(usize, usize)>,
+    /// 이번 본진에서 단추 지시 대사를 했나 (매각, 구입, 장비)
+    pub ordered: [bool; 3],
 }
 
 /// 본진 단추 (화면 x, 그림 번호: 묶음 4 안 순서 0 출진 1 매각 2 구입 3 장비)
@@ -144,7 +146,7 @@ impl<A: Assets> Engine<A> {
         }
         self.log.push("본진".into());
         self.last_camp_rule = Some(rule.clone());
-        self.camp = Some(Camp { section, rule, view: CampView::Field, depart, talks });
+        self.camp = Some(Camp { section, rule, view: CampView::Field, depart, talks, ordered: [false; 3] });
     }
 
     pub(super) fn run_camp_block(&mut self, body: usize, section: usize) {
@@ -177,6 +179,15 @@ impl<A: Assets> Engine<A> {
             } else if inp.pressed & key::CANCEL != 0 {
                 self.sounds.push(super::Sound::Effect("SE01.WAV".into()));
             }
+        }
+        // 지시 대사가 끝나면 그 화면
+        if let CampView::Order(k) = camp.view {
+            if self.wait != super::Wait::None {
+                self.camp = Some(camp);
+                return false;
+            }
+            camp.view = CampView::Field;
+            self.camp_action(&mut camp, k);
         }
         // 대화 블록이 끝나면 메뉴로
         if matches!(camp.view, CampView::Running) {
@@ -232,18 +243,9 @@ impl<A: Assets> Engine<A> {
                 }
                 match act {
                     Some(0) => return self.camp_depart(camp),
-                    Some(1) => self.open_equip(),
-                    Some(2) => {
-                        let mut l = ListBox::new("구입", 220);
-                        l.y = 120;
-                        l.push("무기·방어구점", "", true);
-                        l.push("도구점", "", true);
-                        camp.view = CampView::ShopKind(l);
-                    }
-                    Some(3) => {
-                        let (l, idx) = self.sell_box();
-                        camp.view = CampView::Sell(l, idx);
-                    }
+                    Some(1) => self.camp_order(&mut camp, 2),
+                    Some(2) => self.camp_order(&mut camp, 1),
+                    Some(3) => self.camp_order(&mut camp, 0),
                     _ => {}
                 }
                 if act.is_some() {
@@ -264,19 +266,16 @@ impl<A: Assets> Engine<A> {
                     camp.view = CampView::Talk(l, ps);
                 }
                 Pick::Row(1) => {
-                    self.open_equip();
                     camp.view = CampView::Field;
+                    self.camp_order(&mut camp, 2);
                 }
                 Pick::Row(2) => {
-                    let mut l = ListBox::new("구입", 220);
-                    l.y = 120;
-                    l.push("무기·방어구점", "", true);
-                    l.push("도구점", "", true);
-                    camp.view = CampView::ShopKind(l);
+                    camp.view = CampView::Field;
+                    self.camp_order(&mut camp, 1);
                 }
                 Pick::Row(3) => {
-                    let (l, idx) = self.sell_box();
-                    camp.view = CampView::Sell(l, idx);
+                    camp.view = CampView::Field;
+                    self.camp_order(&mut camp, 0);
                 }
                 Pick::Row(4) => camp.view = CampView::Items(self.items_box()),
                 Pick::Row(5) => camp.view = CampView::Items(self.book_box()),
@@ -331,48 +330,52 @@ impl<A: Assets> Engine<A> {
                 Pick::Cancel => camp.view = CampView::Field,
                 Pick::None => camp.view = CampView::Talk(l, ps),
             },
-            CampView::ShopKind(mut l) => match l.update(&inp, tapped) {
-                Pick::Row(k) => {
-                    let (b, ids) = self.shop_box(k == 1);
-                    camp.view = CampView::Shop(b, ids, k == 1);
-                }
-                Pick::Cancel => camp.view = CampView::Field,
-                Pick::None => camp.view = CampView::ShopKind(l),
-            },
-            CampView::Shop(mut l, ids, tools) => match l.update(&inp, tapped) {
-                Pick::Row(k) => {
-                    let it = ids[k];
-                    let price = self.item_price(it);
-                    if self.gold >= price && self.inventory.len() < super::equip::STORE_MAX {
-                        self.gold -= price;
-                        self.inventory.push((it, 1));
-                        // 사기 (원작 FUN_0046fd73: SE10)
-                        self.sounds.push(super::Sound::Effect("SE10.WAV".into()));
-                    }
-                    let (b, ids) = self.shop_box(tools);
-                    let sel = l.sel;
-                    let mut b = b;
-                    b.sel = sel;
-                    b.top = l.top;
-                    camp.view = CampView::Shop(b, ids, tools);
-                }
-                Pick::Cancel => {
-                    let mut l = ListBox::new("구입", 220);
-                    l.y = 120;
-                    l.push("무기·방어구점", "", true);
-                    l.push("도구점", "", true);
-                    camp.view = CampView::ShopKind(l);
-                }
-                Pick::None => camp.view = CampView::Shop(l, ids, tools),
-            },
             CampView::Items(mut l) => match l.update(&inp, tapped) {
                 Pick::Cancel => camp.view = CampView::Field,
                 _ => camp.view = CampView::Items(l),
             },
-            CampView::Running => {}
+            CampView::Running | CampView::Order(_) => {}
         }
         self.camp = Some(camp);
         true
+    }
+
+    /// 본진 단추 (원작 FUN_0041c4b2): 이번 본진에서 처음 누르면 조조가 지시하고 담당 장수가 "예!" 한 뒤 그 화면.
+    /// 담당 = 장마다 상점 자료 (DATA.E5[2]) 의 +4 (매각·구입), +0 (장비 "창고를 열어라!")
+    fn camp_order(&mut self, camp: &mut Camp, k: u8) {
+        self.sounds.push(super::Sound::Effect("SE02.WAV".into()));
+        if !camp.ordered[k as usize] {
+            camp.ordered[k as usize] = true;
+            let ki = (self.stage as usize / 2).min(57);
+            let rec = self.shops.get(ki * 36..ki * 36 + 4).map(|r| r.to_vec()).unwrap_or_default();
+            if rec.len() == 4 {
+                let who = if k == 2 { rec[0] as usize | (rec[1] as usize) << 8 } else { rec[2] as usize | (rec[3] as usize) << 8 };
+                if who != 0 && who < self.persons.len() && self.roster.contains(&who) {
+                    let name = self.persons[who].name.clone();
+                    let order = ["물자를 매각하라!", "물자를 조달하라!", "창고를 열어라!"][k as usize];
+                    let pages = vec![
+                        super::story::Page { person: Some(0), face: Some(self.face_of(0)), name: self.persons[0].name.clone(), lines: vec![format!("{name}, {order}")] },
+                        super::story::Page { person: Some(who), face: Some(self.face_of(who)), name, lines: vec!["예!".into()] },
+                    ];
+                    if self.battle_dialog(pages) {
+                        camp.view = CampView::Order(k);
+                        return;
+                    }
+                }
+            }
+        }
+        self.camp_action(camp, k);
+    }
+
+    fn camp_action(&mut self, camp: &mut Camp, k: u8) {
+        match k {
+            0 => {
+                let (l, idx) = self.sell_box();
+                camp.view = CampView::Sell(l, idx);
+            }
+            1 => self.open_shop(),
+            _ => self.open_equip(),
+        }
     }
 
     /// 출진 단추 (원작 FUN_0041aac4): 출진 장수를 고른 뒤 출진 블록. 고를 것이 없으면 바로
@@ -394,25 +397,6 @@ impl<A: Assets> Engine<A> {
                 true
             }
         }
-    }
-
-    fn shop_box(&self, tools: bool) -> (ListBox, Vec<u8>) {
-        let mut l = ListBox::new(&format!("{}   소지금 {}", if tools { "도구점" } else { "무기·방어구점" }, self.gold), 400);
-        // 원작: 이야기 단계(장)마다 정해진 목록 (DATA.E5[2] 의 단계/2 번째, FUN_00468af9 무기·방어구 / FUN_00468c53 도구)
-        let k = (self.stage as usize / 2).min(57);
-        let rec = self.shops.get(k * 36..k * 36 + 36).unwrap_or(&[]);
-        let list = if rec.len() == 36 { if tools { &rec[20..36] } else { &rec[4..20] } } else { &[][..] };
-        let ids: Vec<u8> = list.iter().copied().filter(|&id| id != 0xFF).collect();
-        for &id in &ids {
-            let have = self.inventory.iter().filter(|x| x.0 == id).count();
-            l.push(item_name(&self.items, id), format!("{}금{}", self.item_price(id), if have > 0 { format!(" ({have})") } else { String::new() }), self.gold >= self.item_price(id));
-        }
-        if ids.is_empty() {
-            l.push("파는 물건이 없다", "", false);
-        }
-        l.footer = "누르면 하나 삽니다".into();
-        self.item_icons(&mut l, &ids.iter().map(|&i| Some(i)).collect::<Vec<_>>());
-        (l, ids)
     }
 
     fn items_box(&self) -> ListBox {
@@ -470,9 +454,9 @@ impl<A: Assets> Engine<A> {
             }
         }
         let box_ = match &c.view {
-            CampView::Menu(l) | CampView::Talk(l, _) | CampView::ShopKind(l) | CampView::Shop(l, ..) | CampView::Items(l) | CampView::Sell(l, _) => Some(l),
+            CampView::Menu(l) | CampView::Talk(l, _) | CampView::Items(l) | CampView::Sell(l, _) => Some(l),
             CampView::SellConfirm(l, _) => Some(l),
-            CampView::Field | CampView::Running => None,
+            CampView::Field | CampView::Running | CampView::Order(_) => None,
         };
         if let Some(l) = box_ {
             l.render(scr, f, hi);

@@ -133,7 +133,7 @@ pub struct LvUp {
 }
 
 /// 받침이 있나 (마지막 글자)
-fn has_batchim(s: &str) -> bool {
+pub(super) fn has_batchim(s: &str) -> bool {
     s.chars().rev().find(|c| !c.is_whitespace()).is_some_and(|c| {
         let n = c as u32;
         if (0xAC00..=0xD7A3).contains(&n) {
