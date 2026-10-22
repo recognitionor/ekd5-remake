@@ -180,6 +180,8 @@ pub struct Battle {
     /// 대사/해설 겹쳐 그리기용
     pub ui: story::Story,
     pub slots: Vec<(i32, i32)>,
+    /// 출진 칸이 '나중에 등장' 인가 (원작 op4b 마지막 인자 1 → op4c 방식 1 출진 번호로 불러냄)
+    pub slot_hidden: Vec<bool>,
     pub targets: Vec<usize>,
     /// 승리 목표 장수 (원작 op45 인자 5 → +0x3d04/06: 이 장수가 퇴각하면 승리) · 패배 목표 장수 (인자 7 → +0x3d08/0a: 대개 조조)
     pub win_target: Option<usize>,
@@ -222,6 +224,8 @@ pub struct Battle {
     pub goal_zone: Option<(i32, i32, i32, i32)>,
     /// op47 적 목록 순서 (op55 번호 지정용)
     pub list47: Vec<usize>,
+    /// 출진 순서 (원작 DAT_0049d708 목록 = 출진 칸 순서). 스크립트의 '방식 1 = 출진 번호' 가 가리킴
+    pub sortie: Vec<usize>,
     /// 일기토 화면
     pub duel: Option<super::duel::Duel>,
     /// 전투 시작 연출 진행 틱 (원작 op5a FUN_0044db19: 가장자리부터 열고 "작전개시")
@@ -400,6 +404,7 @@ impl Battle {
             cursor: (0, 0),
             ui: story::Story::default(),
             slots: vec![(0, 0); 16],
+            slot_hidden: vec![false; 16],
             targets: Vec::new(),
             win_target: None,
             level_bias: 0,
@@ -428,6 +433,7 @@ impl Battle {
             gate_queue: Vec::new(),
             goal_zone: None,
             list47: Vec::new(),
+            sortie: Vec::new(),
             duel: None,
             intro: None,
             intro_mask: None,
@@ -604,20 +610,53 @@ impl Battle {
     }
 
     /// (x, y) 에서 가장 가까운 빈 칸 (지나갈 수 있는 곳)
-    pub fn free_near(&self, job: u8, x: i32, y: i32) -> (i32, i32) {
-        for r in 0i32..8 {
-            for dy in -r..=r {
-                for dx in -r..=r {
-                    if dx.abs().max(dy.abs()) != r {
-                        continue;
+    /// 부대를 놓을 빈 칸 (원작 FUN_004411b0): 그 칸이 비고 그 병종이 설 수 있으면 그대로.
+    /// 아니면 위·오른쪽·아래·왼쪽 순으로 한 칸씩 옮겨 가며 (4번) 그 칸과 둘레 4칸을 보고, 그래도 없으면
+    /// 지도 전체에서 가장 가까운 (맨해튼 거리, 위 줄·왼쪽 먼저) 빈 칸. 다른 부대가 걸어가는 도착 칸도 찬 것으로 봄
+    pub fn free_cell(&self, u: usize, x: i32, y: i32) -> (i32, i32) {
+        const D: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+        let inb = |cx: i32, cy: i32| cx >= 0 && cy >= 0 && cx < self.cols && cy < self.rows;
+        let taken = |cx: i32, cy: i32| {
+            self.units.iter().enumerate().any(|(i, o)| i != u && o.visible && o.hp > 0 && o.leave.is_none() && ((o.x, o.y) == (cx, cy) || o.path.back() == Some(&(cx, cy))))
+        };
+        let ok = |cx: i32, cy: i32| inb(cx, cy) && !taken(cx, cy) && self.move_cost_of(u, cx, cy).is_some();
+        let mut c = inb(x, y).then_some((x, y));
+        for d in D {
+            if let Some((cx, cy)) = c {
+                if ok(cx, cy) {
+                    return (cx, cy);
+                }
+                for e in D {
+                    if ok(cx + e.0, cy + e.1) {
+                        return (cx + e.0, cy + e.1);
                     }
-                    let (cx, cy) = (x + dx, y + dy);
-                    if cx >= 0 && cy >= 0 && cx < self.cols && cy < self.rows && self.at(cx, cy).is_none() && self.move_cost(job, cx, cy).is_some() {
-                        return (cx, cy);
+                }
+            }
+            c = c.map(|(cx, cy)| (cx + d.0, cy + d.1)).filter(|&(cx, cy)| inb(cx, cy));
+        }
+        let mut best = None;
+        for cy in 0..self.rows {
+            for cx in 0..self.cols {
+                if ok(cx, cy) {
+                    let dist = (cx - x).abs() + (cy - y).abs();
+                    if best.is_none_or(|(bd, _)| dist < bd) {
+                        best = Some((dist, (cx, cy)));
                     }
                 }
             }
         }
+        best.map_or((x, y), |b| b.1)
+    }
+
+    /// 부대를 (x, y) 근처 빈 칸에 바로 놓음 (등장·출진 배치·증원)
+    pub fn place_at(&mut self, u: usize, x: i32, y: i32) -> (i32, i32) {
+        let (x, y) = self.free_cell(u, x, y);
+        let un = &mut self.units[u];
+        un.x = x;
+        un.y = y;
+        un.px = (x * CELL) as f32;
+        un.py = (y * CELL) as f32;
+        un.path.clear();
         (x, y)
     }
 
@@ -1857,6 +1896,8 @@ impl Battle {
     }
 
     pub fn walk_to(&mut self, ui: usize, x: i32, y: i32) {
+        // 도착 칸에 다른 부대가 있으면 가장 가까운 빈 칸으로 (원작 FUN_0045b467 → FUN_004411b0)
+        let (x, y) = if (self.units[ui].x, self.units[ui].y) == (x, y) { (x, y) } else { self.free_cell(ui, x, y) };
         let all: Vec<(i32, i32)> = (0..self.rows).flat_map(|yy| (0..self.cols).map(move |xx| (xx, yy))).collect();
         let p = self.path_to(ui, (x, y), &all);
         self.units[ui].path = p;

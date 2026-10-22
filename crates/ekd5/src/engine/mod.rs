@@ -1117,9 +1117,19 @@ impl<A: Assets> Engine<A> {
                                 if k > 0 && (x, y) == (0, 0) {
                                     break;
                                 }
+                                if !b.sortie.contains(&pid) {
+                                    b.sortie.push(pid);
+                                }
                                 if b.unit_of(pid).is_none() {
                                     let u = b.make_unit(offs[k].clone(), battle::Side::Player, x, y);
                                     b.units.push(u);
+                                    let ui = b.units.len() - 1;
+                                    // 나중에 등장하는 칸은 숨겨 둠, 나머지는 빈 칸에 (원작 FUN_00444c58)
+                                    if b.slot_hidden.get(k).copied().unwrap_or(false) {
+                                        b.units[ui].visible = false;
+                                    } else {
+                                        b.place_at(ui, x, y);
+                                    }
                                 }
                             }
                         }
@@ -1300,7 +1310,9 @@ impl<A: Assets> Engine<A> {
                 match &mut self.scene {
                     Scene::Story(st) => st.walk(a(1) as usize, a(3), a(4), a(5)),
                     Scene::Battle(b) => {
-                        if let Some(u) = b.unit_of(a(1) as usize) {
+                        // 방식 0 = 인물, 1 = 출진 번호 (원작 FUN_004156d3: 맵 위에 있을 때만)
+                        let pid = if a(0) == 1 { b.sortie.get(a(2) as usize).copied() } else { Some(a(1) as usize) };
+                        if let Some(u) = pid.and_then(|p| b.unit_of(p)).filter(|&u| a(0) != 1 || (b.units[u].visible && b.units[u].hp > 0)) {
                             b.walk_to(u, a(3), a(4));
                             let (x, y) = (a(3), a(4));
                             if x * battle::CELL < b.cam.0 || x * battle::CELL > b.cam.0 + 592 || y * battle::CELL < b.cam.1 || y * battle::CELL > b.cam.1 + 432 {
@@ -2042,6 +2054,7 @@ impl<A: Assets> Engine<A> {
         let a = |i: usize| args.get(i).map_or(0, |a| a.i());
         let persons = self.persons.clone();
         let roster = if self.roster.is_empty() { vec![0] } else { self.roster.clone() };
+        let sortie_chosen = self.sortie_chosen.clone();
         let avg = self.army_level() as i32;
         let jobs = self.jobs.clone();
         // 필요한 인물 능력 미리
@@ -2118,6 +2131,11 @@ impl<A: Assets> Engine<A> {
                     }
                     b.units.retain(|o| o.person != pid as usize);
                     b.units.push(u);
+                    // 처음부터 보이는 부대는 빈 칸에 (원작 FUN_00444c58 → FUN_004411b0)
+                    let k = b.units.len() - 1;
+                    if b.units[k].visible {
+                        b.place_at(k, x, y);
+                    }
                     if op == 0x47 {
                         b.list47.push(pid as usize);
                     }
@@ -2128,35 +2146,50 @@ impl<A: Assets> Engine<A> {
                 let i = a(0) as usize;
                 if i < b.slots.len() {
                     b.slots[i] = (a(1), a(2));
+                    // 마지막 인자 1 = 처음엔 없고 op4c 방식 1 (출진 번호) 로 나중에 등장
+                    if let Some(h) = b.slot_hidden.get_mut(i) {
+                        *h = a(4) == 1;
+                    }
                 }
             }
             0x4C => {
                 // 등장: 0 = 인물 하나, 1 = 조조군 장수들을 출진 칸에
                 if a(0) == 1 {
-                    let list: Vec<usize> = if roster.is_empty() { vec![0] } else { roster.clone() };
-                    for (k, &pid) in list.iter().enumerate().take(b.slots.len()) {
-                        let (x, y) = b.slots[k];
-                        if k > 0 && (x, y) == (0, 0) {
-                            break;
-                        }
-                        match b.unit_of(pid) {
-                            Some(u) => {
-                                let un = &mut b.units[u];
-                                un.visible = true;
-                                un.x = x;
-                                un.y = y;
-                                un.px = (x * battle::CELL) as f32;
-                                un.py = (y * battle::CELL) as f32;
-                            }
-                            None => {
-                                if let Some(o) = offs.get(&pid) {
-                                    let u = b.make_unit(o.clone(), battle::Side::Player, x, y);
-                                    b.units.push(u);
-                                }
-                            }
+                    // 방식 1 = 출진 번호 k 의 장수를 그 출진 칸에 (원작 FUN_00417359: 아직 맵에 없을 때만, SE15 + 4단위)
+                    let list: Vec<usize> = match &sortie_chosen {
+                        Some(c) if !c.is_empty() => c.clone(),
+                        _ => roster.clone(),
+                    };
+                    if b.sortie.is_empty() {
+                        b.sortie = list.iter().copied().take(b.slots.len()).collect();
+                    }
+                    let k = a(2) as usize;
+                    let (x, y) = b.slots.get(k).copied().unwrap_or((0, 0));
+                    if let Some(&pid) = b.sortie.get(k).filter(|_| k == 0 || (x, y) != (0, 0)) {
+                        let u = match b.unit_of(pid) {
+                            Some(u) => Some(u),
+                            None => offs.get(&pid).map(|o| {
+                                let mut nu = b.make_unit(o.clone(), battle::Side::Player, x, y);
+                                nu.visible = false;
+                                b.units.push(nu);
+                                b.units.len() - 1
+                            }),
+                        };
+                        if let Some(u) = u.filter(|&u| !b.units[u].visible && b.units[u].hp > 0) {
+                            b.place_at(u, x, y);
+                            b.units[u].visible = true;
+                            b.units[u].fade = 16;
+                            b.focus(x, y);
+                            self.sounds.push(Sound::Effect("SE15.WAV".into()));
+                            self.wait = Wait::Ticks(6);
                         }
                     }
                 } else if let Some(u) = b.unit_of(a(1) as usize) {
+                    // 숨어 있던 부대가 제자리에 나타남 — 그 칸이 차 있으면 가까운 빈 칸 (원작 FUN_004590ce → FUN_00444c58)
+                    if !b.units[u].visible {
+                        let (x, y) = (b.units[u].x, b.units[u].y);
+                        b.place_at(u, x, y);
+                    }
                     b.units[u].visible = true;
                     b.units[u].fade = 16;
                 }
@@ -2166,14 +2199,8 @@ impl<A: Assets> Engine<A> {
                 let pid = if a(0) == 1 { b.list47.get(a(2) as usize).copied() } else { Some(a(1) as usize) };
                 if let Some(u) = pid.and_then(|p| b.unit_of(p)) {
                     if !b.units[u].visible && b.units[u].hp > 0 {
-                        let (x, y) = b.free_near(b.units[u].job, a(3), a(4));
-                        let un = &mut b.units[u];
-                        un.visible = true;
-                        un.x = x;
-                        un.y = y;
-                        un.px = (x * battle::CELL) as f32;
-                        un.py = (y * battle::CELL) as f32;
-                        un.path.clear();
+                        let (x, y) = b.place_at(u, a(3), a(4));
+                        b.units[u].visible = true;
                         b.focus(x, y);
                         self.sounds.push(Sound::Effect("SE15.WAV".into()));
                         self.wait = Wait::Ticks(6);
@@ -3189,6 +3216,19 @@ impl<A: Assets> Engine<A> {
         } else if let Scene::Battle(b) = &mut self.scene {
             b.open_menu = true;
         }
+    }
+
+    /// 시험: 선택지를 기다리는 중이면 n 번째를 고름 (1부터). 골랐으면 true
+    pub fn force_choice(&mut self, n: i32) -> bool {
+        if self.wait != Wait::Choice {
+            return false;
+        }
+        self.choice = n;
+        if let Some(st) = self.ui() {
+            st.choices.clear();
+        }
+        self.wait = Wait::None;
+        true
     }
 
     /// 대사·자막을 넘기길 기다리는 중인가 (빨리 감기용)

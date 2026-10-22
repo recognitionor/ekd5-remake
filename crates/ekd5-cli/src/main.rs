@@ -235,6 +235,7 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
         let (t, b) = s.split_once(':')?;
         Some((t.parse().ok()?, u32::from_str_radix(b, 16).ok()?))
     }).collect();
+    let mut choice_i = 0usize;
     for t in 1..=ticks {
         // 자동: 30틱마다 결정 키
         let auto = std::env::var("EKD5_AUTO").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
@@ -264,6 +265,16 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
         if let Some((gt, gid, glv)) = std::env::var("EKD5_GIVE").ok().and_then(|v| { let x: Vec<u32> = v.split(':').filter_map(|s| s.parse().ok()).collect(); (x.len() == 3).then(|| (x[0], x[1] as u8, x[2] as u8)) }) {
             if gt == t {
                 eng.inventory.insert(0, (gid, glv));
+            }
+        }
+        // 시험: EKD5_CHOICE=n,n,… — 선택지가 나올 때마다 차례로 그 번호 (1부터)
+        if let Ok(v) = std::env::var("EKD5_CHOICE") {
+            let picks: Vec<i32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+            if let Some(&n) = picks.get(choice_i) {
+                if eng.force_choice(n) {
+                    println!("[{t:6}] 선택 {n}");
+                    choice_i += 1;
+                }
             }
         }
         // 시험: EKD5_LIMIT=턴 — 전투 턴 제한을 그 값으로 (턴 제한 초과 퇴각 시험)
