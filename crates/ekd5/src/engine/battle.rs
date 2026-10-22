@@ -2505,6 +2505,7 @@ impl Battle {
             let t = self.anim_tick;
             self.units[u].pose = None;
             self.units[u].motion = Some((11, t));
+            self.cast_log.push(format!("@레벨업 {} → {lv}", self.units[u].person));
             self.lvup = Some(LvUp { u, msgs, t: 0 });
             return true;
         }
@@ -2516,7 +2517,12 @@ impl Battle {
             l.msgs.pop_front();
             l.t = SPIN;
             if l.msgs.is_empty() {
+                // 알림이 끝나면 원래 그림으로 (원작은 연출 뒤 맵을 다시 그리면서 보통 자세로 돌아감)
+                let u = l.u;
                 self.lvup = None;
+                if matches!(self.units[u].motion, Some((11, _))) {
+                    self.units[u].motion = None;
+                }
             }
         }
         true
