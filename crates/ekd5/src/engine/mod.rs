@@ -2783,7 +2783,29 @@ impl<A: Assets> Engine<A> {
         }
         // 턴 제한 (원작 FUN_00450f0b: 마지막 턴이 끝나면 조조 퇴각 → 패배)
         if let Some(b) = self.battle() {
-            if b.started && !matches!(b.phase, battle::Phase::Script | battle::Phase::Over { .. }) && b.turn > b.turn_limit {
+            // 차례 알림이 끝나고 조조군 차례가 될 때 (원작은 턴 시작 처리 FUN_00450f0b 에서)
+            let my_turn = matches!(b.phase, battle::Phase::PlayerIdle | battle::Phase::Ai { side: battle::Side::Player, .. });
+            if b.started && my_turn && b.turn > b.turn_limit {
+                // 먼저 알림 (원작 FUN_00431c4c(2, "전투를 오래 끌었으므로 퇴각하겠습니다.")), 그다음 조조군 모두 퇴각 (FUN_004438a5)
+                if !b.limit_said {
+                    b.limit_said = true;
+                    let page = story::Page { person: None, face: None, name: String::new(), lines: vec!["전투를 오래 끌었으므로 퇴각하겠습니다.".into()] };
+                    b.ui.pages = vec![page];
+                    b.ui.page = 0;
+                    b.ui.narration = true;
+                    self.wait = Wait::Dialog;
+                    return;
+                }
+                let mut w = 0;
+                for i in 0..b.units.len() {
+                    if b.units[i].side == battle::Side::Player && b.units[i].visible && b.units[i].hp > 0 && b.units[i].leave.is_none() {
+                        w = w.max(b.start_leave(i, 0));
+                    }
+                }
+                if w > 0 {
+                    self.wait = Wait::Ticks(w);
+                    return;
+                }
                 self.log.push("턴 제한 — 패배".into());
                 let Some(b) = self.battle() else { return };
                 b.phase = battle::Phase::Over { won: false, t: 0 };

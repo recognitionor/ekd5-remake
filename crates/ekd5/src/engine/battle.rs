@@ -282,6 +282,10 @@ pub struct Battle {
     pub cast_log: Vec<String>,
     /// 퇴각 대사를 이미 한 장수 (원작 FUN_004438a5 → FUN_00443ad0)
     pub retire_said: Vec<usize>,
+    /// 턴 제한 초과 알림을 했나 (원작 FUN_00450f0b: "전투를 오래 끌었으므로 퇴각하겠습니다." → 조조군 퇴각)
+    pub limit_said: bool,
+    /// 맞는 쪽이 원래 보던 방향 (타격 동안 공격자를 봄, 원작 FUN_00405aa4 가 되돌림)
+    def_dir: Option<(usize, u8)>,
     /// 회심 공격 외침을 할 장수 (원작 FUN_00405aa4: 회심이면 25 %) / 이번 타격은 이미 정함
     pub shout: Option<usize>,
     /// 도구 쓰기 연출의 아이템 그림 (32×32, 엔진이 넣어 줌)
@@ -454,6 +458,8 @@ impl Battle {
             cast_t: 0,
             cast_log: Vec::new(),
             retire_said: Vec::new(),
+            limit_said: false,
+            def_dir: None,
             shout: None,
             tool_pic: None,
             dmg_num: None,
@@ -2339,6 +2345,16 @@ impl Battle {
                 let (ux, uy, vx, vy) = (self.units[x].x, self.units[x].y, self.units[y].x, self.units[y].y);
                 self.units[x].dir = if (vx - ux).abs() > (vy - uy).abs() { if vx < ux { 2 } else { 3 } } else if vy < uy { 1 } else { 0 };
                 self.units[x].pose = Some(6);
+                // 맞는 쪽은 공격자를 봄 (원작 FUN_004379c9, 끝나면 FUN_004069f0 으로 되돌림)
+                if x != y {
+                    self.def_dir = Some((y, self.units[y].dir));
+                    self.units[y].dir = match self.units[x].dir {
+                        0 => 1,
+                        1 => 0,
+                        2 => 3,
+                        _ => 2,
+                    };
+                }
                 let m = format!("@공격 {}→{}", self.units[x].person, self.units[y].person);
                 self.cast_log.push(m);
             }
@@ -2360,6 +2376,10 @@ impl Battle {
                 self.gear_exp(y, 1, if dmg.is_none() { 1 } else if lx < ly { 3 } else { 4 });
                 // 맞는 소리 (원작 FUN_004044e6: 피해 없음 30, 맞음 35, 치명이면 +1)
                 self.sounds.push(format!("SE{:02}.WAV", if dmg.is_some() { 35 } else { 30 } + crit as u32));
+                // 피해가 없으면 막는 자세 (원작 FUN_004040e5: UNIT_SPC 0-2), 있으면 맞는 자세 (SPC 3)
+                if x != y && matches!(dmg, None | Some(0)) {
+                    self.units[y].pose = Some(2);
+                }
                 let text = match dmg {
                     None => "빗나감".to_string(),
                     Some(v) if self.sp(y, 0x3C).is_some() && self.units[y].mp > 0 => {
@@ -2371,7 +2391,7 @@ impl Battle {
                     }
                     Some(v) => {
                         self.units[y].hp -= v;
-                        self.units[y].pose = Some(9);
+                        self.units[y].pose = Some(if v > 0 { 9 } else { 2 });
                         if v > 0 {
                             self.after_hit(x, y);
                         }
@@ -2404,7 +2424,17 @@ impl Battle {
                     self.dmg_num = Some((y, v, false));
                 }
             }
+            // 원작 단위 25 (FUN_00404849 0x19): 맞는 쪽 자세 끝
+            if st == 38 && x != y && self.units[y].hp > 0 {
+                self.units[y].pose = None;
+            }
             if st >= if self.dmg_win.is_some() { 60 } else { 41 } {
+                if let Some((u, d)) = self.def_dir.take() {
+                    self.units[u].dir = d;
+                    if self.units[u].pose == Some(2) {
+                        self.units[u].pose = None;
+                    }
+                }
                 self.dmg_num = None;
                 self.dmg_win = None;
                 self.units[x].pose = None;
@@ -2834,7 +2864,22 @@ impl Battle {
             let frame = if u.hp > 0 && u.hp * 4 < u.max_hp && u.pose.is_none() && !walking { 9 + step } else { frame };
             // 사망: 무릎 꿇은 그림 (원작 UNIT_MOV +0x5100)
             let frame = if matches!(u.leave, Some((2, _))) { 9 } else { frame };
-            let (sx, sy) = (u.px as i32 - self.cam.0, u.py as i32 - self.cam.1);
+            let (mut sx, mut sy) = (u.px as i32 - self.cam.0, u.py as i32 - self.cam.1);
+            // 맞는 순간 (원작 단위 13·14 = 20..22틱) 공격 반대쪽으로 밀림: 막기 8px, 맞음 4px (회심 8px), 맞으면 하얗게 (FUN_00432970 +12)
+            let mut hit_white = false;
+            if let Some(&(ax, dy_u, dmg, crit)) = self.strikes.front() {
+                if dy_u == i && ax != i && (20..23).contains(&self.strike_t) && matches!(u.pose, Some(2) | Some(9)) {
+                    let hurt = u.pose == Some(9);
+                    let k = if hurt { if crit { 8 } else { 4 } } else { 8 };
+                    match u.dir {
+                        0 => sy -= k,
+                        1 => sy += k,
+                        2 => sx += k,
+                        _ => sx -= k,
+                    }
+                    hit_white = hurt && dmg.is_some_and(|v| v > 0);
+                }
+            }
             // 행동 끝 = 어둡게 (진영·차례 상관없이, 그 진영 차례가 다시 올 때까지), 독 = 4틱 중 2틱 초록빛 (원작 FUN_00440c8f)
             let lut_dark = u.acted && u.hp > 0;
             let lut_poison = u.status & status::POISON != 0 && (tick / 4) % 4 > 1;
@@ -2855,8 +2900,28 @@ impl Battle {
                         _ => 3,
                     };
                 draw_frame(scr, atk, 64, k, sx - 8, sy - 8, u.dir == 3);
+            } else if let (Some(9), Some(spc), true) = (u.pose, &u.spc, hit_white) {
+                // 맞는 순간 하얗게
+                let lut: Vec<u8> = (0..256usize).map(|c| { let q = scr.pal[c]; let f = |v: u8| ((v / 16 + 12).min(15)) * 17; if c == 0 { 0 } else { crate::palette::nearest(&scr.pal, [f(q[0]), f(q[1]), f(q[2])]) } }).collect();
+                for yy in 0..48 {
+                    for xx in 0..48 {
+                        let sxp = if u.dir == 3 { 47 - xx } else { xx };
+                        let c = spc.px[((3 * 48 + yy) as usize) * 48 + sxp as usize];
+                        if c != 0 {
+                            scr.fill(sx + xx, sy + yy, 1, 1, lut[c as usize]);
+                        }
+                    }
+                }
             } else if let (Some(9), Some(spc)) = (u.pose, &u.spc) {
                 draw_frame(scr, spc, 48, 3, sx, sy, u.dir == 3);
+            } else if let (Some(2), Some(spc)) = (u.pose, &u.spc) {
+                // 막기 (UNIT_SPC 0 아래 · 1 위 · 2 옆)
+                let k = match u.dir {
+                    0 => 0,
+                    1 => 1,
+                    _ => 2,
+                };
+                draw_frame(scr, spc, 48, k, sx, sy, u.dir == 3);
             } else if let (Some((m, _)), None, None | Some((0, _))) = (u.motion, u.pose, u.leave) {
                 // 스크립트 동작 (원작 FUN_0045976f): 1 승리 SPC4, 2 방어 SPC0-2, 3·10 맞음 SPC3, 4 무릎 MOV9,
                 // 5 공격 준비 ATK 첫 장, 6·7 공격 ATK, 8 옆걸음 MOV4-5, 9 지침 MOV9-10, 11 옆 서기 MOV8

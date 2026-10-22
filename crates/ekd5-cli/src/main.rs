@@ -258,6 +258,14 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
             eng.set_input(held, Some((x, y)), false);
             eng.set_pointer_kind(true, false);
         }
+        // 시험: EKD5_LIMIT=턴 — 전투 턴 제한을 그 값으로 (턴 제한 초과 퇴각 시험)
+        if let Some(n) = std::env::var("EKD5_LIMIT").ok().and_then(|v| v.parse::<i32>().ok()) {
+            if let ekd5::engine::Scene::Battle(b) = &mut eng.scene {
+                if b.started && b.turn_limit > n {
+                    b.turn_limit = n;
+                }
+            }
+        }
         // 시험: EKD5_TOOL=틱 — 그 틱에 첫 조조군 부대가 자기에게 첫 소모품을 씀 (도구 쓰기 연출)
         if std::env::var("EKD5_TOOL").ok().and_then(|v| v.parse::<u32>().ok()) == Some(t) {
             let items = eng.items.clone();
