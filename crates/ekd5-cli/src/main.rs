@@ -239,7 +239,9 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
         // 자동: 30틱마다 결정 키
         let auto = std::env::var("EKD5_AUTO").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
         let auto_end = std::env::var("EKD5_AUTO_END").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(u32::MAX);
-        let held = press.iter().filter(|p| p.0 == t).fold(0, |a, p| a | p.1) | if auto > 0 && t % auto == 0 && t < auto_end { 0x20 } else { 0 };
+        // EKD5_AUTO_RESUME=틱: AUTO_END 뒤 그 틱부터 다시 자동 결정 키
+        let auto_resume = std::env::var("EKD5_AUTO_RESUME").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(u32::MAX);
+        let held = press.iter().filter(|p| p.0 == t).fold(0, |a, p| a | p.1) | if auto > 0 && t % auto == 0 && (t < auto_end || t >= auto_resume) { 0x20 } else { 0 };
         // 탭: EKD5_TAPS="틱:x:y,..." (그 틱에 누르고 다음 틱에 뗌)
         let taps: Vec<(u32, i32, i32)> = std::env::var("EKD5_TAPS").unwrap_or_default().split(',').filter_map(|s| {
             let v: Vec<&str> = s.split(':').collect();
@@ -291,6 +293,10 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
                     b.fx_req = Some((id, vec![(b.cam.0 + 320, b.cam.1 + 240)]));
                 }
             }
+        }
+        // 시험: EKD5_AUTOPLAY_FROM=틱 — 그 틱부터 자동 진행 (본진은 사람처럼 거친 뒤)
+        if std::env::var("EKD5_AUTOPLAY_FROM").ok().and_then(|v| v.parse::<u32>().ok()) == Some(t) {
+            eng.autoplay = true;
         }
         if let Some(e) = std::env::var("EKD5_AUTOPLAY_END").ok().and_then(|v| v.parse::<u32>().ok()) {
             if t == e {

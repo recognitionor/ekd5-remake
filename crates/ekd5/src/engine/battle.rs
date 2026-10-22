@@ -286,6 +286,10 @@ pub struct Battle {
     pub limit_said: bool,
     /// 맞는 쪽이 원래 보던 방향 (타격 동안 공격자를 봄, 원작 FUN_00405aa4 가 되돌림)
     def_dir: Option<(usize, u8)>,
+    /// 회심 기 모으기 진행 (원작 FUN_00404849 단위 8: SE33 + 6단위 동안 점점 밝게), 이번 타격에 했나, 활 부대 8단위 멈춤 진행
+    pub charge: Option<u32>,
+    charged: bool,
+    bow_hold: u32,
     /// 회심 공격 외침을 할 장수 (원작 FUN_00405aa4: 회심이면 25 %) / 이번 타격은 이미 정함
     pub shout: Option<usize>,
     /// 도구 쓰기 연출의 아이템 그림 (32×32, 엔진이 넣어 줌)
@@ -460,6 +464,9 @@ impl Battle {
             retire_said: Vec::new(),
             limit_said: false,
             def_dir: None,
+            charge: None,
+            charged: false,
+            bow_hold: 0,
             shout: None,
             tool_pic: None,
             dmg_num: None,
@@ -2339,9 +2346,33 @@ impl Battle {
             }
         }
         if let Some(&(x, y, dmg, crit)) = self.strikes.front() {
+            // 원작 단위 8 (12틱): 회심이면 기 모으기 6단위 (9틱, SE33), 활·궁기병(그룹 2·4)은 그다음 8단위 (12틱) 멈춤
+            if self.strike_t == 12 && x != y {
+                if crit && !self.charged {
+                    self.charged = true;
+                    self.charge = Some(0);
+                    self.sounds.push("SE33.WAV".into());
+                    let m = format!("@회심 {}", self.units[x].person);
+                    self.cast_log.push(m);
+                }
+                if let Some(c) = self.charge {
+                    if c < 9 {
+                        self.charge = Some(c + 1);
+                        return false;
+                    }
+                    self.charge = None;
+                }
+                if matches!(self.group(x), 2 | 4) && self.bow_hold < 12 {
+                    self.bow_hold += 1;
+                    return false;
+                }
+            }
             let st = self.strike_t;
             self.strike_t += 1;
             if st == 0 {
+                self.charged = false;
+                self.charge = None;
+                self.bow_hold = 0;
                 let (ux, uy, vx, vy) = (self.units[x].x, self.units[x].y, self.units[y].x, self.units[y].y);
                 self.units[x].dir = if (vx - ux).abs() > (vy - uy).abs() { if vx < ux { 2 } else { 3 } } else if vy < uy { 1 } else { 0 };
                 self.units[x].pose = Some(6);
@@ -2897,15 +2928,33 @@ impl Battle {
                     1 => 4,
                     _ => 8,
                 };
-                // 원작 단위로 그림: 0..7 첫 장, 8..11 둘째, 12 셋째, 13.. 넷째
+                // 원작 FUN_00404849: 단위 0..11 첫 장 (활·궁기병은 8.. 둘째 장), 12 둘째, 13 셋째, 14.. 넷째
+                let bow = matches!(self.group(i), 2 | 4);
                 let k = base
                     + match self.strike_t * 2 / 3 {
                         0..=7 => 0,
-                        8..=11 => 1,
-                        12 => 2,
+                        8..=11 => bow as usize,
+                        12 => 1,
+                        13 => 2,
                         _ => 3,
                     };
-                draw_frame(scr, atk, 64, k, sx - 8, sy - 8, u.dir == 3);
+                if let Some(c) = self.charge {
+                    // 기 모으기: 4비트 채널 + (단위/2 + 1) 로 밝게 (FUN_00432970)
+                    let lv = ((c * 2 / 3) / 2 + 1).min(3) as u8;
+                    let lut: Vec<u8> = (0..256usize).map(|q| { let p = scr.pal[q]; let f = |v: u8| ((v / 16 + lv).min(15)) * 17; if q == 0 { 0 } else { crate::palette::nearest(&scr.pal, [f(p[0]), f(p[1]), f(p[2])]) } }).collect();
+                    let flip = u.dir == 3;
+                    for yy in 0..64usize {
+                        for xx in 0..64usize {
+                            let sxp = if flip { 63 - xx } else { xx };
+                            let c = atk.px.get(k * 4096 + yy * 64 + sxp).copied().unwrap_or(0);
+                            if c != 0 {
+                                scr.fill(sx - 8 + xx as i32, sy - 8 + yy as i32, 1, 1, lut[c as usize]);
+                            }
+                        }
+                    }
+                } else {
+                    draw_frame(scr, atk, 64, k, sx - 8, sy - 8, u.dir == 3);
+                }
             } else if let (Some(9), Some(spc), true) = (u.pose, &u.spc, hit_white) {
                 // 맞는 순간 하얗게
                 let lut: Vec<u8> = (0..256usize).map(|c| { let q = scr.pal[c]; let f = |v: u8| ((v / 16 + 12).min(15)) * 17; if c == 0 { 0 } else { crate::palette::nearest(&scr.pal, [f(q[0]), f(q[1]), f(q[2])]) } }).collect();

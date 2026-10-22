@@ -246,6 +246,8 @@ pub struct Engine<A: Assets> {
     sortie_max: usize,
     /// 마지막으로 연 본진의 출진 규칙 (본진 출진 단추를 안 거친 경우용)
     last_camp_rule: Option<camp::SortieRule>,
+    /// 재정비용: 작전회의(본진)가 열렸을 때의 중간 저장 (단계, 저장 문자열). 전투에 이기면 지움 — 원작에 없는 편의 기능
+    pub(super) camp_snap: Option<(u32, String)>,
     sortie_chosen: Option<Vec<usize>>,
     /// 사건 처리 뒤 돌아갈 전투 단계
     resume: Option<battle::Phase>,
@@ -329,6 +331,7 @@ impl<A: Assets> Engine<A> {
             force_block: None,
             mark_data: Rc::new(Vec::new()),
             sortie_ui: None,
+            camp_snap: None,
             equip_ui: None,
             imsg: None,
             sortie_sort: (1, 2),
@@ -454,6 +457,10 @@ impl<A: Assets> Engine<A> {
 
     /// 전투에서 자란 조조군 장수 능력을 반영
     fn commit_battle(&mut self) {
+        // 전투를 이기고 넘어가면 재정비 저장은 지난 것 (이야기 단계 끝에도 불리므로 전투일 때만)
+        if self.stage % 2 == 1 {
+            self.camp_snap = None;
+        }
         let roster = self.roster.clone();
         if let Scene::Battle(b) = &self.scene {
             // 전투 중 쓴 도구를 빼고, 보상으로 늘어난 것은 엔진 쪽에 이미 들어 있음
@@ -594,8 +601,11 @@ impl<A: Assets> Engine<A> {
                     return;
                 }
                 *t += 1;
+                // 패배 뒤 고르기 (원작은 "한번 더 플레이하시겠습니까?" → 첫 화면에서 불러오기. 편의 기능으로 바꿈):
+                // 0 다시 도전 (이 전투 처음부터), 1 재정비 (이 전투 전 작전회의로 — 그때 자동 저장이 있을 때만)
+                let can_regroup = self.camp_snap.is_some();
                 let inp = self.input.clone();
-                if inp.pressed & (key::UP | key::DOWN | key::LEFT | key::RIGHT) != 0 {
+                if can_regroup && inp.pressed & (key::UP | key::DOWN | key::LEFT | key::RIGHT) != 0 {
                     *sel ^= 1;
                 }
                 let mut pick = None;
@@ -608,18 +618,17 @@ impl<A: Assets> Engine<A> {
                         pick = Some(*sel);
                     }
                 }
+                if let Some(k) = pick {
+                    self.log.push(format!("패배 뒤 고름 {k} (재정비 {})", if can_regroup { "가능" } else { "불가" }));
+                }
                 match pick {
-                    // 이 전투 다시 (단계 시작 값으로)
                     Some(0) => {
                         self.scene = Scene::Story(Box::default());
                         self.vm = None;
                         self.screen.level = 16;
                     }
-                    // 제목으로 (원작은 제목 → 불러오기)
-                    Some(_) => {
-                        self.scene = Scene::Boot;
-                        self.logo_shown = true;
-                        self.vm = None;
+                    Some(_) if can_regroup => {
+                        let (_, q) = self.camp_snap.clone().unwrap();
                         if let Some((f, r, o, i, g)) = self.saved.clone() {
                             self.flags = f;
                             self.roster = r;
@@ -627,8 +636,18 @@ impl<A: Assets> Engine<A> {
                             self.inventory = i;
                             self.gold = g;
                         }
+                        if self.quick_restore(&q) {
+                            self.log.push("재정비 — 작전회의로".into());
+                            self.camp = None;
+                            self.sortie_ui = None;
+                            self.equip_ui = None;
+                            self.wait = Wait::None;
+                            self.scene = Scene::Story(Box::default());
+                            self.vm = None;
+                            self.screen.level = 16;
+                        }
                     }
-                    None => {}
+                    _ => {}
                 }
             }
             Scene::Story(_) | Scene::Battle(_) => {
@@ -2942,8 +2961,10 @@ impl<A: Assets> Engine<A> {
                         let hi = palette::nearest(&scr.pal, [255, 255, 255]);
                         let lo = palette::nearest(&scr.pal, [120, 100, 80]);
                         // 아래 검은 띠에 나란히
-                        for (k, s) in ["이 전투 다시 하기", "제목으로"].iter().enumerate() {
-                            let c = if *sel == k { hi } else { lo };
+                        let dim = palette::nearest(&scr.pal, [60, 50, 40]);
+                        let can_regroup = self.camp_snap.is_some();
+                        for (k, s) in ["다시 도전한다", "재정비한다 (작전회의로)"].iter().enumerate() {
+                            let c = if k == 1 && !can_regroup { dim } else if *sel == k { hi } else { lo };
                             let x = if k == 0 { 120 } else { 420 };
                             story::draw_text(scr, f, x, 452, s, c);
                         }

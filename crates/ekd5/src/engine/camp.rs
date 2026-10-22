@@ -175,6 +175,13 @@ impl<A: Assets> Engine<A> {
 
     /// 본진 입력. 반환: 처리했으면 true (스크립트 멈춤)
     pub fn update_camp(&mut self) -> bool {
+        // 재정비용 자동 저장: 이 단계의 작전회의 화면이 처음 열렸을 때 한 번 (원작에 없는 편의 기능)
+        if self.camp.is_some() && self.camp_snap.as_ref().is_none_or(|s| s.0 != self.stage) {
+            if let Some(q) = self.quick_save() {
+                self.camp_snap = Some((self.stage, q));
+                self.log.push("재정비용 작전회의 저장".into());
+            }
+        }
         let Some(mut camp) = self.camp.take() else { return false };
         let inp = self.input.clone();
         let tapped = inp.pressed & key::DECIDE != 0;
