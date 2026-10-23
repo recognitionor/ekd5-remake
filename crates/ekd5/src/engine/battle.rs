@@ -286,6 +286,8 @@ pub struct Battle {
     pub cast_log: Vec<String>,
     /// 퇴각 대사를 이미 한 장수 (원작 FUN_004438a5 → FUN_00443ad0)
     pub retire_said: Vec<usize>,
+    /// 퇴각 대사를 하지 않을 장수 (원작 op1b → 부대 +0x20 = 0)
+    pub no_retire_line: Vec<usize>,
     /// 턴 제한 초과 알림을 했나 (원작 FUN_00450f0b: "전투를 오래 끌었으므로 퇴각하겠습니다." → 조조군 퇴각)
     pub limit_said: bool,
     /// 맞는 쪽이 원래 보던 방향 (타격 동안 공격자를 봄, 원작 FUN_00405aa4 가 되돌림)
@@ -468,6 +470,7 @@ impl Battle {
             cast_t: 0,
             cast_log: Vec::new(),
             retire_said: Vec::new(),
+            no_retire_line: Vec::new(),
             limit_said: false,
             def_dir: None,
             charge: None,
@@ -2650,7 +2653,7 @@ impl Battle {
         if self.leave_busy() {
             return None;
         }
-        let u = self.units.iter().find(|u| u.visible && u.hp <= 0 && u.leave.is_none() && u.side == Side::Player && u.person < 0x1A && !self.retire_said.contains(&u.person))?;
+        let u = self.units.iter().find(|u| u.visible && u.hp <= 0 && u.leave.is_none() && u.side == Side::Player && u.person < 0x1A && !self.retire_said.contains(&u.person) && !self.no_retire_line.contains(&u.person))?;
         let p = u.person;
         self.retire_said.push(p);
         Some(p)

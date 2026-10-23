@@ -1616,6 +1616,50 @@ impl<A: Assets> Engine<A> {
                 let v = a(0) as u8;
                 self.face_state = if v == 0xFF { self.face_state & 0xE0 } else { (self.face_state & 0xF0) | v };
             }
+            0x1B => {
+                // 퇴각 대사 켜고 끄기 (원작 FUN_00416055 → 부대 +0x20): 인물, 0 끔 / 그 외 켬
+                let pid = a(0) as usize;
+                if let Some(b) = self.battle() {
+                    b.no_retire_line.retain(|&p| p != pid);
+                    if a(1) == 0 {
+                        b.no_retire_line.push(pid);
+                    }
+                }
+            }
+            0x1F => {
+                // 화면을 (x, y) 칸으로 (원작 FUN_00416656 → FUN_0045701f)
+                let (x, y) = (a(0), a(1));
+                if let Some(b) = self.battle() {
+                    b.focus(x, y);
+                }
+            }
+            0x39 => {
+                // 레벨 올리기 (원작 FUN_00416f79 → FUN_00407758): 인물, 올릴 수. 전투 중 맵 위 부대가 HP 가득이면 늘어난 최대 HP·MP 로 채움
+                let (pid, n) = (a(0) as usize, a(1).clamp(0, 50) as u8);
+                if pid < self.persons.len() && n > 0 {
+                    let jobs = self.jobs.clone();
+                    let items = self.items.clone();
+                    let in_roster = self.roster.contains(&pid);
+                    if in_roster || self.officers.contains_key(&pid) {
+                        let mut o = self.officer(pid);
+                        o.level_up(&jobs, n);
+                        self.officers.insert(pid, o);
+                    }
+                    if let Some(b) = self.battle() {
+                        if let Some(u) = b.unit_of(pid) {
+                            let un = &mut b.units[u];
+                            let full = un.hp == un.max_hp;
+                            un.off.level_up(&jobs, n);
+                            un.level = un.off.level as i32;
+                            un.max_hp = un.off.hp_max(&items) as i32;
+                            if full {
+                                un.hp = un.max_hp;
+                                un.mp = un.off.mp_max(&items) as i32;
+                            }
+                        }
+                    }
+                }
+            }
             0x35 => {
                 // 인물 그림 바꾸기 (원작 FUN_004159dd)
                 self.sprite_over.insert(a(0) as usize, a(1) as u16);
@@ -2948,9 +2992,20 @@ impl<A: Assets> Engine<A> {
         let mut pages = Vec::new();
         for seg in s.split('&').filter(|x| !x.is_empty()) {
             let mut lines = seg.split('\n');
-            let name = lines.next().unwrap_or("").trim().to_string();
+            let mut name = lines.next().unwrap_or("").trim().to_string();
             let body: Vec<String> = lines.filter(|l| !l.is_empty()).map(|l| l.to_string()).collect();
-            let pid = self.persons.iter().position(|p| p.name == name);
+            // 전투 중 "&숫자" = 그 출진 번호 부대 (원작 FUN_00415a60: 맵 위에 없으면 남은 대사는 건너뜀)
+            let pid = if let (Ok(k), Scene::Battle(b)) = (name.parse::<usize>(), &self.scene) {
+                match b.sortie.get(k).copied().filter(|&p| b.unit_of(p).is_some_and(|u| b.units[u].visible && b.units[u].hp > 0)) {
+                    Some(p) => {
+                        name = self.persons.get(p).map(|x| x.name.clone()).unwrap_or_default();
+                        Some(p)
+                    }
+                    None => break,
+                }
+            } else {
+                self.persons.iter().position(|p| p.name == name)
+            };
             for chunk in body.chunks(4) {
                 pages.push(story::Page { person: pid, face: pid.map(|i| self.face_of(i)), name: name.clone(), lines: chunk.to_vec() });
             }
