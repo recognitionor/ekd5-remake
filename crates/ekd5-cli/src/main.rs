@@ -277,6 +277,15 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
                 }
             }
         }
+        // 시험: EKD5_ACTORS=틱 — 이야기 장면 인물 (번호, 좌표, 화면 위치)
+        if std::env::var("EKD5_ACTORS").ok().and_then(|v| v.parse::<u32>().ok()) == Some(t) {
+            if let ekd5::engine::Scene::Story(st) = &eng.scene {
+                for a in &st.actors {
+                    println!("인물 {} @({},{}) 화면 {:?} 그림 {}", a.id, a.x, a.y, st.screen_pos(a.x, a.y), a.sprite);
+                }
+                println!("스크롤 {:?}", st.scroll);
+            }
+        }
         // 시험: EKD5_LIMIT=턴 — 전투 턴 제한을 그 값으로 (턴 제한 초과 퇴각 시험)
         if let Some(n) = std::env::var("EKD5_LIMIT").ok().and_then(|v| v.parse::<i32>().ok()) {
             if let ekd5::engine::Scene::Battle(b) = &mut eng.scene {

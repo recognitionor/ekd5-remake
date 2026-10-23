@@ -392,7 +392,8 @@ impl<A: Assets> Engine<A> {
                             Person {
                                 name: name.to_string(),
                                 face: u16::from_le_bytes([r[13], r[14]]),
-                                sprite: u16::from_le_bytes([r[15], r[16]]),
+                                // 원작 FUN_00408fd5: +0xF 한 바이트 (+0x10 은 목소리 종류)
+                                sprite: r[15] as u16,
                                 stats: [r[18], r[19], r[20], r[21], r[22]],
                                 job: r[26],
                             }
@@ -2887,6 +2888,14 @@ impl<A: Assets> Engine<A> {
                 b.ui.speaker_cell = None;
             }
         }
+        // 전투: 쪽마다 말하는 부대 칸 (여러 사람이 이어 말할 때 말풍선이 따라감)
+        let cells: Vec<Option<((i32, i32), i32)>> = match &self.scene {
+            Scene::Battle(b) => pages
+                .iter()
+                .map(|p| p.person.and_then(|pid| b.unit_of(pid)).filter(|&u| b.units[u].visible).map(|u| ((b.units[u].x, b.units[u].y), b.units[u].y * battle::CELL - b.cam.1 + 24)))
+                .collect(),
+            _ => Vec::new(),
+        };
         let (packs, assets) = (&mut self.packs, &mut self.assets);
         let st = match &mut self.scene {
             Scene::Story(s) => Some(&mut **s),
@@ -2897,6 +2906,7 @@ impl<A: Assets> Engine<A> {
             if st.show_dialog(packs, assets, pages).is_err() {
                 return false;
             }
+            st.page_cells = cells;
             self.wait = Wait::Dialog;
         }
         true

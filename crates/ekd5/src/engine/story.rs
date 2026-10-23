@@ -42,6 +42,10 @@ pub struct Story {
     pub pages: Vec<Page>,
     pub page: usize,
     pub face: Option<Pic>,
+    /// 쪽마다 얼굴 (여러 사람이 이어 말하면 쪽마다 바뀜)
+    pub faces: Vec<Option<Pic>>,
+    /// 전투: 쪽마다 말하는 부대 (칸, 화면 y) — 말풍선이 그 부대를 가리킴
+    pub page_cells: Vec<Option<((i32, i32), i32)>>,
     pub left: bool,
     pub last_speaker: Option<usize>,
     pub choices: Vec<String>,
@@ -82,6 +86,8 @@ impl Default for Story {
             pages: Vec::new(),
             page: 0,
             face: None,
+            faces: Vec::new(),
+            page_cells: Vec::new(),
             left: false,
             last_speaker: None,
             choices: Vec::new(),
@@ -233,6 +239,8 @@ impl Story {
                 packs.get(assets, "FACE.E5", f as usize)?;
             }
         }
+        self.faces = pages.iter().map(|p| p.face.and_then(|f| packs.get(assets, "FACE.E5", f as usize).ok().flatten()).map(|d| Pic::new(64, 80, d))).collect();
+        self.page_cells.clear();
         self.pages = pages;
         self.page = 0;
         self.open_page(packs, assets);
@@ -241,7 +249,10 @@ impl Story {
 
     fn open_page<A: Assets>(&mut self, packs: &mut Packs, assets: &mut A) {
         let Some(p) = self.pages.get(self.page) else { return };
-        self.face = p.face.and_then(|f| packs.get(assets, "FACE.E5", f as usize).ok().flatten()).map(|d| Pic::new(64, 80, d));
+        self.face = match self.faces.get(self.page) {
+            Some(f) => f.clone(),
+            None => p.face.and_then(|f| packs.get(assets, "FACE.E5", f as usize).ok().flatten()).map(|d| Pic::new(64, 80, d)),
+        };
         // 말하는 사람이 바뀌면 창이 좌우를 오간다 (조조는 항상 왼쪽)
         if p.person != self.last_speaker {
             self.left = !self.left;
@@ -257,9 +268,17 @@ impl Story {
         self.page += 1;
         if self.page >= self.pages.len() {
             self.pages.clear();
+            self.faces.clear();
+            self.page_cells.clear();
             self.face = None;
             self.narration = false;
             return true;
+        }
+        // 쪽마다 그 사람 얼굴, 전투면 말풍선도 그 부대로
+        self.face = self.faces.get(self.page).cloned().flatten();
+        if let Some(&pc) = self.page_cells.get(self.page) {
+            self.speaker_cell = pc.map(|c| c.0);
+            self.speaker_y = pc.map(|c| c.1);
         }
         let p = &self.pages[self.page];
         if p.person != self.last_speaker {
