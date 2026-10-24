@@ -280,6 +280,8 @@ pub struct Battle {
     pub job_names: Rc<Vec<String>>,
     /// 이번 공격 전 공격자 경험치 (부대, 경험치, 레벨)
     atk_exp: Option<(usize, u8, u8)>,
+    /// 타격마다 계산한 경험치 중 가장 큰 값 (부대, 값) — 그 부대의 타격이 끝나면 한 번에 (원작 FUN_00406163 → FUN_00405fcc)
+    strike_exp: Vec<(usize, u32)>,
     ai_plan: Option<AiPlan>,
     cast_t: u32,
     /// 시험 기록용
@@ -466,6 +468,7 @@ impl Battle {
             pal_cache: [[0; 3]; 256],
             job_names: Rc::new(Vec::new()),
             atk_exp: None,
+            strike_exp: Vec::new(),
             ai_plan: None,
             cast_t: 0,
             cast_log: Vec::new(),
@@ -2537,22 +2540,23 @@ impl Battle {
                         if self.units[y].hp <= 0 {
                             self.killed_by = Some(x);
                         }
-                        // 경험치
-                        let killed = self.units[y].hp <= 0;
-                        // 원작 FUN_00403afb: 쓰러뜨린 상대가 승리 목표 장수면 2배, × 장비 기본치/10
-                        let mut e = Self::exp_for(self.units[x].level, self.units[y].level, killed);
-                        if killed && self.win_target == Some(self.units[y].person) {
-                            e *= 2;
-                        }
-                        let e = self.units[x].off.gear_base(&self.items.clone()) * e / 10;
-                        let ups = self.units[x].off.gain_exp(&self.jobs.clone(), e);
-                        if ups > 0 {
-                            let lv = self.units[x].off.level as i32;
-                            self.levelups.push_back((x, lv));
-                        }
                         if crit { format!("치명타 {v}") } else { format!("{v}") }
                     }
                 };
+                // 경험치 (원작 FUN_00403afb, 빗나가도): 쓰러뜨렸으면 큰 값 (승리 목표 장수면 2배), × 장비 기본치/10.
+                // 공격자와 반격하는 쪽 모두 — 그 부대의 타격 중 가장 큰 값을 타격이 끝난 뒤 한 번에
+                if x != y && self.units[x].side == Side::Player {
+                    let killed = self.units[y].hp <= 0;
+                    let mut e = Self::exp_for(self.units[x].level, self.units[y].level, killed);
+                    if killed && self.win_target == Some(self.units[y].person) {
+                        e *= 2;
+                    }
+                    let e = self.units[x].off.gear_base(&self.items.clone()) * e / 10;
+                    match self.strike_exp.iter_mut().find(|r| r.0 == x) {
+                        Some(r) => r.1 = r.1.max(e),
+                        None => self.strike_exp.push((x, e)),
+                    }
+                }
                 // 맞은 부대 창 (값이 줄어드는 게이지)
                 if dmg.is_some() {
                     let un = &self.units[y];
@@ -2586,23 +2590,15 @@ impl Battle {
                 self.strikes.pop_front();
                 self.strike_t = 0;
                 self.shout_checked = false;
+                // 이 부대의 타격이 끝났으면 경험치와 경험치 창 (원작: 공격 → 공격자 창 → 반격 → 반격한 쪽 창)
+                if self.strikes.front().map(|s| s.0) != Some(x) {
+                    self.flush_exp(x);
+                }
                 if self.units[y].hp <= 0 {
                     self.strikes.retain(|s| s.0 != y && s.1 != y);
                 }
             }
             return false;
-        }
-        // 공격자(조조군) 경험치 창 (원작 FUN_00405be9 끝의 FUN_00452964)
-        if let Some((u, ex, lv)) = self.atk_exp.take() {
-            let o = &self.units[u].off;
-            let to = if o.level > lv { 100 } else { o.exp as i32 };
-            if to != ex as i32 && self.units[u].hp > 0 {
-                let un = &self.units[u];
-                self.dmg_win = Some(DmgWin { u, hp: (un.hp, un.hp), mp: (un.mp, un.mp), ex: (ex as i32, to), t: 0 });
-                self.strikes.push_back((u, u, Some(-1), false));
-                self.strike_t = 21;
-                return false;
-            }
         }
         // 레벨업 연출 (경험치 창 뒤, 원작 FUN_00408d42 → FUN_00407758)
         if self.run_levelup() {
@@ -2620,6 +2616,31 @@ impl Battle {
         }
         // 쓰러진 부대는 사건 검사 뒤 퇴각 (retreat_fallen)
         true
+    }
+
+    /// 부대 x 의 쌓인 경험치를 주고 창을 띄움 (원작 FUN_00405fcc: FUN_00452964 → FUN_00408d42)
+    fn flush_exp(&mut self, x: usize) {
+        let Some(i) = self.strike_exp.iter().position(|r| r.0 == x) else { return };
+        let (_, e) = self.strike_exp.remove(i);
+        if e == 0 || self.units[x].hp <= 0 {
+            return;
+        }
+        let (ex0, lv0) = (self.units[x].off.exp, self.units[x].off.level);
+        let m = format!("@경험치 {} +{e}", self.units[x].person);
+        self.cast_log.push(m);
+        let ups = self.units[x].off.gain_exp(&self.jobs.clone(), e);
+        if ups > 0 {
+            let lv = self.units[x].off.level as i32;
+            self.levelups.push_back((x, lv));
+        }
+        let o = &self.units[x].off;
+        let to = if o.level > lv0 { 100 } else { o.exp as i32 };
+        if to != ex0 as i32 {
+            let un = &self.units[x];
+            self.dmg_win = Some(DmgWin { u: x, hp: (un.hp, un.hp), mp: (un.mp, un.mp), ex: (ex0 as i32, to), t: 0 });
+            self.strikes.push_front((x, x, Some(-1), false));
+            self.strike_t = 21;
+        }
     }
 
     /// 레벨업 연출 한 걸음. 진행 중이면 true
