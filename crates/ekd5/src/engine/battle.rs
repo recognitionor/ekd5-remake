@@ -1178,6 +1178,8 @@ impl Battle {
         self.units[u].mp = (self.units[u].mp - self.strat_mp(u, sid)).max(0);
         let jobs = self.jobs.clone();
         let victims = self.strat_victims(u, sid, cell);
+        // 책략 경험치 (원작 FUN_00423593 → FUN_004255a5): 대상마다 계산해 가장 큰 값 × 장비 기본치/10, 조조군만
+        let mut best_exp: u32 = if st.target == 2 { 20 } else { 0 };
         // 시전자 무기 경험치 (정신 무기만): 대상 레벨이 낮으면 2, 아니면 3
         if self.weapon_stat(u) == Some(2) {
             let lu = self.units[u].level;
@@ -1190,13 +1192,21 @@ impl Battle {
             let terr = self.terr(pos.0, pos.1);
             let already = matches!(strategy::effect(sid), Effect::Status(bit, _) if self.units[t].status & bit != 0);
             if !strategy::terrain_ok(sid, terr) || already {
+                let (lc, lt) = (self.units[u].level.max(1) as u32, self.units[t].level.max(1) as u32);
+                best_exp = best_exp.max(if lc < lt { ((lt - lc) * 4 + 10).min(100) } else { 10u32.saturating_sub((lc - lt) >> 1).max(5) });
                 out.push((pos, "효과 없음".to_string()));
                 continue;
             }
+            let (lc, lt) = (self.units[u].level.max(1) as u32, self.units[t].level.max(1) as u32);
+            let small = if lc < lt { ((lt - lc) * 4 + 10).min(100) } else { 10u32.saturating_sub((lc - lt) >> 1).max(5) };
+            let damage_kind = matches!(sid, 0..=0x15 | 0x21..=0x24 | 0x26 | 0x40 | 0x41);
             if hostile && (self.rand(100) as u32) >= self.strat_rate_for(u, t, sid) && !(self.cheat && self.units[u].side != Side::Enemy) {
+                // 실패해도 피해 없는 경우의 경험치
+                best_exp = best_exp.max(small);
                 out.push((pos, "실패".to_string()));
                 continue;
             }
+            let hp_before = self.units[t].hp;
             let mut dmg = 0;
             let text = match strategy::effect(sid) {
                 Effect::Damage(pw) => {
@@ -1260,13 +1270,23 @@ impl Battle {
                     let k = if self.units[u].level < self.units[t].level { 3 } else { 4 };
                     self.gear_exp(t, 1, k);
                 }
-                let e = Self::exp_for(self.units[u].level, self.units[t].level, self.units[t].hp <= 0);
-                self.units[u].off.gain_exp(&jobs, e);
-            } else if !hostile {
-                // 아군 지원도 경험치 조금
-                self.units[u].off.gain_exp(&jobs, 8);
             }
+            // 적: 피해 책략으로 쓰러뜨리면 큰 값 (승리 목표 장수면 2배), 그 외 작은 값 / 아군: 작은 값 / 날씨: 20
+            let e = if hostile && damage_kind && sid != 0x16 && dmg > 0 && dmg >= hp_before {
+                let k = if lc < lt { ((lt - lc) * 8 + 32).min(200) } else { 32u32.saturating_sub((lc - lt) * 4).max(10) };
+                if self.win_target == Some(self.units[t].person) { k * 2 } else { k }
+            } else if st.target == 2 {
+                20
+            } else {
+                small
+            };
+            best_exp = best_exp.max(e);
             out.push((pos, text));
+        }
+        if self.units[u].side == Side::Player && best_exp > 0 {
+            let items = self.items.clone();
+            let e = self.units[u].off.gear_base(&items) * best_exp / 10;
+            self.units[u].off.gain_exp(&jobs, e);
         }
         let un = &self.units[u];
         if un.off.level as i32 > un.level {
@@ -1361,7 +1381,14 @@ impl Battle {
     fn cast_apply(&mut self, u: usize, sid: u8, cell: (i32, i32)) {
         self.cast_applied = true;
         let before: Vec<(i32, i32)> = self.units.iter().map(|x| (x.hp, x.mp)).collect();
+        let (ex0, lv0) = (self.units[u].off.exp, self.units[u].off.level);
         let res = self.apply_strategy(u, sid, cell);
+        // 시전자(조조군) 경험치 창 (원작 FUN_004255a5 → FUN_00452964): 대상 창들 다음에
+        let caster_win = (self.units[u].side == Side::Player && (self.units[u].off.exp, self.units[u].off.level) != (ex0, lv0)).then(|| {
+            let un = &self.units[u];
+            let to = if un.off.level > lv0 { 100 } else { un.off.exp as i32 };
+            DmgWin { u, hp: (un.hp, un.hp), mp: (un.mp, un.mp), ex: (ex0 as i32, to), t: 0 }
+        });
         // 맞는 순간 대상 칸에 양 (HP 변화, 없으면 MP 변화)
         self.cast_nums = (0..self.units.len())
             .filter(|&i| i != u)
@@ -1380,6 +1407,7 @@ impl Battle {
                 let un = &self.units[i];
                 self.dmg_queue.push_back(DmgWin { u: i, hp: (before[i].0, un.hp.max(0)), mp: (before[i].1, un.mp), ex: (un.off.exp as i32, un.off.exp as i32), t: 0 });
             }
+            self.dmg_queue.extend(caster_win.clone());
             // 창은 연출이 끝난 뒤 (원작: 연출 → FUN_00452964)
             // 효과 없음·빗나감 같은 글은 그대로 띄움
             if let Some(((x, y), txt)) = res.iter().find(|(_, t)| !t.starts_with('-') && !t.chars().next().is_some_and(|c| c.is_ascii_digit())) {
@@ -1387,6 +1415,7 @@ impl Battle {
             }
             return;
         }
+        self.dmg_queue.extend(caster_win);
         if let Some(((x, y), txt)) = res.first() {
             self.popup = Some((x * CELL + 4 - self.cam.0, y * CELL - 8 - self.cam.1, txt.clone(), 30));
         }
@@ -2510,7 +2539,12 @@ impl Battle {
                         }
                         // 경험치
                         let killed = self.units[y].hp <= 0;
-                        let e = Self::exp_for(self.units[x].level, self.units[y].level, killed);
+                        // 원작 FUN_00403afb: 쓰러뜨린 상대가 승리 목표 장수면 2배, × 장비 기본치/10
+                        let mut e = Self::exp_for(self.units[x].level, self.units[y].level, killed);
+                        if killed && self.win_target == Some(self.units[y].person) {
+                            e *= 2;
+                        }
+                        let e = self.units[x].off.gear_base(&self.items.clone()) * e / 10;
                         let ups = self.units[x].off.gain_exp(&self.jobs.clone(), e);
                         if ups > 0 {
                             let lv = self.units[x].off.level as i32;
