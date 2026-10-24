@@ -34,6 +34,10 @@ pub enum Effect {
     Status(u8, u32),
     /// 상태이상 치료
     Cure,
+    /// 공격·방어·순발·사기 모두 (올림?) — 팔진도 결과 (원작 0x6f / 0xaf)
+    BuffAll(bool),
+    /// HP 다 채움 — 팔진도 결과 (원작 FUN_0043e658 0x26: 최대 HP − HP)
+    HealFull,
     None,
 }
 

@@ -219,6 +219,7 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
         eng.restore(&r);
     }
     let snap = std::env::var("EKD5_SNAP").is_ok();
+    let shot_from: u32 = std::env::var("EKD5_SHOT_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     // 시험: 중간 저장 불러오기 (EKD5_QLOAD=파일), 그 틱에 중간 저장 (EKD5_QSAVE=틱:파일)
     if let Ok(f) = std::env::var("EKD5_QLOAD") {
         let s = fs::read_to_string(&f).unwrap();
@@ -294,6 +295,26 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
                 }
             }
         }
+        // 시험: EKD5_CAST="틱:책략" — 그 틱에 첫 조조군 부대가 가장 가까운 적에게 그 책략 (연출 확인)
+        if let Some((ct, sid)) = std::env::var("EKD5_CAST").ok().and_then(|v| { let (a, b) = v.split_once(':')?; Some((a.parse::<u32>().ok()?, b.parse::<u8>().ok()?)) }) {
+            if ct == t {
+                if let ekd5::engine::Scene::Battle(b) = &mut eng.scene {
+                    use ekd5::engine::battle::Side;
+                    let u = b.units.iter().position(|u| u.visible && u.hp > 0 && u.side == Side::Player);
+                    if let Some(u) = u {
+                        let (x, y) = (b.units[u].x, b.units[u].y);
+                        let e = b.units.iter().filter(|e| e.visible && e.hp > 0 && e.side == Side::Enemy).min_by_key(|e| (e.x - x).abs() + (e.y - y).abs()).map(|e| (e.x, e.y));
+                        let ally = matches!(sid, 39..=57 | 61..=63 | 67);
+                        let cell = if ally { Some((x, y)) } else { e };
+                        if let Some(cell) = cell {
+                            b.units[u].mp = 999;
+                            println!("책략 시험: 부대 {u} 책략 {sid} → {cell:?}");
+                            b.phase = ekd5::engine::battle::Phase::Cast { unit: u, sid, cell, t: 0 };
+                        }
+                    }
+                }
+            }
+        }
         // 시험: EKD5_TOOL=틱 — 그 틱에 첫 조조군 부대가 자기에게 첫 소모품을 씀 (도구 쓰기 연출)
         if std::env::var("EKD5_TOOL").ok().and_then(|v| v.parse::<u32>().ok()) == Some(t) {
             let items = eng.items.clone();
@@ -314,9 +335,11 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
         }
         // 시험: EKD5_FX="틱:연출번호" — 그 틱에 화면 가운데에 연출
         if let Some((ft, id)) = std::env::var("EKD5_FX").ok().and_then(|v| { let (a, b) = v.split_once(':')?; Some((a.parse::<u32>().ok()?, b.parse::<u8>().ok()?)) }) {
-            if ft == t {
-                if let ekd5::engine::Scene::Battle(b) = &mut eng.scene {
+            if let ekd5::engine::Scene::Battle(b) = &mut eng.scene {
+                if ft == t {
                     b.fx_req = Some((id, vec![(b.cam.0 + 320, b.cam.1 + 240)]));
+                } else if t > ft && b.fx.as_mut().is_some_and(|f| f.advance()) {
+                    b.fx = None;
                 }
             }
         }
@@ -358,7 +381,8 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
             write_png(&out.join(format!("t{t:05}.png")), 640, 480, &rgba);
             break;
         }
-        if t % every == 0 {
+        // 시험: EKD5_SHOT_FROM=틱 — 그 틱부터만 스크린샷
+        if t % every == 0 && t >= shot_from {
             let rgba = eng.render().to_vec();
             write_png(&out.join(format!("t{t:05}.png")), 640, 480, &rgba);
         }

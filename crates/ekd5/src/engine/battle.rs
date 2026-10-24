@@ -235,6 +235,10 @@ pub struct Battle {
     pub banner: Option<(super::duel::Mask, Option<super::duel::Mask>)>,
     /// 책략 연출 (원작 MEFF/MCALL)
     pub fx: Option<super::fx::Fx>,
+    /// 책략 연출 다음 단계들 (MCALL 뒤 대상마다 MEFF — 원작 FUN_00423b57)
+    cast_stages: VecDeque<(u8, Vec<(i32, i32)>)>,
+    /// 팔진도 대상별 결과 (부대, 0..7 — 원작 FUN_00426574)
+    bagua: Vec<(usize, u8)>,
     /// 연출 읽기 요청 (연출 번호, 중심들) — 엔진이 읽어 fx 로
     pub fx_req: Option<(u8, Vec<(i32, i32)>)>,
     cast_applied: bool,
@@ -444,6 +448,8 @@ impl Battle {
             banner: None,
             fx: None,
             fx_req: None,
+            cast_stages: VecDeque::new(),
+            bagua: Vec::new(),
             cast_applied: false,
             cast_end: None,
             sounds: Vec::new(),
@@ -1203,7 +1209,24 @@ impl Battle {
             let (lc, lt) = (self.units[u].level.max(1) as u32, self.units[t].level.max(1) as u32);
             let small = if lc < lt { ((lt - lc) * 4 + 10).min(100) } else { 10u32.saturating_sub((lc - lt) >> 1).max(5) };
             let damage_kind = matches!(sid, 0..=0x15 | 0x21..=0x24 | 0x26 | 0x40 | 0x41);
-            if hostile && (self.rand(100) as u32) >= self.strat_rate_for(u, t, sid) && !(self.cheat && self.units[u].side != Side::Enemy) {
+            // 팔진도 (원작 FUN_00426574): 성공 판정 없이 대상마다 8가지 중 하나 — 피해, 혼란, 포박, 봉책, 독연 피해+독, 능력 모두 내림, 모두 올림, HP 다 채움
+            let eff = if sid == 0x26 {
+                let k = self.rand(8) as u8;
+                self.bagua.push((t, k));
+                match k {
+                    0 => Effect::Damage(strategy::power(0x26)),
+                    1 => Effect::Status(status::CONFUSE, 0),
+                    2 => Effect::Status(status::PARALYZE, 0),
+                    3 => Effect::Status(status::SEAL, 0),
+                    4 => Effect::Status(status::POISON, strategy::power(0x21)),
+                    5 => Effect::BuffAll(false),
+                    6 => Effect::BuffAll(true),
+                    _ => Effect::HealFull,
+                }
+            } else {
+                strategy::effect(sid)
+            };
+            if hostile && sid != 0x26 && (self.rand(100) as u32) >= self.strat_rate_for(u, t, sid) && !(self.cheat && self.units[u].side != Side::Enemy) {
                 // 실패해도 피해 없는 경우의 경험치
                 best_exp = best_exp.max(small);
                 out.push((pos, "실패".to_string()));
@@ -1211,7 +1234,7 @@ impl Battle {
             }
             let hp_before = self.units[t].hp;
             let mut dmg = 0;
-            let text = match strategy::effect(sid) {
+            let text = match eff {
                 Effect::Damage(pw) => {
                     dmg = self.strat_damage(u, t, pw, st.cat);
                     format!("{dmg}")
@@ -1258,6 +1281,19 @@ impl Battle {
                     *s = if up { (*s + 1).clamp(4, 5) } else { s.saturating_sub(1).min(2) };
                     let names = ["공격", "방어", "정신", "순발", "사기"];
                     format!("{}{}", names[k as usize], if up { "↑" } else { "↓" })
+                }
+                Effect::BuffAll(up) => {
+                    for k in [0, 1, 3, 4] {
+                        let s = &mut self.units[t].state[k];
+                        *s = if up { (*s + 1).clamp(4, 5) } else { s.saturating_sub(1).min(2) };
+                    }
+                    (if up { "능력↑" } else { "능력↓" }).to_string()
+                }
+                Effect::HealFull => {
+                    let un = &mut self.units[t];
+                    let h = (un.max_hp - un.hp).max(0);
+                    un.hp += h;
+                    format!("+{h}")
                 }
                 Effect::Cure => {
                     self.units[t].status = 0;
@@ -1312,16 +1348,32 @@ impl Battle {
             if cell.0 * CELL < self.cam.0 + 48 || cell.0 * CELL > self.cam.0 + 544 || cell.1 * CELL < self.cam.1 + 48 || cell.1 * CELL > self.cam.1 + 384 {
                 self.focus(cell.0, cell.1);
             }
+            self.cast_stages.clear();
+            self.bagua.clear();
             let id = super::fx::STRATEGY_FX.get(sid as usize).copied().unwrap_or(255);
             if id != 255 {
                 let mid = |(x, y): (i32, i32)| (x * CELL + CELL / 2, y * CELL + CELL / 2);
-                let centers: Vec<(i32, i32)> = if id >= 100 {
-                    vec![mid(cell)]
+                let at: Vec<(i32, i32)> = self.strat_victims(u, sid, cell).iter().map(|&i| mid((self.units[i].x, self.units[i].y))).collect();
+                if id >= 100 {
+                    // 원작 FUN_00423b57: MCALL 은 첫 대상 자리 (현무·백호는 화면 가운데), 이어서 대상마다 MEFF
+                    let first = if matches!(sid, 0x42 | 0x43) { (self.cam.0 + 320, self.cam.1 + 240) } else { at.first().copied().unwrap_or(mid(cell)) };
+                    self.fx_req = Some((id, vec![first]));
+                    let follow = match sid {
+                        3 => Some(1),
+                        8 => Some(3),
+                        0xD => Some(5),
+                        0x12 => Some(7),
+                        0x40 => Some(0x16),
+                        0x41 => Some(0x39),
+                        0x43 => Some(10),
+                        _ => None,
+                    };
+                    if let Some(m) = follow.filter(|_| !at.is_empty()) {
+                        self.cast_stages.push_back((m, at));
+                    }
                 } else {
-                    let v = self.strat_victims(u, sid, cell);
-                    if v.is_empty() { vec![mid(cell)] } else { v.iter().map(|&i| mid((self.units[i].x, self.units[i].y))).collect() }
-                };
-                self.fx_req = Some((id, centers));
+                    self.fx_req = Some((id, if at.is_empty() { vec![mid(cell)] } else { at }));
+                }
             }
         }
         if self.fx_req.is_some() {
@@ -1332,10 +1384,25 @@ impl Battle {
                 if f.sound_now() {
                     self.sounds.push(format!("SE_M_{:02}.WAV", f.sound));
                 }
-                let hit = f.hit_now() || !f.has_hit() && f.step * 2 >= 1 && f.step == 1;
+                // 효과는 마지막 연출의 표지 단계에서 (팔진도는 MCALL 이 끝나면 결과를 정하고 결과별 MEFF)
+                let hit = self.cast_stages.is_empty() && sid != 0x26 && (f.hit_now() || !f.has_hit() && f.step == 1);
                 let done = f.advance();
                 if hit && !self.cast_applied {
                     self.cast_apply(u, sid, cell);
+                }
+                if done && sid == 0x26 && !self.cast_applied {
+                    self.cast_apply(u, sid, cell);
+                    // 원작 FUN_0042437d: 결과마다 MEFF (피해 8, 혼란 25, 포박 26, 봉책 27, 독 23, 모두 내림 33, 모두 올림 17, 회복 10)
+                    for (k, m) in [(0u8, 8u8), (1, 25), (2, 26), (3, 27), (4, 23), (5, 33), (6, 17), (7, 10)] {
+                        let at: Vec<(i32, i32)> = self.bagua.iter().filter(|b| b.1 == k).map(|b| (self.units[b.0].x * CELL + CELL / 2, self.units[b.0].y * CELL + CELL / 2)).collect();
+                        if !at.is_empty() {
+                            self.cast_stages.push_back((m, at));
+                        }
+                    }
+                }
+                if done && !self.cast_stages.is_empty() {
+                    self.fx_req = self.cast_stages.pop_front();
+                    return false;
                 }
                 if done {
                     if !self.cast_applied {
