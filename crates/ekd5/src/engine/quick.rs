@@ -38,6 +38,8 @@ pub struct BattleSave {
     pub lose_target: Option<usize>,
     #[serde(default)]
     pub level_bias: i32,
+    #[serde(default)]
+    pub weather: (u8, u8),
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -130,6 +132,7 @@ impl<A: Assets> Engine<A> {
                 win_target: b.win_target,
                 lose_target: b.lose_target,
                 level_bias: b.level_bias,
+                weather: (b.weather_kind, b.weather_pos),
             }),
             _ => None,
         };
@@ -253,6 +256,7 @@ impl<A: Assets> Engine<A> {
             b.win_target = bs.win_target;
             b.lose_target = bs.lose_target;
             b.level_bias = bs.level_bias;
+            (b.weather_kind, b.weather_pos) = bs.weather;
             b.restore_terrain = Some((bs.terrain, bs.overlay));
             b.started = true;
             b.phase = battle::Phase::PlayerIdle;

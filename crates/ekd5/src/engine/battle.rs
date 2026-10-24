@@ -37,6 +37,14 @@ impl Side {
     }
 }
 
+fn three() -> u8 {
+    3
+}
+
+/// 날씨 표 (원작 0x498930): 기후 5종 × 6칸. 0 맑음 1 흐림 2 비 3 호우 4 눈
+pub const WEATHER: [[u8; 6]; 5] = [[0, 0, 0, 1, 2, 3], [0, 0, 0, 0, 1, 2], [0, 1, 2, 2, 3, 3], [0, 0, 1, 1, 4, 4], [0, 1, 4, 4, 4, 4]];
+pub const WEATHER_NAME: [&str; 5] = ["맑음", "흐림", "비", "호우", "눈"];
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Unit {
     pub person: usize,
@@ -58,6 +66,9 @@ pub struct Unit {
     pub mp: i32,
     /// 능력 상태 (3 = 보통, <3 ×0.7, ≥4 ×1.2) — 원작 부대 +0x18..
     pub state: [u8; 5],
+    /// 이동 상태 (원작 +0x1d, 3 보통 / 3 미만 이동력 −1 / 4 이상 +2 — FUN_004418b0)
+    #[serde(default = "three")]
+    pub mv_state: u8,
     /// 상태이상 비트 (독 2, 혼란 4, 마비 8, 봉책 0x10)
     pub status: u8,
     pub acted: bool,
@@ -237,8 +248,11 @@ pub struct Battle {
     pub fx: Option<super::fx::Fx>,
     /// 책략 연출 다음 단계들 (MCALL 뒤 대상마다 MEFF — 원작 FUN_00423b57)
     cast_stages: VecDeque<(u8, Vec<(i32, i32)>)>,
-    /// 팔진도 대상별 결과 (부대, 0..7 — 원작 FUN_00426574)
-    bagua: Vec<(usize, u8)>,
+    /// 책략 효과 뒤에 이어 볼 연출 (팔진도 결과별·청룡 타격·대상별 결과 — 원작 FUN_0042437d / FUN_00424b40)
+    post_fx: Vec<(u8, Vec<(i32, i32)>)>,
+    /// 날씨 (원작 0x4be480: +0x11 기후, +4 칸 — op45 인자 8·9). 차례마다 칸이 무작위로 옮겨 감 (FUN_0044c102)
+    pub weather_kind: u8,
+    pub weather_pos: u8,
     /// 연출 읽기 요청 (연출 번호, 중심들) — 엔진이 읽어 fx 로
     pub fx_req: Option<(u8, Vec<(i32, i32)>)>,
     cast_applied: bool,
@@ -449,7 +463,9 @@ impl Battle {
             fx: None,
             fx_req: None,
             cast_stages: VecDeque::new(),
-            bagua: Vec::new(),
+            post_fx: Vec::new(),
+            weather_kind: 0,
+            weather_pos: 1,
             cast_applied: false,
             cast_end: None,
             sounds: Vec::new(),
@@ -602,6 +618,7 @@ impl Battle {
             job: off.job,
             mp: off.mp_max(&self.items) as i32,
             state: [3; 5],
+            mv_state: 3,
             status: 0,
             acted: false,
             visible: true,
@@ -739,7 +756,13 @@ impl Battle {
         } else if u.status & status::PARALYZE != 0 {
             0
         } else {
-            self.job_byte(u.job, 0) as i32 + u.off.equip_bonus(&self.items, 7) as i32
+            // 이동 상태 (원작 FUN_004418b0): 3 미만 −1, 4 이상 +2
+            let m = self.job_byte(u.job, 0) as i32 + u.off.equip_bonus(&self.items, 7) as i32;
+            match u.mv_state {
+                0..=2 => (m - 1).max(0),
+                3 => m,
+                _ => m + 2,
+            }
         };
         let start = (u.x, u.y);
         let mut q = VecDeque::new();
@@ -1073,20 +1096,110 @@ impl Battle {
     }
 
     /// 그 칸에 책략을 쓰면 영향받는 부대들
+    /// 책략 대상 (원작 FUN_004279e1 → FUN_004386ce: 범위 안 진영이 맞고 지형이 맞는 부대만 — FUN_00423012)
     fn strat_victims(&self, u: usize, sid: u8, cell: (i32, i32)) -> Vec<usize> {
         let Some(st) = self.strat(sid) else { return Vec::new() };
         let side = self.units[u].side;
-        st.area_offsets()
-            .into_iter()
-            .filter_map(|(dx, dy)| self.at(cell.0 + dx, cell.1 + dy))
-            .filter(|&t| if st.target == 0 { self.units[t].side.hostile(side) } else { !self.units[t].side.hostile(side) })
-            .collect()
+        let live = |t: usize| self.units[t].visible && self.units[t].hp > 0;
+        let terr_ok = |t: usize| strategy::terrain_ok(sid, self.terr(self.units[t].x, self.units[t].y));
+        let n = self.units.len();
+        match sid {
+            // 모래폭풍 (FUN_004268d2): 맵의 모든 적
+            14 => (0..n).filter(|&t| live(t) && self.units[t].side.hostile(side) && terr_ok(t)).collect(),
+            // 청룡 (FUN_00427536): 고른 칸에 적이 있어야 하고, 대상은 시전자 둘레 (범위 6 = 8칸 + 2칸 고리 + 3칸 십자) 의 적
+            64 => {
+                if !self.at(cell.0, cell.1).is_some_and(|t| self.units[t].side.hostile(side)) {
+                    return Vec::new();
+                }
+                let (x, y) = (self.units[u].x, self.units[u].y);
+                Self::range_offsets(0xC).into_iter().filter_map(|(dx, dy)| self.at(x + dx, y + dy)).filter(|&t| self.units[t].side.hostile(side)).collect()
+            }
+            // 현무 (FUN_00426ea8): 맵의 모든 부대
+            66 => (0..n).filter(|&t| live(t)).collect(),
+            // 백호 (FUN_00426bab): 같은 편 모두
+            67 => (0..n).filter(|&t| live(t) && !self.units[t].side.hostile(side)).collect(),
+            _ => st
+                .area_offsets()
+                .into_iter()
+                .filter_map(|(dx, dy)| self.at(cell.0 + dx, cell.1 + dy))
+                .filter(|&t| if st.target == 0 { self.units[t].side.hostile(side) } else { !self.units[t].side.hostile(side) })
+                .filter(|&t| terr_ok(t))
+                .collect(),
+        }
+    }
+
+    /// 지금 날씨 (0 맑음 1 흐림 2 비 3 호우 4 눈)
+    pub fn weather(&self) -> u8 {
+        WEATHER[(self.weather_kind as usize).min(4)][(self.weather_pos as usize).min(5)]
+    }
+
+    /// 날씨 칸 옮기기 (원작 FUN_0044c102): 6 미만이면 그 칸으로, 그 외는 무작위 —
+    /// 0..7 난수가 칸+1 보다 작으면 한 칸 뒤, 크면 한 칸 앞 (둘레를 돎). 날씨가 바뀌면 날씨 띠 연출 (MEFF 52+날씨) 번호
+    pub fn set_weather(&mut self, to: u8) -> Option<u8> {
+        let before = self.weather();
+        if to < 6 {
+            self.weather_pos = to;
+        } else {
+            let r = self.rand(8);
+            let mut p = self.weather_pos as i32 + 1;
+            if r < p {
+                p -= 1;
+            } else if r > p {
+                p += 1;
+            }
+            self.weather_pos = match p {
+                0 => 5,
+                7 => 0,
+                _ => (p - 1) as u8,
+            };
+        }
+        let now = self.weather();
+        (now != before).then_some(52 + now)
+    }
+
+    /// 날씨 띠 연출 자리 (원작은 216×50 날씨 창 — 화면 오른쪽 위)
+    pub fn weather_fx_at(&self) -> (i32, i32) {
+        (self.cam.0 + 640 - 8 - 108, self.cam.1 + 26 + 25)
+    }
+
+    /// 지금 쓸 수 있나 (원작 FUN_00422439): 불 계통은 비·호우·눈이면 못 씀, 명상은 HP 3 이상, 청룡은 비 이상, 주작은 맑음, 현무는 흐림
+    pub fn strat_usable(&self, u: usize, sid: u8) -> bool {
+        let w = self.weather();
+        match sid {
+            0..=4 => w <= 1,
+            62 => self.units[u].hp >= 3,
+            64 => w >= 2,
+            65 => w == 0,
+            66 => w == 1,
+            _ => true,
+        }
+    }
+
+    /// 책사 계열 (원작 FUN_0044214e: 병과 8~11, 0x12~0x14) — 공격 올림·내림이 정신에 걸림
+    fn mental_class(&self, u: usize) -> bool {
+        let j = self.units[u].job;
+        let c = if j < 0x27 { j / 3 } else if j < 0x35 { j - 0x1A } else { 0x1B };
+        matches!(c, 8..=11 | 0x12..=0x14)
+    }
+
+    /// 능력 상태 바꾸기 (원작 FUN_0042334a → FUN_00441aef): 보통(3)에서 올리면 6, 내리면 0, 반대쪽이면 보통으로.
+    /// k: 0 공격(책사 계열은 정신) 1 방어 3 순발 4 사기 5 이동
+    fn stat_change(&mut self, t: usize, k: u8, up: bool) {
+        let k = if k == 0 && self.mental_class(t) { 2 } else { k };
+        let s = if k == 5 { &mut self.units[t].mv_state } else { &mut self.units[t].state[k as usize] };
+        *s = match (*s, up) {
+            (3, true) => 6,
+            (0..=3, true) => 3,
+            (0..=3, false) => 0,
+            (_, true) => 6,
+            (_, false) => 3,
+        };
     }
 
     /// 책략 성공률 (원작 FUN_0043d84f: (정신+사기) 비교 곡선 × 책략별 배율, 포박된 대상은 100)
     fn strat_rate_for(&self, a: usize, d: usize, sid: u8) -> u32 {
-        // 포박·혼란 상대에게는 반드시 성공 (원작 FUN_0043d84f, 해일·현혹 제외)
-        if self.units[d].status & (status::PARALYZE | status::CONFUSE) != 0 && sid != 9 && sid != 21 {
+        // 혼란 상대에게는 반드시 성공 (원작 FUN_0043d84f: 비트 8, 해일·현혹 제외). 팔진도·회복·강행 등은 늘 100
+        if self.units[d].status & status::CONFUSE != 0 && sid != 9 && sid != 21 || strategy::rate_always(sid) {
             return 100;
         }
         let base = self.strat_rate(a, d);
@@ -1105,7 +1218,9 @@ impl Battle {
                         r = r.saturating_sub(v as u32);
                     }
                 }
-                r * strategy::rate_scale(sid) / 100
+                // 낙뢰(0x14)는 병과 12 가 쓰면 1.5배
+                let r = r * strategy::rate_scale(sid) / 100;
+                if sid == 0x14 && self.units[a].job / 3 == 12 && self.units[a].job < 0x27 { (r * 3 / 2).min(100) } else { r }
             }
         }
     }
@@ -1180,151 +1295,134 @@ impl Battle {
         self.units[u].off.weapon.and_then(|(id, _)| crate::officer::item_stat(&self.items, id))
     }
 
-    /// 책략 효과 적용. 반환: 표시 글 (칸, 글)
+    /// 책략 효과 적용 (원작 FUN_00427cbf 의 책략별 갈래 → FUN_00424b40). 반환: 표시 글 (칸, 글).
+    /// 대상마다 결과 연출 (실패 45, 능력·상태 표시) 은 post_fx 로 — 책략 연출 뒤에 차례로
     fn apply_strategy(&mut self, u: usize, sid: u8, cell: (i32, i32)) -> Vec<((i32, i32), String)> {
         let mut out = Vec::new();
         let Some(st) = self.strat(sid).cloned() else { return out };
         self.units[u].mp = (self.units[u].mp - self.strat_mp(u, sid)).max(0);
-        let jobs = self.jobs.clone();
+        self.post_fx.clear();
+        let mid = |b: &Battle, t: usize| (b.units[t].x * CELL + CELL / 2, b.units[t].y * CELL + CELL / 2);
+        let pos = |b: &Battle, t: usize| (b.units[t].x, b.units[t].y);
+        // 날씨 (FUN_004261c7 → FUN_0044c36a): 맑음·흐림은 그 날씨인 첫 칸, 비는 비·호우·눈인 마지막 칸 (없으면 맑음 0 / 흐림 6=무작위).
+        // 그 칸이 지금 칸이면 실패 (MEFF 45), 아니면 SE_M_34 와 함께 바뀜. 경험치 20
+        if let Effect::Weather(k) = strategy::effect(sid) {
+            let tbl = WEATHER[(self.weather_kind as usize).min(4)];
+            let to = if k < 2 { (0..6).find(|&i| tbl[i] == k).unwrap_or(6) } else { (0..6).rev().find(|&i| tbl[i] >= 2).unwrap_or(0) } as u8;
+            if to == self.weather_pos {
+                self.post_fx.push((45, vec![mid(self, u)]));
+                out.push((pos(self, u), "실패".to_string()));
+            } else {
+                self.sounds.push("SE_M_34.WAV".into());
+                if let Some(f) = self.set_weather(to) {
+                    self.post_fx.push((f, vec![self.weather_fx_at()]));
+                }
+                out.push((pos(self, u), WEATHER_NAME[self.weather() as usize].to_string()));
+            }
+            self.strat_exp(u, 20);
+            return out;
+        }
         let victims = self.strat_victims(u, sid, cell);
         // 책략 경험치 (원작 FUN_00423593 → FUN_004255a5): 대상마다 계산해 가장 큰 값 × 장비 기본치/10, 조조군만
-        let mut best_exp: u32 = if st.target == 2 { 20 } else { 0 };
+        let mut best_exp: u32 = 0;
         // 시전자 무기 경험치 (정신 무기만): 대상 레벨이 낮으면 2, 아니면 3
         if self.weapon_stat(u) == Some(2) {
             let lu = self.units[u].level;
-            let k = if st.target < 2 && !victims.is_empty() && victims.iter().all(|&t| self.units[t].level < lu) { 2 } else { 3 };
+            let k = if !victims.is_empty() && victims.iter().all(|&t| self.units[t].level < lu) { 2 } else { 3 };
             self.gear_exp(u, 0, k);
         }
-        for t in victims {
-            let pos = (self.units[t].x, self.units[t].y);
-            let hostile = st.target == 0;
-            let terr = self.terr(pos.0, pos.1);
-            let already = matches!(strategy::effect(sid), Effect::Status(bit, _) if self.units[t].status & bit != 0);
-            if !strategy::terrain_ok(sid, terr) || already {
-                let (lc, lt) = (self.units[u].level.max(1) as u32, self.units[t].level.max(1) as u32);
-                best_exp = best_exp.max(if lc < lt { ((lt - lc) * 4 + 10).min(100) } else { 10u32.saturating_sub((lc - lt) >> 1).max(5) });
-                out.push((pos, "효과 없음".to_string()));
-                continue;
-            }
-            let (lc, lt) = (self.units[u].level.max(1) as u32, self.units[t].level.max(1) as u32);
-            let small = if lc < lt { ((lt - lc) * 4 + 10).min(100) } else { 10u32.saturating_sub((lc - lt) >> 1).max(5) };
-            let damage_kind = matches!(sid, 0..=0x15 | 0x21..=0x24 | 0x26 | 0x40 | 0x41);
-            // 팔진도 (원작 FUN_00426574): 성공 판정 없이 대상마다 8가지 중 하나 — 피해, 혼란, 포박, 봉책, 독연 피해+독, 능력 모두 내림, 모두 올림, HP 다 채움
-            let eff = if sid == 0x26 {
-                let k = self.rand(8) as u8;
-                self.bagua.push((t, k));
-                match k {
-                    0 => Effect::Damage(strategy::power(0x26)),
-                    1 => Effect::Status(status::CONFUSE, 0),
-                    2 => Effect::Status(status::PARALYZE, 0),
-                    3 => Effect::Status(status::SEAL, 0),
-                    4 => Effect::Status(status::POISON, strategy::power(0x21)),
-                    5 => Effect::BuffAll(false),
-                    6 => Effect::BuffAll(true),
-                    _ => Effect::HealFull,
-                }
-            } else {
-                strategy::effect(sid)
-            };
-            if hostile && sid != 0x26 && (self.rand(100) as u32) >= self.strat_rate_for(u, t, sid) && !(self.cheat && self.units[u].side != Side::Enemy) {
-                // 실패해도 피해 없는 경우의 경험치
-                best_exp = best_exp.max(small);
-                out.push((pos, "실패".to_string()));
-                continue;
-            }
-            let hp_before = self.units[t].hp;
-            let mut dmg = 0;
-            let text = match eff {
-                Effect::Damage(pw) => {
-                    dmg = self.strat_damage(u, t, pw, st.cat);
-                    format!("{dmg}")
-                }
-                Effect::Instant => {
-                    dmg = self.units[t].hp.max(0);
-                    format!("{dmg}")
-                }
-                Effect::MpDamage(pw) => {
-                    let m = (self.strat_damage(u, t, pw, st.cat)).min(self.units[t].mp);
-                    self.units[t].mp -= m;
-                    format!("MP-{m}")
-                }
-                Effect::Status(bit, pw) => {
-                    if pw > 0 {
-                        dmg = self.strat_damage(u, t, pw, st.cat);
+        match sid {
+            // 청룡 (FUN_00427536): 대상 가운데 산 부대를 무작위로 골라 5번 — 타격마다 MEFF 22
+            64 => {
+                let mut pool = victims.clone();
+                let mut n = 0;
+                while n < 5 && !pool.is_empty() {
+                    let k = self.rand(pool.len() as i32) as usize;
+                    let t = pool[k];
+                    if self.units[t].hp <= 0 {
+                        pool.swap_remove(k);
+                        continue;
                     }
-                    self.units[t].status |= bit;
-                    let name = match bit {
-                        status::POISON => "독",
-                        status::CONFUSE => "혼란",
-                        status::PARALYZE => "마비",
-                        _ => "봉책",
+                    n += 1;
+                    self.post_fx.push((22, vec![mid(self, t)]));
+                    let (txt, e, fx) = self.strat_hit(u, t, sid, Effect::Damage(strategy::power(64)), st.cat);
+                    if let Some(f) = fx {
+                        self.post_fx.push((f, vec![mid(self, t)]));
+                    }
+                    best_exp = best_exp.max(e);
+                    out.push((pos(self, t), txt));
+                }
+            }
+            // 현무 (FUN_00426ea8): 맵의 모든 부대에 7가지 중 하나 — 혼란·포박·봉책·독·능력 모두 내림·모두 올림(이동 포함)·HP 다 채움. 부대마다 SE_M_24
+            66 => {
+                for &t in &victims {
+                    let txt = match self.rand(7) {
+                        0 => self.set_status(t, status::CONFUSE),
+                        1 => self.set_status(t, status::PARALYZE),
+                        2 => self.set_status(t, status::SEAL),
+                        3 => self.set_status(t, status::POISON),
+                        4 => self.strat_hit(u, t, sid, Effect::BuffAll(false, false), st.cat).0,
+                        5 => self.strat_hit(u, t, sid, Effect::BuffAll(true, true), st.cat).0,
+                        _ => self.strat_hit(u, t, sid, Effect::HealFull, st.cat).0,
                     };
-                    if dmg > 0 { format!("{dmg} {name}") } else { name.to_string() }
-                }
-                Effect::Heal(big) => {
-                    let i = self.val(u, 2) as i32;
-                    let h = if big { i / 2 + 70 } else { i / 10 + 40 };
-                    let un = &mut self.units[t];
-                    let h = h.min(un.max_hp - un.hp).max(0);
-                    un.hp += h;
-                    format!("+{h}")
-                }
-                Effect::Mp(n) => {
-                    let items = self.items.clone();
-                    let un = &mut self.units[t];
-                    let m = (n as i32).min(un.off.mp_max(&items) as i32 - un.mp).max(0);
-                    un.mp += m;
-                    format!("MP+{m}")
-                }
-                Effect::Buff(k, up) => {
-                    let s = &mut self.units[t].state[k as usize];
-                    *s = if up { (*s + 1).clamp(4, 5) } else { s.saturating_sub(1).min(2) };
-                    let names = ["공격", "방어", "정신", "순발", "사기"];
-                    format!("{}{}", names[k as usize], if up { "↑" } else { "↓" })
-                }
-                Effect::BuffAll(up) => {
-                    for k in [0, 1, 3, 4] {
-                        let s = &mut self.units[t].state[k];
-                        *s = if up { (*s + 1).clamp(4, 5) } else { s.saturating_sub(1).min(2) };
-                    }
-                    (if up { "능력↑" } else { "능력↓" }).to_string()
-                }
-                Effect::HealFull => {
-                    let un = &mut self.units[t];
-                    let h = (un.max_hp - un.hp).max(0);
-                    un.hp += h;
-                    format!("+{h}")
-                }
-                Effect::Cure => {
-                    self.units[t].status = 0;
-                    "회복".to_string()
-                }
-                Effect::None => String::new(),
-            };
-            if dmg > 0 {
-                self.units[t].hp -= dmg;
-
-                if hostile {
-                    // 맞은 쪽 방어구 경험치: 시전자 레벨이 낮으면 3, 아니면 4
-                    let k = if self.units[u].level < self.units[t].level { 3 } else { 4 };
-                    self.gear_exp(t, 1, k);
+                    self.sounds.push("SE_M_24.WAV".into());
+                    best_exp = best_exp.max(self.small_exp(u, t));
+                    out.push((pos(self, t), txt));
                 }
             }
-            // 적: 피해 책략으로 쓰러뜨리면 큰 값 (승리 목표 장수면 2배), 그 외 작은 값 / 아군: 작은 값 / 날씨: 20
-            let e = if hostile && damage_kind && sid != 0x16 && dmg > 0 && dmg >= hp_before {
-                let k = if lc < lt { ((lt - lc) * 8 + 32).min(200) } else { 32u32.saturating_sub((lc - lt) * 4).max(10) };
-                if self.win_target == Some(self.units[t].person) { k * 2 } else { k }
-            } else if st.target == 2 {
-                20
-            } else {
-                small
-            };
-            best_exp = best_exp.max(e);
-            out.push((pos, text));
+            // 팔진도 (FUN_00426574): 대상마다 8가지 중 하나, 결과별로 MEFF (피해 8 혼란 25 포박 26 봉책 27 독 23 모두 내림 33 모두 올림 17 회복 10)
+            0x26 => {
+                let mut groups: [Vec<(i32, i32)>; 8] = Default::default();
+                let mut after = Vec::new();
+                for &t in &victims {
+                    let k = self.rand(8) as usize;
+                    let eff = match k {
+                        0 => Effect::Damage(strategy::power(0x26)),
+                        1 => Effect::Status(status::CONFUSE, 0),
+                        2 => Effect::Status(status::PARALYZE, 0),
+                        3 => Effect::Status(status::SEAL, 0),
+                        4 => Effect::Status(status::POISON, strategy::power(0x21)),
+                        5 => Effect::BuffAll(false, false),
+                        6 => Effect::BuffAll(true, false),
+                        _ => Effect::HealFull,
+                    };
+                    groups[k].push(mid(self, t));
+                    let (txt, e, fx) = self.strat_hit(u, t, sid, eff, st.cat);
+                    if let Some(f) = fx {
+                        after.push((f, vec![mid(self, t)]));
+                    }
+                    best_exp = best_exp.max(e);
+                    out.push((pos(self, t), txt));
+                }
+                for (k, m) in [8u8, 25, 26, 27, 23, 33, 17, 10].into_iter().enumerate() {
+                    if !groups[k].is_empty() {
+                        self.post_fx.push((m, std::mem::take(&mut groups[k])));
+                    }
+                }
+                self.post_fx.extend(after);
+            }
+            _ => {
+                let eff = strategy::effect(sid);
+                for &t in &victims {
+                    let (txt, e, fx) = self.strat_hit(u, t, sid, eff, st.cat);
+                    if let Some(f) = fx {
+                        self.post_fx.push((f, vec![mid(self, t)]));
+                    }
+                    best_exp = best_exp.max(e);
+                    out.push((pos(self, t), txt));
+                }
+            }
         }
-        if self.units[u].side == Side::Player && best_exp > 0 {
+        self.strat_exp(u, best_exp);
+        out
+    }
+
+    /// 책략 경험치 반영 (조조군만, × 장비 기본치/10) + 레벨업 줄 세우기
+    fn strat_exp(&mut self, u: usize, best: u32) {
+        if self.units[u].side == Side::Player && best > 0 {
             let items = self.items.clone();
-            let e = self.units[u].off.gear_base(&items) * best_exp / 10;
+            let jobs = self.jobs.clone();
+            let e = self.units[u].off.gear_base(&items) * best / 10;
             self.units[u].off.gain_exp(&jobs, e);
         }
         let un = &self.units[u];
@@ -1332,7 +1430,190 @@ impl Battle {
             let lv = un.off.level as i32;
             self.levelups.push_back((u, lv));
         }
-        out
+    }
+
+    /// 작은 경험치 (원작 FUN_00423593): 대상 레벨이 높으면 10+4×차 (최대 100), 아니면 10−차/2 (최소 5)
+    fn small_exp(&self, u: usize, t: usize) -> u32 {
+        let (lc, lt) = (self.units[u].level.max(1) as u32, self.units[t].level.max(1) as u32);
+        if lc < lt { ((lt - lc) * 4 + 10).min(100) } else { 10u32.saturating_sub((lc - lt) >> 1).max(5) }
+    }
+
+    /// 회복 (원작 FUN_0043e658): 작은 정신/10+40, 큰 정신/2+70. 대상 사기/200 확률로 +5+0..5. 표시 글
+    fn strat_heal(&mut self, u: usize, t: usize, big: bool) -> String {
+        let i = self.val(u, 2) as i32;
+        let mut h = if big { i / 2 + 70 } else { i / 10 + 40 };
+        if (self.rand(200) as u32) < self.val(t, 4) {
+            h += 5 + self.rand(6);
+        }
+        let un = &mut self.units[t];
+        let h = h.min(un.max_hp - un.hp).max(0);
+        un.hp += h;
+        format!("+{h}")
+    }
+
+    /// 상태이상 걸기 (원작 FUN_004234bd). 표시 글
+    fn set_status(&mut self, t: usize, bit: u8) -> String {
+        self.units[t].status |= bit;
+        match bit {
+            status::POISON => "독",
+            status::CONFUSE => "혼란",
+            status::PARALYZE => "포박",
+            _ => "봉책",
+        }
+        .to_string()
+    }
+
+    /// 대상 하나에 효과 (원작 FUN_00424b40 의 결과 코드별 처리). 반환: (표시 글, 경험치, 결과 연출)
+    fn strat_hit(&mut self, u: usize, t: usize, sid: u8, eff: Effect, cat: u8) -> (String, u32, Option<u8>) {
+        let hostile = self.units[t].side.hostile(self.units[u].side);
+        let small = self.small_exp(u, t);
+        let hp0 = self.units[t].hp;
+        // 성공 판정 (FUN_0043d5c0 → FUN_0043d84f). 기합·명상·패기·팔진도·현무는 판정 없음
+        let free = matches!(sid, 0x26 | 61 | 62 | 63 | 66);
+        let cheat = self.cheat && self.units[u].side != Side::Enemy;
+        let roll = |b: &mut Self, rs: u8| free || cheat || (b.rand(100) as u32) < b.strat_rate_for(u, t, rs);
+        let mut dmg = 0;
+        let mut fx = None;
+        let fail = "실패".to_string();
+        let text = match eff {
+            // 피해 (FUN_004257d6 → FUN_0043e0ba: 판정에 실패하면 0 → 실패 연출)
+            Effect::Damage(pw) => {
+                if sid == 0x26 || roll(self, sid) {
+                    dmg = self.strat_damage(u, t, pw, cat);
+                }
+                if dmg > 0 { format!("{dmg}") } else { fx = Some(45); fail }
+            }
+            Effect::Instant => {
+                if roll(self, sid) {
+                    dmg = self.units[t].hp.max(0);
+                }
+                if dmg > 0 { format!("{dmg}") } else { fx = Some(45); fail }
+            }
+            Effect::MpDamage(pw) => {
+                let m = if roll(self, sid) { self.strat_damage(u, t, pw, cat).max(1).min(self.units[t].mp) } else { 0 };
+                self.units[t].mp -= m;
+                if m > 0 { format!("MP-{m}") } else { fx = Some(45); fail }
+            }
+            // 상태이상 (FUN_00425be1): 피해(위력 있으면, 따로 판정)와 상태 판정이 따로. 상태는 피해로 쓰러지지 않을 때만
+            Effect::Status(bit, pw) => {
+                let rs = if sid == 0x26 { 0x21 } else { sid };
+                if pw > 0 && roll(self, rs) {
+                    dmg = self.strat_damage(u, t, pw, cat);
+                }
+                let ok = sid == 0x26 || roll(self, sid);
+                let mut txt = if dmg > 0 { format!("{dmg}") } else { String::new() };
+                if ok && dmg < hp0 {
+                    let n = self.set_status(t, bit);
+                    fx = strategy::result_fx(eff);
+                    txt = if txt.is_empty() { n } else { format!("{txt} {n}") };
+                } else if dmg == 0 {
+                    fx = Some(45);
+                    txt = fail;
+                }
+                txt
+            }
+            // 능력 올림·내림 (FUN_004259f3)
+            Effect::Buff(k, up) => {
+                if roll(self, sid) {
+                    self.stat_change(t, k, up);
+                    fx = strategy::result_fx(eff);
+                    let names = ["공격", "방어", "정신", "순발", "사기", "이동"];
+                    let k = if k == 0 && self.mental_class(t) { 2 } else { k };
+                    format!("{}{}", names[k as usize], if up { "↑" } else { "↓" })
+                } else {
+                    fx = Some(45);
+                    fail
+                }
+            }
+            Effect::BuffAll(up, mv) => {
+                for k in [3, 4, 0, 1] {
+                    self.stat_change(t, k, up);
+                }
+                if mv {
+                    self.stat_change(t, 5, up);
+                }
+                if sid != 66 {
+                    fx = strategy::result_fx(eff);
+                }
+                (if up { "능력↑" } else { "능력↓" }).to_string()
+            }
+            // 회복 (FUN_0043e658): 작은 정신/10+40, 큰 정신/2+70. 대상 사기/200 확률로 +5+0..5
+            Effect::Heal(big) => self.strat_heal(u, t, big),
+            // 백호: 판정 (늘 100) 뒤 큰 회복 + 상태이상 치료
+            Effect::Byakko => {
+                if roll(self, sid) {
+                    self.units[t].status = 0;
+                    self.strat_heal(u, t, true)
+                } else {
+                    fail
+                }
+            }
+            Effect::HealFull => {
+                let un = &mut self.units[t];
+                let h = (un.max_hp - un.hp).max(0);
+                un.hp += h;
+                format!("+{h}")
+            }
+            // 조언·헌책: 그 책략의 MP 만큼 (최대 MP 까지)
+            Effect::MpGift => {
+                let n = self.strat(sid).map_or(0, |s| s.mp as i32);
+                let items = self.items.clone();
+                let un = &mut self.units[t];
+                let m = n.min(un.off.mp_max(&items) as i32 - un.mp).max(0);
+                un.mp += m;
+                format!("MP+{m}")
+            }
+            Effect::Cure => {
+                if roll(self, sid) {
+                    self.units[t].status = 0;
+                    fx = strategy::result_fx(eff);
+                    "회복".to_string()
+                } else {
+                    fx = Some(45);
+                    fail
+                }
+            }
+            // 회귀: 행동을 마친 부대가 한 번 더 (FUN_00406a10(부대, 6))
+            Effect::ReAct => {
+                if roll(self, sid) {
+                    self.units[t].acted = false;
+                    fx = strategy::result_fx(eff);
+                    "재행동".to_string()
+                } else {
+                    fx = Some(45);
+                    fail
+                }
+            }
+            // 명상 (FUN_00426404): HP 를 min(HP−1, 50) 만큼 쓰고 그 절반을 MP 로 (최대 MP 까지)
+            Effect::Meditate => {
+                let items = self.items.clone();
+                let un = &mut self.units[t];
+                let cost = if un.hp < 51 { un.hp - 1 } else { 50 };
+                let m = (cost / 2).min(un.off.mp_max(&items) as i32 - un.mp).max(0);
+                un.hp -= cost;
+                un.mp += m;
+                format!("MP+{m}")
+            }
+            Effect::Weather(_) | Effect::Genbu | Effect::None => String::new(),
+        };
+        if dmg > 0 {
+            self.units[t].hp -= dmg.min(self.units[t].hp.max(0));
+            if hostile {
+                // 맞은 쪽 방어구 경험치: 시전자 레벨이 낮으면 3, 아니면 4
+                let k = if self.units[u].level < self.units[t].level { 3 } else { 4 };
+                self.gear_exp(t, 1, k);
+            }
+        }
+        // 적: 피해 책략으로 쓰러뜨리면 큰 값 (승리 목표 장수면 2배), 그 외 작은 값
+        let damage_kind = matches!(sid, 0..=0x15 | 0x21..=0x24 | 0x26 | 0x40 | 0x41);
+        let e = if hostile && damage_kind && sid != 0x16 && dmg > 0 && dmg >= hp0 {
+            let (lc, lt) = (self.units[u].level.max(1) as u32, self.units[t].level.max(1) as u32);
+            let k = if lc < lt { ((lt - lc) * 8 + 32).min(200) } else { 32u32.saturating_sub((lc - lt) * 4).max(10) };
+            if self.win_target == Some(self.units[t].person) { k * 2 } else { k }
+        } else {
+            small
+        };
+        (text, e, fx)
     }
 
     /// 책략 연출. 끝나면 true (원작 FUN_004021bc: 연출을 단계마다 그리고, 표지 1 단계에서 효과)
@@ -1349,7 +1630,6 @@ impl Battle {
                 self.focus(cell.0, cell.1);
             }
             self.cast_stages.clear();
-            self.bagua.clear();
             let id = super::fx::STRATEGY_FX.get(sid as usize).copied().unwrap_or(255);
             if id != 255 {
                 let mid = |(x, y): (i32, i32)| (x * CELL + CELL / 2, y * CELL + CELL / 2);
@@ -1363,7 +1643,6 @@ impl Battle {
                         8 => Some(3),
                         0xD => Some(5),
                         0x12 => Some(7),
-                        0x40 => Some(0x16),
                         0x41 => Some(0x39),
                         0x43 => Some(10),
                         _ => None,
@@ -1384,21 +1663,12 @@ impl Battle {
                 if f.sound_now() {
                     self.sounds.push(format!("SE_M_{:02}.WAV", f.sound));
                 }
-                // 효과는 마지막 연출의 표지 단계에서 (팔진도는 MCALL 이 끝나면 결과를 정하고 결과별 MEFF)
-                let hit = self.cast_stages.is_empty() && sid != 0x26 && (f.hit_now() || !f.has_hit() && f.step == 1);
+                // 효과는 마지막 연출의 표지 단계에서. 팔진도·청룡·현무는 MCALL 이 끝나면 결과를 정하고 결과별 연출 (post_fx)
+                let late = matches!(sid, 0x26 | 0x40 | 0x42);
+                let hit = self.cast_stages.is_empty() && !late && (f.hit_now() || !f.has_hit() && f.step == 1);
                 let done = f.advance();
-                if hit && !self.cast_applied {
+                if (hit || done && late) && !self.cast_applied {
                     self.cast_apply(u, sid, cell);
-                }
-                if done && sid == 0x26 && !self.cast_applied {
-                    self.cast_apply(u, sid, cell);
-                    // 원작 FUN_0042437d: 결과마다 MEFF (피해 8, 혼란 25, 포박 26, 봉책 27, 독 23, 모두 내림 33, 모두 올림 17, 회복 10)
-                    for (k, m) in [(0u8, 8u8), (1, 25), (2, 26), (3, 27), (4, 23), (5, 33), (6, 17), (7, 10)] {
-                        let at: Vec<(i32, i32)> = self.bagua.iter().filter(|b| b.1 == k).map(|b| (self.units[b.0].x * CELL + CELL / 2, self.units[b.0].y * CELL + CELL / 2)).collect();
-                        if !at.is_empty() {
-                            self.cast_stages.push_back((m, at));
-                        }
-                    }
                 }
                 if done && !self.cast_stages.is_empty() {
                     self.fx_req = self.cast_stages.pop_front();
@@ -1419,6 +1689,11 @@ impl Battle {
                     self.cast_apply(u, sid, cell);
                 }
                 if t < 30 {
+                    return false;
+                }
+                // 날씨 띠·실패 같은 뒤 연출
+                if let Some(n) = self.cast_stages.pop_front() {
+                    self.fx_req = Some(n);
                     return false;
                 }
                 self.cast_end = Some(t);
@@ -1452,7 +1727,14 @@ impl Battle {
         self.cast_applied = true;
         let before: Vec<(i32, i32)> = self.units.iter().map(|x| (x.hp, x.mp)).collect();
         let (ex0, lv0) = (self.units[u].off.exp, self.units[u].off.level);
+        let cost = self.strat_mp(u, sid).min(self.units[u].mp);
         let res = self.apply_strategy(u, sid, cell);
+        self.cast_log.push(format!("@  결과 {} (날씨 {})", res.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join(", "), WEATHER_NAME[self.weather() as usize]));
+        let post = std::mem::take(&mut self.post_fx);
+        self.cast_stages.extend(post);
+        // 시전자가 대상이면 (명상·자기 회복) MP 소모를 빼고 바뀐 값을 창으로
+        let mut before = before;
+        before[u].1 -= cost;
         // 시전자(조조군) 경험치 창 (원작 FUN_004255a5 → FUN_00452964): 대상 창들 다음에
         let caster_win = (self.units[u].side == Side::Player && (self.units[u].off.exp, self.units[u].off.level) != (ex0, lv0)).then(|| {
             let un = &self.units[u];
@@ -1461,7 +1743,6 @@ impl Battle {
         });
         // 맞는 순간 대상 칸에 양 (HP 변화, 없으면 MP 변화)
         self.cast_nums = (0..self.units.len())
-            .filter(|&i| i != u)
             .filter_map(|i| {
                 let b = before.get(i)?;
                 let (dh, dm) = (self.units[i].hp.max(0) - b.0.max(0), self.units[i].mp - b.1);
@@ -1471,7 +1752,7 @@ impl Battle {
             .collect();
         // 값이 바뀐 부대마다 창 (원작은 대상마다 차례로)
         // 시전자의 MP 소모는 창으로 안 띄움 (원작은 대상만)
-        let changed: Vec<usize> = (0..self.units.len()).filter(|&i| i != u && before.get(i).is_some_and(|b| *b != (self.units[i].hp, self.units[i].mp))).collect();
+        let changed: Vec<usize> = (0..self.units.len()).filter(|&i| before.get(i).is_some_and(|b| *b != (self.units[i].hp, self.units[i].mp))).collect();
         if !changed.is_empty() {
             for i in changed {
                 let un = &self.units[i];
@@ -1520,16 +1801,18 @@ impl Battle {
         if !in_range {
             return 0;
         }
+        if !self.strat_usable(u, sid) || matches!(sid, 0x40 | 0x42) {
+            return 0;
+        }
         let side = self.units[u].side;
         let mut score = 0;
-        for (dx, dy) in st.area_offsets() {
-            let Some(t) = self.at(cell.0 + dx, cell.1 + dy) else { continue };
+        for t in self.strat_victims(u, sid, cell) {
             if t == u && st.target == 0 {
                 continue;
             }
             let hostile = self.units[t].side.hostile(side);
             match strategy::effect(sid) {
-                Effect::Damage(pw) | Effect::Status(_, pw) if hostile && st.target == 0 && strategy::terrain_ok(sid, self.terr(cell.0 + dx, cell.1 + dy)) => {
+                Effect::Damage(pw) | Effect::Status(_, pw) if hostile && st.target == 0 => {
                     let (ia, id) = (self.val(u, 2), self.val(t, 2));
                     let mut v = self.units[u].level.max(1) + 25;
                     v += (ia as i32 - id as i32) / 3;
@@ -1625,7 +1908,20 @@ impl Battle {
             // 포박·봉책·독은 그 확률, 혼란은 max(10, 사기−15) (100 이면 확실)
             let cure = if self.sp(i, 0x14).is_some() { 100 } else { self.units[i].off.base[4] as i32 };
             let mut cleared = 0u8;
+            // 군악대 (원작 FUN_0043e8e6 → FUN_0043f218): 둘레 8칸에 같은 편 병과 12 가 있으면 상태이상 모두 풀림
+            let (x, y) = (self.units[i].x, self.units[i].y);
+            let band = self.units[i].status != 0
+                && (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (dx, dy))).filter(|&d| d != (0, 0)).any(|(dx, dy)| {
+                    self.at(x + dx, y + dy).is_some_and(|o| self.units[o].side == side && self.units[o].job < 0x27 && self.units[o].job / 3 == 12)
+                });
+            if band {
+                cleared = self.units[i].status;
+                self.queue_effect(Some(44), FxEffect { u: i, set: 0, clear: cleared, stat: None });
+            }
             for bit in [status::PARALYZE, status::SEAL, status::CONFUSE, status::POISON] {
+                if cleared & bit != 0 {
+                    continue;
+                }
                 if self.units[i].status & bit == 0 {
                     continue;
                 }
@@ -1644,17 +1940,19 @@ impl Battle {
                 let (x, y) = (un.x, un.y);
                 self.popup = Some((x * CELL + 4 - self.cam.0, y * CELL - 8 - self.cam.1, format!("독 -{d}"), 30));
             }
-            // 능력 상태 복귀 (원작 FUN_0043ea85): 0·1 → 한 칸 오름, 5 → 한 칸 내림,
-            // 4 → 사기에 따른 확률(사기 51 미만 60−사기 %, 그 외 10 %)로 보통, 2 → 20 % 로 보통
+            // 능력 상태 복귀 (원작 FUN_0043ea85, 이동 포함 6가지): 0·1 → 한 칸 오름, 5 이상 → 한 칸 내림,
+            // 4 → 사기에 따른 확률(사기 51 미만 60−사기 %, 그 외 10 %)로 보통, 2 → 기본 사기 % (태평청령서면 100 — FUN_0043e848(부대, 1)) 로 보통
             let morale = self.units[i].off.base[4] as i32;
             let up_chance = if morale < 51 { (60 - morale).max(0) } else { 10 };
-            for k in 0..5 {
+            let down_chance = cure;
+            for k in 0..6 {
                 let r = self.rand(100);
-                let st = &mut self.units[i].state[k];
+                let un = &mut self.units[i];
+                let st = if k == 5 { &mut un.mv_state } else { &mut un.state[k] };
                 match *st {
                     0 | 1 => *st += 1,
                     4 if r < up_chance => *st = 3,
-                    2 if r < 20 => *st = 3,
+                    2 if r < down_chance => *st = 3,
                     5.. => *st -= 1,
                     _ => {}
                 }
@@ -1772,12 +2070,12 @@ impl Battle {
 
     /// 명중률 (원작 FUN_0043d61d, 순발력 비교)
     fn hit_rate(&self, a: usize, d: usize) -> u32 {
-        // 혼란한 상대는 반드시 맞음, 거울갑옷('8') 은 원거리(그룹 2·4·5) 공격을 안 맞음
-        if self.units[d].status & status::CONFUSE != 0 {
-            return 100;
-        }
+        // 거울갑옷('8') 은 원거리(그룹 2·4·5) 공격을 안 맞음 (혼란해도), 그다음 혼란한 상대는 반드시 맞음
         if self.sp(d, 0x38).is_some() && matches!(self.group(a), 2 | 4 | 5) {
             return 0;
+        }
+        if self.units[d].status & status::CONFUSE != 0 {
+            return 100;
         }
         let mut r = self.hit_rate_base(a, d);
         if let Some(v) = self.sp(a, 0x27) {
@@ -2267,7 +2565,10 @@ impl Battle {
                         let k = ((my - by - 8) / 22) as usize;
                         if let Some(&sid) = list.get(k) {
                             let need = self.strat_mp(unit, sid);
-                            if self.units[unit].mp >= need {
+                            if !self.strat_usable(unit, sid) {
+                                // 원작 FUN_00422439 → FUN_00431c4c(2)
+                                self.message = Some(("지금은 쓸 수 없습니다".into(), 40));
+                            } else if self.units[unit].mp >= need {
                                 let cells = self.strat_cells(unit, sid);
                                 self.phase = Phase::StratTarget { unit, from, sid, cells };
                             } else {
@@ -3320,6 +3621,8 @@ impl Battle {
             _ => "아군",
         };
         draw_text(scr, f, 8, 4, &format!("{}턴/{}  {}", self.turn, self.turn_limit, side_name), story::TEXT);
+        // 날씨 (원작은 따로 날씨 창 — WEATHER.E5)
+        draw_text(scr, f, 640 - 8 - 32, 4, WEATHER_NAME[self.weather() as usize], story::TEXT);
         if !self.objective.is_empty() {
             draw_text(scr, f, 200, 4, &self.objective, story::NAME);
         }

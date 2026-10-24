@@ -15,7 +15,7 @@ pub struct Strategy {
     pub learn: Vec<u8>,
 }
 
-/// 효과 종류
+/// 효과 종류 (원작 FUN_00427cbf 의 책략별 갈래 → FUN_00424b40 의 결과 코드)
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Effect {
     /// 피해 (위력 ×10%)
@@ -26,18 +26,28 @@ pub enum Effect {
     MpDamage(u32),
     /// 회복: 작은(정신력/10+40) / 큰(정신력/2+70)
     Heal(bool),
-    /// MP 회복
-    Mp(u32),
-    /// 능력 상태 바꾸기 (능력 번호, 올림?)
+    /// MP 주기: 그 책략의 MP 만큼 (원작 FUN_0043e658 0x2c/0x2d)
+    MpGift,
+    /// 능력 상태 (0 공격(책사 계열은 정신) 1 방어 3 순발 4 사기 5 이동, 올림?)
     Buff(u8, bool),
     /// 상태이상 (비트) + 피해 위력
     Status(u8, u32),
     /// 상태이상 치료
     Cure,
-    /// 공격·방어·순발·사기 모두 (올림?) — 팔진도 결과 (원작 0x6f / 0xaf)
-    BuffAll(bool),
-    /// HP 다 채움 — 팔진도 결과 (원작 FUN_0043e658 0x26: 최대 HP − HP)
+    /// 공격·방어·순발·사기 모두 (올림?, 이동도?) — 패기·팔진도·현무 (원작 0x6f / 0xaf)
+    BuffAll(bool, bool),
+    /// HP 다 채움 — 팔진도·현무 (원작 FUN_0043e658 0x26/0x42: 최대 HP − HP)
     HealFull,
+    /// 한 번 더 행동 (원작 57 회귀, 0xb8 → FUN_00406a10(부대, 6))
+    ReAct,
+    /// 날씨 바꾸기 (원작 FUN_004261c7): 0 맑게 1 흐리게 2 비
+    Weather(u8),
+    /// HP 를 MP 로 (원작 62 명상, FUN_00426404)
+    Meditate,
+    /// 현무: 맵의 모든 부대에 무작위 효과 (FUN_00426ea8)
+    Genbu,
+    /// 백호: 모든 아군 큰 회복 + 치료 (FUN_00426bab)
+    Byakko,
     None,
 }
 
@@ -56,12 +66,17 @@ pub mod status {
 /// 책략 성공률 배율 % (원작 FUN_0043d84f 의 switch)
 pub fn rate_scale(id: u8) -> u32 {
     match id {
-        1 | 2 | 6 | 7 | 0xB | 0xD | 0xE | 0x10 | 0x16 | 0x17 | 0x19 | 0x21 | 0x32 | 0x34 => 90,
+        1 | 2 | 6 | 7 | 0xB | 0xD | 0xE | 0x10 | 0x16 | 0x17 | 0x19 | 0x21 | 0x2F | 0x32 | 0x34 => 90,
         3 | 8 | 0x12 | 0x18 | 0x1A | 0x1B | 0x1D | 0x1F | 0x22 | 0x23 | 0x25 | 0x36 | 0x38 => 80,
         4 | 0x14 | 0x1C | 0x1E | 0x24 => 60,
         0x20 => 50,
         _ => 100,
     }
+}
+
+/// 성공률이 늘 100 인 책략 (원작 FUN_0043d84f: 팔진도·회복·조언·강행·분기·견고·회귀·백호·각성)
+pub fn rate_always(id: u8) -> bool {
+    matches!(id, 0x26..=0x2E | 0x30 | 0x35 | 0x37 | 0x39 | 0x43)
 }
 
 /// 계통별 지형 제한 (원작 FUN_00422aba: 불 0-4, 물 5-9, 바람 10-14, 땅 15-19)
@@ -99,20 +114,48 @@ pub fn effect(id: u8) -> Effect {
         33 | 34 => Effect::Status(POISON, power(id)),
         35 | 36 => Effect::Status(PARALYZE, power(id)),
         37 => Effect::Status(SEAL, 0),
+        // 내림 (FUN_0042334a): 둔병 순발, 허탈 사기, 압박 공격(책사는 정신), 욕설 방어
         23 | 24 => Effect::Buff(3, false),
         25 | 26 => Effect::Buff(4, false),
         27 | 28 => Effect::Buff(0, false),
         29 | 30 => Effect::Buff(1, false),
-        39 | 41 | 61 => Effect::Heal(false),
-        40 | 42 | 43 | 67 => Effect::Heal(true),
-        44 | 62 => Effect::Mp(20),
-        45 => Effect::Mp(40),
+        39 | 41 => Effect::Heal(false),
+        40 | 42 | 43 => Effect::Heal(true),
+        44 | 45 => Effect::MpGift,
         46 | 47 => Effect::Cure,
-        48 => Effect::Buff(3, true),
-        49 | 50 | 53 | 54 | 63 => Effect::Buff(0, true),
+        // 올림: 강행 이동, 연병 순발, 고양 사기, 분기·기합 공격(책사는 정신), 견고 방어
+        48 => Effect::Buff(5, true),
+        49 | 50 => Effect::Buff(3, true),
         51 | 52 => Effect::Buff(4, true),
-        55 | 56 | 66 => Effect::Buff(1, true),
+        53 | 54 | 61 => Effect::Buff(0, true),
+        55 | 56 => Effect::Buff(1, true),
+        57 => Effect::ReAct,
+        58 => Effect::Weather(2),
+        59 => Effect::Weather(0),
+        60 => Effect::Weather(1),
+        62 => Effect::Meditate,
+        63 => Effect::BuffAll(true, false),
+        66 => Effect::Genbu,
+        67 => Effect::Byakko,
         _ => Effect::None,
+    }
+}
+
+/// 책략 결과 연출 (원작 FUN_00424b40: 결과 코드 → MEFF). 실패 45
+pub fn result_fx(e: Effect) -> Option<u8> {
+    match e {
+        Effect::Buff(k, false) => Some([39, 40, 39, 41, 42, 0][k as usize]).filter(|&v| v != 0),
+        Effect::Buff(k, true) => Some([34, 35, 34, 36, 37, 46][k as usize]),
+        Effect::BuffAll(false, _) => Some(43),
+        Effect::BuffAll(true, _) => Some(38),
+        Effect::Status(b, _) => match b {
+            status::CONFUSE => Some(48),
+            status::POISON => Some(49),
+            status::PARALYZE => Some(50),
+            _ => Some(51),
+        },
+        Effect::Cure | Effect::ReAct => Some(44),
+        _ => None,
     }
 }
 

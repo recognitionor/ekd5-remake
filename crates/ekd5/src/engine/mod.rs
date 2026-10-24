@@ -2141,6 +2141,9 @@ impl<A: Assets> Engine<A> {
             // 전투 설정 (원작 FUN_004146c1): 인자 2 턴 제한, 5 승리 목표 장수, 7 패배 목표 장수 (0xFFFF 없음)
             0x45 => {
                 b.turn_limit = a(2);
+                // 날씨: 인자 8 기후 (0xFFFF 0), 9 첫 칸 (0xFFFF 1) — 원작 FUN_004146c1 → 0x4be480 +0x11 / +4
+                b.weather_kind = if a(8) == 0xFFFF { 0 } else { a(8).clamp(0, 4) as u8 };
+                b.weather_pos = if a(9) == 0xFFFF { 1 } else { a(9).clamp(0, 5) as u8 };
                 let who = |v: i32| (v != 0xFFFF && v >= 0).then_some(v as usize);
                 b.win_target = who(a(5));
                 b.lose_target = who(a(7));
@@ -2744,6 +2747,13 @@ impl<A: Assets> Engine<A> {
         match b.phase.clone() {
             battle::Phase::Script => {}
             battle::Phase::TurnBanner { t, side } => {
+                if t == 0 && side == battle::Side::Player && b.turn > 1 {
+                    // 새 턴: 날씨가 옮겨 감 (원작 FUN_00450f0b → FUN_0044c102(.., 0xff)), 바뀌면 날씨 띠 연출
+                    if let Some(f) = b.set_weather(0xFF) {
+                        let at = b.weather_fx_at();
+                        b.fx_queue.push_front((f, vec![at], None));
+                    }
+                }
                 if t == 0 {
                     // 차례가 바뀌면 원작은 맵 전체를 다시 그림 → 스크립트 동작 자세가 풀림
                     for u in b.units.iter_mut() {
