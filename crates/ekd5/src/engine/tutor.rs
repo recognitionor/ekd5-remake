@@ -32,9 +32,10 @@ pub struct Tutor {
 }
 
 /// 공통 기록 문자열: "c1;엔딩 비트;보물 번호들"
-pub fn common_string(endings: u8, book: &[bool]) -> String {
+/// 회차 공통 기록: c1;엔딩 비트;보물도감 번호들;본 안내 비트 (원작에 없는 편의 기능)
+pub fn common_string(endings: u8, book: &[bool], hints: u32) -> String {
     let ids: Vec<String> = book.iter().enumerate().filter(|(_, &b)| b).map(|(i, _)| i.to_string()).collect();
-    format!("c1;{endings};{}", ids.join(","))
+    format!("c1;{endings};{};{hints}", ids.join(","))
 }
 
 impl<A: Assets> Engine<A> {
@@ -59,7 +60,7 @@ impl<A: Assets> Engine<A> {
             }
         }
         if changed {
-            self.common_out = Some(common_string(self.endings, &self.book));
+            self.common_out = Some(common_string(self.endings, &self.book, self.hints));
         }
     }
 
@@ -75,6 +76,7 @@ impl<A: Assets> Engine<A> {
             return;
         }
         self.endings = f.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+        self.hints = f.get(3).and_then(|v| v.parse().ok()).unwrap_or(0);
         for i in f.get(2).unwrap_or(&"").split(',').filter_map(|v| v.parse::<usize>().ok()) {
             if i < self.book.len() {
                 self.book[i] = true;

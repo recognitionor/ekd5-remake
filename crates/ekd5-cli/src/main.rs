@@ -325,6 +325,32 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
                 }
             }
         }
+        // 시험: EKD5_INFO="틱:탭" — 그 틱에 첫 조조군 부대의 장수 정보 창 (탭 0 능력 1 장비 2 책략 3 열전 4 부대특성, 9 = 안내 보기)
+        if let Some((it, tab)) = std::env::var("EKD5_INFO").ok().and_then(|v| { let (a, b) = v.split_once(':')?; Some((a.parse::<u32>().ok()?, b.parse::<u8>().ok()?)) }) {
+            if it == t {
+                let list: Vec<ekd5::engine::info::Who> = match &eng.scene {
+                    ekd5::engine::Scene::Battle(b) => (0..b.units.len()).filter(|&i| b.units[i].visible && b.units[i].hp > 0 && b.units[i].side == ekd5::engine::battle::Side::Player).map(ekd5::engine::info::Who::Unit).collect(),
+                    _ => eng.roster.iter().map(|&p| ekd5::engine::info::Who::Person(p)).collect(),
+                };
+                if tab != 9 {
+                    eng.hints |= 2;
+                }
+                eng.open_info(list, 0);
+                if let Some(ui) = eng.info_ui.as_mut() {
+                    ui.tab = tab.min(4);
+                    ui.strat_sel = Some(0);
+                }
+                println!("[{t:>6}] 장수 정보 시험 탭 {tab}");
+            }
+        }
+        // 시험: EKD5_EQUIP=틱 — 그 틱 뒤 처음 본진이 열리면 자동 진행을 멈추고 장비 화면 (처음 안내 포함)
+        if let Some(et) = std::env::var("EKD5_EQUIP").ok().and_then(|v| v.parse::<u32>().ok()) {
+            if t >= et && eng.autoplay && eng.camp.is_some() {
+                eng.autoplay = false;
+                eng.open_equip();
+                println!("[{t:>6}] 장비 화면 시험");
+            }
+        }
         // 시험: EKD5_TOOL=틱 — 그 틱에 첫 조조군 부대가 자기에게 첫 소모품을 씀 (도구 쓰기 연출)
         if std::env::var("EKD5_TOOL").ok().and_then(|v| v.parse::<u32>().ok()) == Some(t) {
             let items = eng.items.clone();

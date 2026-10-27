@@ -30,6 +30,8 @@ const SLOTS: [(i32, i32, i32, i32); 3] = [(RX, 214, 256, 74), (RX, 292, 256, 74)
 const PREV_BTN: (i32, i32, i32, i32) = (RX, 444, 92, 26);
 const NEXT_BTN: (i32, i32, i32, i32) = (RX + 96, 444, 92, 26);
 const END_BTN: (i32, i32, i32, i32) = (RX + 192, 444, 64, 26);
+/// 아이템 정보 단추 (원작은 오른쪽 클릭 — 터치용)
+const INFO_BTN: (i32, i32, i32, i32) = (LIST.0, 444, 130, 26);
 const UP_BTN: (i32, i32, i32, i32) = (LIST.0 + LIST.2 - 20, ROW_Y, 16, 20);
 const DOWN_BTN: (i32, i32, i32, i32) = (LIST.0 + LIST.2 - 20, ROW_Y + ROWS as i32 * ROW_H - 20, 16, 20);
 const INFO: (i32, i32, i32, i32) = (110, 40, 420, 400);
@@ -73,6 +75,8 @@ pub struct EquipUi {
     faces: HashMap<usize, Pic>,
     /// 구입 화면 (원작 대화상자 327): 목록이 창고 대신 그 장의 상점 물건
     pub shop: Option<Shop>,
+    /// 처음 열 때 안내 (아이템 정보 보는 법)
+    pub hint: bool,
 }
 
 /// 구입 (원작 FUN_0046a498 무기·방어구: 고른 장수가 쓸 수 있는 것만, 사면 바로 장비하고 원래 것은 창고로 /
@@ -163,7 +167,7 @@ impl<A: Assets> Engine<A> {
     /// 장비 열기 (본진 장비 단추·메뉴)
     pub fn open_equip(&mut self) {
         let pids = if self.roster.is_empty() { vec![0] } else { self.roster.clone() };
-        self.equip_ui = Some(EquipUi { pids, cur: 0, sel: None, top: 0, pending: None, drag: None, info: None, pick: None, faces: HashMap::new(), shop: None });
+        self.equip_ui = Some(EquipUi { pids, cur: 0, sel: None, top: 0, pending: None, drag: None, info: None, pick: None, faces: HashMap::new(), shop: None, hint: self.hints & super::info::HINT_EQUIP == 0 });
     }
 
     /// 구입 열기 (본진 구입 단추·메뉴)
@@ -544,11 +548,22 @@ impl<A: Assets> Engine<A> {
             self.equip_ui = Some(ui);
             return;
         }
-        // 정보 보기 (오른쪽 클릭·길게 누르기)
-        if inp.alt {
+        // 처음 안내: 아무 데나 누르면 닫음
+        if ui.hint {
+            if inp.click || inp.alt || inp.pressed & (key::CANCEL | key::DECIDE) != 0 {
+                ui.hint = false;
+                self.hint_seen(super::info::HINT_EQUIP);
+            }
+            self.equip_ui = Some(ui);
+            return;
+        }
+        // 정보 보기 (오른쪽 클릭·길게 누르기, 또는 고른 뒤 [아이템 정보] 단추)
+        let info_btn = inp.click && inp.mouse.is_some_and(|m| inside(m, INFO_BTN));
+        if inp.alt || info_btn {
             if let Some(m) = inp.mouse {
                 let o = self.officer(p);
-                match Self::equip_hit(&ui, m, n) {
+                let hit = if info_btn { ui.sel } else { Self::equip_hit(&ui, m, n) };
+                match hit {
                     Some(Sel::Row(k)) => {
                         let (id, lv) = rows[k];
                         ui.sel = Some(Sel::Row(k));
@@ -959,6 +974,8 @@ impl<A: Assets> Engine<A> {
             draw_text(scr, f, b.0 + (b.2 - text_w(label)) / 2, b.1 + 5, label, if on { TEXT } else { dark });
         }
         draw_text(scr, f, LIST.0 + 120, LIST.1 + LIST.3 - 22, "길게 누르기 = 정보", dark);
+        frame_box(scr, INFO_BTN.0, INFO_BTN.1, INFO_BTN.2, INFO_BTN.3);
+        draw_text(scr, f, INFO_BTN.0 + (INFO_BTN.2 - text_w("아이템 정보")) / 2, INFO_BTN.1 + 5, "아이템 정보", if ui.sel.is_some() { TEXT } else { dark });
         // 구입 확인 (원작 "%s%s 금 %d 입니다.\n구입해도 좋습니까?", 도구는 개수)
         if let Some((msg, q, ask)) = &confirm_text {
             let (x, y, w, h) = CONFIRM;
@@ -996,8 +1013,20 @@ impl<A: Assets> Engine<A> {
             let hi = nearest(&pal, [208, 176, 112]);
             l.render(scr, f, hi);
         }
+        let hint = ui.hint;
         if let Some((id, lv, exp)) = ui.info {
             self.draw_item_info(id, lv, exp);
+        }
+        if hint {
+            let Some(f) = self.font.as_ref() else { return };
+            let scr = &mut self.screen;
+            let (hx, hy, hw, hh) = (100, 150, 440, 150);
+            frame_box(scr, hx, hy, hw, hh);
+            scr.fill(hx + 2, hy + 2, hw - 4, 20, navy);
+            draw_text(scr, f, hx + 10, hy + 4, "안내", white);
+            for (i, l) in ["아이템의 효과와 설명을 보려면", "아이템을 고른 뒤 왼쪽 아래 [아이템 정보]", "단추를 누르거나, 아이템을 길게 누르세요.", "(장착은 고른 것을 한 번 더 누르면 됩니다)"].iter().enumerate() {
+                draw_text(scr, f, hx + 14, hy + 34 + i as i32 * 24, l, TEXT);
+            }
         }
     }
 

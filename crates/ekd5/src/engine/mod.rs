@@ -8,6 +8,7 @@ pub mod duel;
 pub mod equip;
 pub mod fx;
 pub mod icons;
+pub mod info;
 pub mod quick;
 pub mod tutor;
 pub mod screen;
@@ -195,6 +196,10 @@ pub struct Engine<A: Assets> {
     /// 회차 공통 기록 (원작 SVCMN.E5S): 본 엔딩 비트, 보물도감
     pub endings: u8,
     pub book: Vec<bool>,
+    /// 본 안내 (info::HINT_*) — 회차 공통 기록에 함께
+    pub hints: u32,
+    /// 장수 정보 창 (원작 대화상자 166)
+    pub info_ui: Option<info::InfoUi>,
     /// 웹이 저장할 공통 기록
     pub common_out: Option<String>,
     pub tutor: Option<tutor::Tutor>,
@@ -313,6 +318,8 @@ impl<A: Assets> Engine<A> {
             sprite_over: Default::default(),
             endings: 0,
             book: vec![false; 0x68],
+            hints: 0,
+            info_ui: None,
             common_out: None,
             tutor: None,
             icons: Rc::new(icons::Icons::default()),
@@ -767,6 +774,10 @@ impl<A: Assets> Engine<A> {
                         }
                     }
                 }
+                if self.info_ui.is_some() {
+                    self.update_info();
+                    return;
+                }
                 if self.sortie_ui.is_some() {
                     let depart = self.sortie_ui.as_ref().and_then(|u| u.depart);
                     match self.update_sortie() {
@@ -797,6 +808,27 @@ impl<A: Assets> Engine<A> {
                 self.update_scene();
                 self.run_script();
                 self.update_battle();
+                // 전투: 부대를 길게 누르면 장수 정보 (같은 편 부대들을 앞·다음으로)
+                if let Some(b) = self.battle() {
+                    if let Some(u) = b.open_info.take() {
+                        let side = b.units[u].side;
+                        let list: Vec<usize> = (0..b.units.len()).filter(|&i| b.units[i].side == side && b.units[i].visible && b.units[i].hp > 0).collect();
+                        let cur = list.iter().position(|&i| i == u).unwrap_or(0);
+                        let list = list.into_iter().map(info::Who::Unit).collect();
+                        if !self.autoplay {
+                            self.open_info(list, cur);
+                        }
+                    }
+                    // 처음 부대를 누르면 안내 한 번
+                    if self.hints & info::HINT_BATTLE == 0 && !self.autoplay {
+                        if let Some(b) = self.battle() {
+                            if b.unit_tapped {
+                                b.message = Some(("부대를 길게 누르면 장수 정보를 볼 수 있습니다".into(), 150));
+                                self.hint_seen(info::HINT_BATTLE);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1945,7 +1977,7 @@ impl<A: Assets> Engine<A> {
                     self.endings |= 1 << a(0);
                 }
                 self.note_treasures();
-                self.common_out = Some(tutor::common_string(self.endings, &self.book));
+                self.common_out = Some(tutor::common_string(self.endings, &self.book, self.hints));
                 self.sounds.push(Sound::Ending(a(0)));
                 self.sounds.push(Sound::Music(None));
                 self.sounds.push(Sound::EffectStop);
@@ -3214,6 +3246,7 @@ impl<A: Assets> Engine<A> {
         self.render_camp();
         self.render_equip();
         self.render_sortie();
+        self.render_info();
         let scr = &mut self.screen;
         if let Some(e) = &self.error {
             if let Some(f) = &self.font {

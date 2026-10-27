@@ -320,6 +320,12 @@ pub struct Battle {
     pub shout: Option<usize>,
     /// 도구 쓰기 연출의 아이템 그림 (32×32, 엔진이 넣어 줌)
     pub tool_pic: Option<Rc<Pic>>,
+    /// 장수 정보 창 열기 요청 (부대) — 길게 누르기·오른쪽 클릭 (원작 FUN_0047b36a)
+    pub open_info: Option<usize>,
+    /// 부대를 눌러 본 적이 있나 (처음 안내용)
+    pub unit_tapped: bool,
+    /// 정보 창을 연 누름이 끝날 때까지 탭 무시
+    suppress_tap: bool,
     /// 아이템 얻기 연출 (부대, 아이템, 틱) — 원작 FUN_0045b8fb: 부대 칸 위로 32×32 그림이 8단위 동안 떠오름
     pub item_rise: Option<(usize, u8, u32)>,
     pub item_pic: Option<Rc<Pic>>,
@@ -509,6 +515,9 @@ impl Battle {
             bow_hold: 0,
             shout: None,
             tool_pic: None,
+            open_info: None,
+            unit_tapped: false,
+            suppress_tap: false,
             item_rise: None,
             item_pic: None,
             event_unit: None,
@@ -2411,6 +2420,14 @@ impl Battle {
             self.end_player_turn();
             return true;
         }
+        // 정보 창을 닫은 누름은 손을 뗄 때까지 무시
+        if self.suppress_tap {
+            self.drag = None;
+            if inp.held & key::DECIDE != 0 || inp.click {
+                return false;
+            }
+            self.suppress_tap = false;
+        }
         let mut tapped = self.drag_input(inp);
         // 키보드
         let mut dc = (0, 0);
@@ -2432,6 +2449,19 @@ impl Battle {
         if let Some(c) = tapped {
             self.cursor = c;
         }
+        // 길게 누르기·오른쪽 클릭: 그 부대의 장수 정보
+        if inp.alt && matches!(self.phase, Phase::PlayerIdle | Phase::Selected { .. }) {
+            if let Some(u) = inp.mouse.and_then(|(mx, my)| {
+                let c = self.cell_at_screen(mx, my);
+                self.at(c.0, c.1)
+            }) {
+                self.phase = Phase::PlayerIdle;
+                self.open_info = Some(u);
+                self.suppress_tap = true;
+                self.drag = None;
+                return false;
+            }
+        }
         match self.phase.clone() {
             Phase::PlayerIdle => {
                 // 위쪽 띠 오른쪽 [메뉴] (원작 메뉴 막대) 또는 웹 메뉴 버튼
@@ -2440,6 +2470,7 @@ impl Battle {
                     self.phase = self.sys_menu();
                 } else if let Some(c) = tapped {
                     if let Some(u) = self.at(c.0, c.1) {
+                        self.unit_tapped = true;
                         if self.units[u].side == Side::Player && !self.units[u].acted {
                             let cells = self.reachable(u);
                             self.phase = Phase::Selected { unit: u, cells };

@@ -66,7 +66,7 @@ pub const CAMP_BTN_Y: i32 = 390;
 fn menu_box() -> ListBox {
     let mut m = ListBox::new("본진", 220);
     m.y = 120;
-    for t in ["대화", "장비", "구입", "매각", "도구 보기", "보물도감", "출진"] {
+    for t in ["대화", "장비", "구입", "매각", "도구 보기", "보물도감", "장수 정보", "출진"] {
         m.push(t, "", true);
     }
     m
@@ -274,7 +274,13 @@ impl<A: Assets> Engine<A> {
                     let ids = (0..0x68u8).filter(|&i| self.is_treasure(i)).map(|i| self.book.get(i as usize).copied().unwrap_or(false).then_some((i, 1))).collect();
                     camp.view = CampView::Items(self.book_box(), ids);
                 }
-                Pick::Row(6) => return self.camp_depart(camp),
+                Pick::Row(6) => {
+                    // 장수 정보 (원작 대화상자 166)
+                    let list: Vec<super::info::Who> = self.roster.iter().map(|&p| super::info::Who::Person(p)).collect();
+                    camp.view = CampView::Field;
+                    self.open_info(list, 0);
+                }
+                Pick::Row(7) => return self.camp_depart(camp),
                 Pick::Cancel => camp.view = CampView::Field,
                 _ => camp.view = CampView::Menu(m),
             },
