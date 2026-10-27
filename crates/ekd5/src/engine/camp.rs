@@ -39,7 +39,8 @@ pub enum CampView {
     Talk(ListBox, Vec<usize>),
     /// 단추 첫 사용 지시 대사 중 (원작 FUN_0041c4b2: 0 매각, 1 구입, 2 장비) — 끝나면 그 화면
     Order(u8),
-    Items(ListBox),
+    /// 목록 + 줄마다 아이템 (아이템, 레벨)
+    Items(ListBox, Vec<Option<(u8, u8)>>),
     /// 대화 블록 실행 중
     Running,
 }
@@ -54,6 +55,8 @@ pub struct Camp {
     pub talks: Vec<(usize, usize)>,
     /// 이번 본진에서 단추 지시 대사를 했나 (매각, 구입, 장비)
     pub ordered: [bool; 3],
+    /// 아이템 정보 창 (원작 대화상자 167 — 소유 아이템 일람·보물도감에서 누르면): 아이템, 레벨, Exp
+    pub info: Option<(u8, u8, Option<u8>)>,
 }
 
 /// 본진 단추 (화면 x, 그림 번호: 묶음 4 안 순서 0 출진 1 매각 2 구입 3 장비)
@@ -124,7 +127,7 @@ impl<A: Assets> Engine<A> {
         }
         self.log.push("본진".into());
         self.last_camp_rule = Some(rule.clone());
-        self.camp = Some(Camp { section, rule, view: CampView::Field, depart, talks, ordered: [false; 3] });
+        self.camp = Some(Camp { section, rule, view: CampView::Field, depart, talks, ordered: [false; 3], info: None });
     }
 
     pub(super) fn run_camp_block(&mut self, body: usize, section: usize) {
@@ -177,6 +180,14 @@ impl<A: Assets> Engine<A> {
         }
         if std::mem::take(&mut self.camp_menu) {
             camp.view = CampView::Menu(menu_box());
+        }
+        // 아이템 정보 창: 아무 데나 누르거나 취소하면 닫음
+        if camp.info.is_some() {
+            if inp.click || inp.alt || inp.pressed & (key::CANCEL | key::DECIDE) != 0 {
+                camp.info = None;
+            }
+            self.camp = Some(camp);
+            return true;
         }
         let persons = self.persons.clone();
         let name = |p: usize| persons.get(p).map(|x| x.name.clone()).unwrap_or_default();
@@ -255,8 +266,14 @@ impl<A: Assets> Engine<A> {
                     camp.view = CampView::Field;
                     self.camp_order(&mut camp, 0);
                 }
-                Pick::Row(4) => camp.view = CampView::Items(self.items_box()),
-                Pick::Row(5) => camp.view = CampView::Items(self.book_box()),
+                Pick::Row(4) => {
+                    let ids = self.inventory.iter().map(|&(i, l)| Some((i, l))).collect();
+                    camp.view = CampView::Items(self.items_box(), ids);
+                }
+                Pick::Row(5) => {
+                    let ids = (0..0x68u8).filter(|&i| self.is_treasure(i)).map(|i| self.book.get(i as usize).copied().unwrap_or(false).then_some((i, 1))).collect();
+                    camp.view = CampView::Items(self.book_box(), ids);
+                }
                 Pick::Row(6) => return self.camp_depart(camp),
                 Pick::Cancel => camp.view = CampView::Field,
                 _ => camp.view = CampView::Menu(m),
@@ -274,9 +291,17 @@ impl<A: Assets> Engine<A> {
                 Pick::Cancel => camp.view = CampView::Field,
                 Pick::None => camp.view = CampView::Talk(l, ps),
             },
-            CampView::Items(mut l) => match l.update(&inp, tapped) {
+            // 줄을 누르면 아이템 정보 (원작 FUN_004696ed / FUN_0047234c → FUN_0040c2e7)
+            CampView::Items(mut l, ids) => match l.update(&inp, tapped) {
                 Pick::Cancel => camp.view = CampView::Field,
-                _ => camp.view = CampView::Items(l),
+                Pick::Row(k) => {
+                    if let Some(&Some((id, lv))) = ids.get(k) {
+                        let gear = crate::officer::item_stat(&self.items, id).is_some();
+                        camp.info = Some((id, lv, gear.then_some(0)));
+                    }
+                    camp.view = CampView::Items(l, ids);
+                }
+                _ => camp.view = CampView::Items(l, ids),
             },
             CampView::Running | CampView::Order(_) => {}
         }
@@ -395,11 +420,14 @@ impl<A: Assets> Engine<A> {
             }
         }
         let box_ = match &c.view {
-            CampView::Menu(l) | CampView::Talk(l, _) | CampView::Items(l) => Some(l),
+            CampView::Menu(l) | CampView::Talk(l, _) | CampView::Items(l, _) => Some(l),
             CampView::Field | CampView::Running | CampView::Order(_) => None,
         };
         if let Some(l) = box_ {
             l.render(scr, f, hi);
+        }
+        if let Some((id, lv, exp)) = c.info {
+            self.draw_item_info(id, lv, exp);
         }
     }
 }

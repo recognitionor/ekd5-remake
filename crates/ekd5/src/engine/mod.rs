@@ -138,6 +138,8 @@ pub enum Wait {
     TicksSkip(u32),
     /// 일기토 뒤 경험치 창·레벨업
     DuelExp,
+    /// 아이템이 부대 위로 떠오르는 동안 (원작 FUN_0045b8fb 8+5 단위), 끝나면 "손에 넣었습니다" 창
+    Item(u32),
 }
 
 pub struct Engine<A: Assets> {
@@ -178,6 +180,8 @@ pub struct Engine<A: Assets> {
     /// 돈, 소지 아이템 (아이템, 레벨), 명성(op3a 2)
     pub gold: i32,
     pub inventory: Vec<(u8, u8)>,
+    /// 아이템 연출 뒤 띄울 글
+    item_msg: Option<String>,
     pub fame: i32,
     /// op11 로 단계 이동 대기
     jump_stage: Option<usize>,
@@ -300,6 +304,7 @@ impl<A: Assets> Engine<A> {
             strategies: Rc::new(Vec::new()),
             gold: 0,
             inventory: Vec::new(),
+            item_msg: None,
             fame: 0,
             jump_stage: None,
             vm_drop: false,
@@ -525,6 +530,71 @@ impl<A: Assets> Engine<A> {
     }
 
     /// 대화/해설 창을 그리는 곳 (이야기 장면 또는 전투 겹침)
+    /// 아이템을 소지품에 (전투 중이면 그 전투 소지품에도 — 원작은 하나의 창고) + 보물도감
+    fn gain_item(&mut self, it: u8, lv: u8) {
+        self.log.push(format!("아이템 {} Lv{lv}", crate::officer::item_name(&self.items, it)));
+        self.inventory.push((it, lv));
+        if let Some(b) = self.battle() {
+            b.inventory.push((it, lv));
+        }
+        self.note_treasures();
+    }
+
+    /// 스크립트로 얻는 아이템 레벨 (원작 FUN_004167c1 / FUN_00418c91): 무기·방어구이고 레벨이 0(0xFFFF) 이면 기준 레벨로 —
+    /// 고유(종류 홀수) min(기준/4+1, 9), 일반은 기준 36 미만이면 (기준 % 12)/4+1 (원작 식 그대로), 그 외 3. 최대 레벨을 넘지 않음. 그 외 아이템은 1
+    fn script_item_level(&self, it: u8, arg: i32, base: u8) -> u8 {
+        let t = self.items.get(it as usize * 25 + 17).copied().unwrap_or(0xFF);
+        if t >= 0x12 {
+            return 1;
+        }
+        let unique = t & 1 == 1;
+        let cap = if unique { 9 } else { 3 };
+        let lv = if arg == 0 || arg == 0xFFFF {
+            if unique {
+                (base / 4 + 1).min(9)
+            } else if base < 0x24 {
+                (base % 12) / 4 + 1
+            } else {
+                3
+            }
+        } else {
+            arg as u8
+        };
+        lv.clamp(1, cap)
+    }
+
+    /// 아군 기준 레벨 (원작 FUN_0040c5d2): 인물 0..25 가운데 합류한 장수 레벨을 큰 순으로 15명까지 평균 (최소 1).
+    /// 원작은 거품 정렬의 임시 변수에 합을 이어 더함 — 마지막으로 자리 바꾼 값이 합에 더해짐
+    fn top_level(&mut self) -> u8 {
+        let ids: Vec<usize> = (0..0x1A).filter(|p| self.roster.contains(p)).collect();
+        let mut v: Vec<u32> = ids.into_iter().map(|p| self.officer(p).level as u32).collect();
+        let mut tmp = 0u32;
+        for _ in 0..v.len() {
+            for k in 0..v.len().saturating_sub(1) {
+                if v[k] < v[k + 1] {
+                    tmp = v[k];
+                    v.swap(k, k + 1);
+                }
+            }
+        }
+        let n = v.len().min(15);
+        if n == 0 {
+            return 1;
+        }
+        let sum: u32 = tmp + v[..n].iter().sum::<u32>();
+        (sum / n as u32).clamp(1, 255) as u8
+    }
+
+    /// 알림 창 (원작 FUN_00431c4c(2): 누르면 닫힘)
+    fn notice(&mut self, msg: String) {
+        if let Some(st) = self.ui() {
+            st.pages = vec![story::Page { person: None, face: None, name: String::new(), lines: vec![msg] }];
+            st.page = 0;
+            st.narration = true;
+            self.wait = Wait::Dialog;
+        }
+    }
+
     fn ui(&mut self) -> Option<&mut Story> {
         match &mut self.scene {
             Scene::Story(s) => Some(s),
@@ -968,6 +1038,26 @@ impl<A: Assets> Engine<A> {
             }
             Wait::Ticks(n) => {
                 self.wait = if n <= 1 { Wait::None } else { Wait::Ticks(n - 1) };
+            }
+            Wait::Item(n) => {
+                if let Some(b) = self.battle() {
+                    if let Some(r) = b.item_rise.as_mut() {
+                        r.2 += 1;
+                    }
+                }
+                if n <= 1 {
+                    if let Some(b) = self.battle() {
+                        b.item_rise = None;
+                        b.item_pic = None;
+                    }
+                    let msg = self.item_msg.take();
+                    self.wait = Wait::None;
+                    if let Some(m) = msg {
+                        self.notice(m);
+                    }
+                } else {
+                    self.wait = Wait::Item(n - 1);
+                }
             }
             Wait::Moves => {
                 if !st.moving() && battle_idle {
@@ -1480,25 +1570,51 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x3D => {
-                // 아이템 얻기
+                // 아이템 얻기 (원작 FUN_004167c1): 아이템, 레벨 (0xFFFF·0 = 자동), 연출 여부, 받는 부대 (인물 / 0x401 사건 부대 / 0x403 쓰러뜨린 부대).
+                // 전투 중이면 그 부대 위로 아이템이 떠오른 뒤 (FUN_0045b8fb, SE14), 어디서든 "%s%s 손에 넣었습니다!" 창
                 let it = a(0);
                 if (0..0x68).contains(&it) {
-                    self.inventory.push((it as u8, 1));
+                    let top = self.top_level();
+                    let lv = self.script_item_level(it as u8, a(1), top);
+                    self.gain_item(it as u8, lv);
                     let n = crate::officer::item_name(&self.items, it as u8);
-                    if let Some(b) = self.battle() {
-                        b.message = Some((format!("{n}을(를) 손에 넣었다!"), 90));
+                    let msg = format!("{n}{} 손에 넣었습니다!", if battle::has_batchim(&n) { "을" } else { "를" });
+                    let (show, who) = (a(2) != 0 && a(2) != 0xFFFF, a(3));
+                    let pal = self.screen.pal;
+                    let pic = self.icons.item_big(&self.items, it as u8, &pal);
+                    let rise = self.battle().and_then(|b| {
+                        let u = match who {
+                            0x401 => b.event_unit,
+                            0x403 => b.last_actor,
+                            p if (0..0x200).contains(&p) => b.unit_of(p as usize),
+                            _ => None,
+                        }
+                        .filter(|&u| b.units[u].visible && b.units[u].hp > 0)?;
+                        show.then(|| {
+                            b.item_rise = Some((u, it as u8, 0));
+                            b.item_pic = pic;
+                            b.sounds.push("SE_14.WAV".into());
+                        })
+                    });
+                    if rise.is_some() {
+                        self.item_msg = Some(msg);
+                        // 8단위 떠오름 + 5단위 (×1.5틱)
+                        self.wait = Wait::Item(20);
+                    } else {
+                        self.notice(msg);
                     }
                 }
             }
             0x59 => {
-                // 전투 보상: 돈 (조조 레벨×100 + 700 + 인자), 아이템 셋
+                // 전투 보상 (원작 FUN_00418c91): 돈 (조조 레벨×100 + 700 + 인자), 아이템 셋 (아이템, 레벨 — 0 이면 조조 레벨로 자동)
                 let lv = self.officer(0).level as i32;
                 let money = lv * 100 + 700 + a(0);
                 self.gold = (self.gold + money).min(999_999);
                 for k in [1, 3, 5] {
                     let it = a(k);
                     if (0..0x68).contains(&it) {
-                        self.inventory.push((it as u8, 1));
+                        let l = self.script_item_level(it as u8, a(k + 1), lv as u8);
+                        self.gain_item(it as u8, l);
                     }
                 }
                 if let Some(b) = self.battle() {
@@ -2459,28 +2575,37 @@ impl<A: Assets> Engine<A> {
             },
             0x40 => phase_no == a(0),
             // 부대가 칸에 (0x401 = 아군 누구든, 0x402 = 적 누구든)
+            // 맞은 부대는 사건 부대로 기억 (원작 0x4c0568 → op3d 의 0x401)
             0x25 => {
                 let (w, x, y) = (a(0), a(1), a(2));
-                b.units.iter().any(|u| {
+                let hit = b.units.iter().position(|u| {
                     u.visible && u.hp > 0 && u.x == x && u.y == y && match w {
                         0x400 => true,
                         0x401 => u.side != battle::Side::Enemy,
                         0x402 => u.side == battle::Side::Enemy,
                         p => u.person == p as usize,
                     }
-                })
+                });
+                if hit.is_some() {
+                    b.event_unit = hit;
+                }
+                hit.is_some()
             }
             // 사각형 안 (부대, x1, y1, x2, y2)
             0x26 => {
                 let (w, x1, y1, x2, y2) = (a(0), a(1), a(2), a(3), a(4));
-                b.units.iter().any(|u| {
+                let hit = b.units.iter().position(|u| {
                     u.visible && u.hp > 0 && (x1..=x2).contains(&u.x) && (y1..=y2).contains(&u.y) && match w {
                         0x400 => true,
                         0x401 => u.side != battle::Side::Enemy,
                         0x402 => u.side == battle::Side::Enemy,
                         p => u.person == p as usize,
                     }
-                })
+                });
+                if hit.is_some() {
+                    b.event_unit = hit;
+                }
+                hit.is_some()
             }
             // 이웃 (인물 a, 인물 b)
             0x2E => {

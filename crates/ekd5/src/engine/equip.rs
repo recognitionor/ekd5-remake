@@ -997,14 +997,21 @@ impl<A: Assets> Engine<A> {
             l.render(scr, f, hi);
         }
         if let Some((id, lv, exp)) = ui.info {
-            let icon = self.icons.item_big(&items, id, &pal);
-            let desc = self.imsg.as_ref().and_then(|m| m.get(id as usize * 216..id as usize * 216 + 216)).map(|r| {
-                let e = r.iter().position(|&b| b == 0).unwrap_or(r.len());
-                encoding_rs::EUC_KR.decode(&r[..e]).0.to_string()
-            });
-            let scr = &mut self.screen;
-            render_info(scr, f, &items, &jobs, id, lv, exp, icon.as_deref(), desc.as_deref().unwrap_or(""), [white, gray, dark, navy, blue]);
+            self.draw_item_info(id, lv, exp);
         }
+    }
+
+    /// 아이템 정보 창 그리기 (원작 대화상자 167, 글은 IMSG.E5 아이템 기록)
+    pub(super) fn draw_item_info(&mut self, id: u8, lv: u8, exp: Option<u8>) {
+        let Some(f) = self.font.as_ref() else { return };
+        let (items, jobs, pal) = (self.items.clone(), self.jobs.clone(), self.screen.pal);
+        let cols = [[255, 255, 255], [192, 192, 192], [128, 128, 128], [0, 0, 128], [0, 0, 255]].map(|c| nearest(&pal, c));
+        let icon = self.icons.item_big(&items, id, &pal);
+        let desc = self.imsg.as_ref().and_then(|m| m.get(id as usize * 216..id as usize * 216 + 216)).map(|r| {
+            let e = r.iter().position(|&b| b == 0).unwrap_or(r.len());
+            encoding_rs::EUC_KR.decode(&r[..e]).0.to_string()
+        });
+        render_info(&mut self.screen, f, &items, &jobs, id, lv, exp, icon.as_deref(), desc.as_deref().unwrap_or(""), cols);
     }
 }
 

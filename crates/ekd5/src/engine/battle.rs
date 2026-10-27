@@ -320,6 +320,12 @@ pub struct Battle {
     pub shout: Option<usize>,
     /// 도구 쓰기 연출의 아이템 그림 (32×32, 엔진이 넣어 줌)
     pub tool_pic: Option<Rc<Pic>>,
+    /// 아이템 얻기 연출 (부대, 아이템, 틱) — 원작 FUN_0045b8fb: 부대 칸 위로 32×32 그림이 8단위 동안 떠오름
+    pub item_rise: Option<(usize, u8, u32)>,
+    pub item_pic: Option<Rc<Pic>>,
+    /// 사건 조건에 맞은 부대 (원작 0x4c0568 +0 → op3d 0x401), 마지막으로 행동한 부대 (+4 → 0x403, 쓰러뜨린 쪽)
+    pub event_unit: Option<usize>,
+    pub last_actor: Option<usize>,
     /// 맞은 부대 위 데미지 숫자 (원작 FUN_00451ad1: 부대, 값, MP 면 true)
     pub dmg_num: Option<(usize, i32, bool)>,
     shout_checked: bool,
@@ -503,6 +509,10 @@ impl Battle {
             bow_hold: 0,
             shout: None,
             tool_pic: None,
+            item_rise: None,
+            item_pic: None,
+            event_unit: None,
+            last_actor: None,
             dmg_num: None,
             shout_checked: false,
         }
@@ -1725,6 +1735,7 @@ impl Battle {
 
     fn cast_apply(&mut self, u: usize, sid: u8, cell: (i32, i32)) {
         self.cast_applied = true;
+        self.last_actor = Some(u);
         let before: Vec<(i32, i32)> = self.units.iter().map(|x| (x.hp, x.mp)).collect();
         let (ex0, lv0) = (self.units[u].off.exp, self.units[u].off.level);
         let cost = self.strat_mp(u, sid).min(self.units[u].mp);
@@ -2104,6 +2115,7 @@ impl Battle {
 
     /// 공격 한 번 결과 (명중, 치명타 ×1.5, 연속 공격, 범위 공격, 반격 — 원작 FUN_00406163 / FUN_004066fa)
     fn resolve(&mut self, a: usize, d: usize) {
+        self.last_actor = Some(a);
         self.strikes.clear();
         let mut hp: std::collections::HashMap<usize, i32> = self.units.iter().enumerate().map(|(i, u)| (i, u.hp)).collect();
         let strike = |b: &mut Self, x: usize, y: usize, counter: bool, crit_ok: bool, second: bool, hp: &mut std::collections::HashMap<usize, i32>| {
@@ -3582,6 +3594,12 @@ impl Battle {
             scr.fill(cx, cy + 46, 48, 2, 18);
             scr.fill(cx, cy, 2, 48, 18);
             scr.fill(cx + 46, cy, 2, 48, 18);
+        }
+        // 아이템 얻기: 부대 칸 (+8, +7) 에서 한 단위에 1px 씩 8단위 떠오른 뒤 머묾 (원작 FUN_0045b8fb)
+        if let (Some((u, _, t)), Some(pic)) = (self.item_rise, &self.item_pic) {
+            let k = ((t * 2 / 3) as i32).min(7);
+            let (sx, sy) = (self.units[u].px as i32 - self.cam.0 + 8, self.units[u].py as i32 - self.cam.1 + 7 - k);
+            scr.blit(pic, sx, sy, Some(0));
         }
         // 도구 쓰기: 아이템 그림 (들기: 부대 앞 / 머리 위 / 상대에게 스며듦 — 원작 FUN_0043230a 16단계)
         if let (Phase::ToolUse { unit, target, t, .. }, Some(pic)) = (&self.phase, &self.tool_pic) {

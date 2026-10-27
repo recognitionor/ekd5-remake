@@ -315,6 +315,16 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
                 }
             }
         }
+        // 시험: EKD5_CAMPINFO="틱:아이템" — 그 틱 뒤 처음 본진이 열리면 자동 진행을 멈추고 아이템 정보 창
+        if let Some((ct, id)) = std::env::var("EKD5_CAMPINFO").ok().and_then(|v| { let (a, b) = v.split_once(':')?; Some((a.parse::<u32>().ok()?, b.parse::<u8>().ok()?)) }) {
+            if t >= ct && eng.autoplay {
+                if let Some(c) = eng.camp.as_mut() {
+                    c.info = Some((id, 1, Some(0)));
+                    eng.autoplay = false;
+                    println!("[{t:>6}] 본진 아이템 정보 시험 {id}");
+                }
+            }
+        }
         // 시험: EKD5_TOOL=틱 — 그 틱에 첫 조조군 부대가 자기에게 첫 소모품을 씀 (도구 쓰기 연출)
         if std::env::var("EKD5_TOOL").ok().and_then(|v| v.parse::<u32>().ok()) == Some(t) {
             let items = eng.items.clone();
