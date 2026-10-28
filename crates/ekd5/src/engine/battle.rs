@@ -2450,13 +2450,17 @@ impl Battle {
                 return false;
             }
         }
+        // 위쪽 띠 [메뉴] (원작 메뉴 막대) = 웹 오른쪽 메뉴 버튼: 부대를 고른 중·범위 보기 중이어도 바로 메뉴
+        if matches!(self.phase, Phase::PlayerIdle | Phase::Selected { .. } | Phase::Peek { .. }) {
+            let menu_tap = tapped.is_some() && inp.mouse.is_some_and(|(mx, my)| my < 26 && mx >= 560);
+            if menu_tap || std::mem::take(&mut self.open_menu) {
+                self.phase = self.sys_menu();
+                return false;
+            }
+        }
         match self.phase.clone() {
             Phase::PlayerIdle => {
-                // 위쪽 띠 오른쪽 [메뉴] (원작 메뉴 막대) 또는 웹 메뉴 버튼
-                let menu_tap = tapped.is_some() && inp.mouse.is_some_and(|(mx, my)| my < 26 && mx > 540);
-                if menu_tap || std::mem::take(&mut self.open_menu) {
-                    self.phase = self.sys_menu();
-                } else if let Some(c) = tapped {
+                if let Some(c) = tapped {
                     if let Some(u) = self.at(c.0, c.1) {
                         self.unit_tapped = true;
                         let cells = self.reachable(u);
@@ -4020,7 +4024,7 @@ impl Battle {
         if !self.objective.is_empty() {
             draw_text(scr, f, 200, 4, &self.objective, story::NAME);
         }
-        if matches!(self.phase, Phase::PlayerIdle | Phase::Sys { .. }) {
+        if matches!(self.phase, Phase::PlayerIdle | Phase::Selected { .. } | Phase::Peek { .. } | Phase::Sys { .. }) {
             draw_text(scr, f, 568, 4, "[메뉴]", story::NAME);
         }
         // 선택된 부대 정보
