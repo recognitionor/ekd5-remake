@@ -44,8 +44,8 @@ fn three() -> u8 {
 /// 날씨 표 (원작 0x498930): 기후 5종 × 6칸. 0 맑음 1 흐림 2 비 3 호우 4 눈
 pub const WEATHER: [[u8; 6]; 5] = [[0, 0, 0, 1, 2, 3], [0, 0, 0, 0, 1, 2], [0, 1, 2, 2, 3, 3], [0, 0, 1, 1, 4, 4], [0, 1, 4, 4, 4, 4]];
 pub const WEATHER_NAME: [&str; 5] = ["맑음", "흐림", "비", "호우", "눈"];
-/// 날씨 창 자리 (화면 오른쪽 위, 216×50)
-pub const WEATHER_WIN: (i32, i32, i32, i32) = (640 - 8 - 216, 30, 216, 50);
+/// 날씨 그림 자리 (위 띠 안, [메뉴] 왼쪽 — 216×50 을 80×18 로 줄임)
+pub const WEATHER_WIN: (i32, i32, i32, i32) = (480, 3, 80, 18);
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Unit {
@@ -282,9 +282,8 @@ pub struct Battle {
     /// 날씨 (원작 0x4be480: +0x11 기후, +4 칸 — op45 인자 8·9). 차례마다 칸이 무작위로 옮겨 감 (FUN_0044c102)
     pub weather_kind: u8,
     pub weather_pos: u8,
-    /// 날씨 창 그림 (날씨, WEATHER.E5 항목 = 216×50 × 4장) 과 창 보이기 (누르면 접음)
+    /// 날씨 그림 (날씨, WEATHER.E5 항목 = 216×50 × 4장)
     pub weather_pic: Option<(u8, Rc<Vec<u8>>)>,
-    pub weather_open: bool,
     /// 연출 읽기 요청 (연출 번호, 중심들) — 엔진이 읽어 fx 로
     pub fx_req: Option<(u8, Vec<(i32, i32)>)>,
     cast_applied: bool,
@@ -517,7 +516,6 @@ impl Battle {
             weather_kind: 0,
             weather_pos: 1,
             weather_pic: None,
-            weather_open: true,
             cast_applied: false,
             cast_end: None,
             sounds: Vec::new(),
@@ -1220,9 +1218,9 @@ impl Battle {
         (now != before).then_some(52 + now)
     }
 
-    /// 날씨 띠 연출 자리 = 날씨 창 가운데
+    /// 날씨가 바뀌는 연출 자리 = 위 띠의 날씨 그림 가운데 (216×50 연출이 잠깐 맵에 걸침)
     pub fn weather_fx_at(&self) -> (i32, i32) {
-        (self.cam.0 + WEATHER_WIN.0 + 108, self.cam.1 + WEATHER_WIN.1 + 25)
+        (self.cam.0 + WEATHER_WIN.0 + WEATHER_WIN.2 / 2, self.cam.1 + 25)
     }
 
     /// 지금 쓸 수 있나 (원작 FUN_00422439): 불 계통은 비·호우·눈이면 못 씀, 명상은 HP 3 이상, 청룡은 비 이상, 주작은 맑음, 현무는 흐림
@@ -2409,19 +2407,6 @@ impl Battle {
         if matches!(self.phase, Phase::PlayerIdle) && !self.alive(Side::Player).any(|i| !self.units[i].acted) {
             self.end_player_turn();
             return true;
-        }
-        // 날씨 창 누르기 = 접기, 윗줄 날씨 이름 누르기 = 펼치기
-        if inp.click {
-            if let Some((mx, my)) = inp.mouse {
-                let (wx, wy, ww, wh) = WEATHER_WIN;
-                let hit = if self.weather_open { mx >= wx && mx < wx + ww && my >= wy && my < wy + wh } else { mx >= 640 - 48 && my < 24 };
-                if hit && matches!(self.phase, Phase::PlayerIdle) {
-                    self.weather_open = !self.weather_open;
-                    self.suppress_tap = true;
-                    self.drag = None;
-                    return false;
-                }
-            }
         }
         // 정보 창을 닫은 누름은 손을 뗄 때까지 무시
         if self.suppress_tap {
@@ -4020,9 +4005,17 @@ impl Battle {
             _ => "아군",
         };
         draw_text(scr, f, 8, 4, &format!("{}턴/{}  {}", self.turn, self.turn_limit, side_name), story::TEXT);
-        // 날씨 이름 (창을 접었을 때 — 누르면 다시 펼침)
-        if !self.weather_open {
-            draw_text(scr, f, 640 - 8 - 32, 4, WEATHER_NAME[self.weather() as usize], story::TEXT);
+        // 날씨 (원작은 따로 216×50 날씨 창 — 맵을 가리지 않게 위 띠 안에 줄여서, 4장을 0.5초마다)
+        if let Some((_, d)) = &self.weather_pic {
+            let (wx, wy, ww, wh) = WEATHER_WIN;
+            let k = ((self.anim_tick / 15) % 4) as usize;
+            for y in 0..wh {
+                for x in 0..ww {
+                    let c = d.get(k * 10800 + (y * 50 / wh) as usize * 216 + (x * 216 / ww) as usize).copied().unwrap_or(0);
+                    scr.fill(wx + x, wy + y, 1, 1, c);
+                }
+            }
+            super::sortie::rect(scr, wx - 1, wy - 1, ww + 2, wh + 2, 0x18);
         }
         if !self.objective.is_empty() {
             draw_text(scr, f, 200, 4, &self.objective, story::NAME);
@@ -4123,16 +4116,6 @@ impl Battle {
                 draw_text(scr, f, 296, 222, s, story::NAME);
             }
             _ => {}
-        }
-        // 날씨 창 (원작 FUN_0044c46d: 216×50, WEATHER.E5 그림 4장을 0.5초마다 — 바뀌면 이 창 위에 MEFF 52+날씨)
-        if self.weather_open {
-            let (wx, wy, ww, wh) = WEATHER_WIN;
-            story::frame_box(scr, wx - 2, wy - 2, ww + 4, wh + 4);
-            if let Some((_, d)) = &self.weather_pic {
-                let k = ((self.anim_tick / 15) % 4) as usize;
-                let frame = Pic::new(216, 50, d.get(k * 10800..(k + 1) * 10800).map(|x| x.to_vec()).unwrap_or_default());
-                scr.blit(&frame, wx, wy, None);
-            }
         }
         if let Some(f) = &self.fx {
             f.render(scr, self.cam);
