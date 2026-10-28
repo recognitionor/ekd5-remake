@@ -2189,6 +2189,14 @@ impl<A: Assets> Engine<A> {
                 Asset::Missing => b.mark_tiles = vec![Pic::new(48, 48, Vec::new()); 8],
             }
         }
+        // 날씨 창 그림 (WEATHER.E5 항목 = 날씨)
+        let w = b.weather();
+        if b.weather_pic.as_ref().map(|x| x.0) != Some(w) {
+            match self.packs.get(&mut self.assets, "WEATHER.E5", w as usize) {
+                Err(Pending) => return false,
+                Ok(d) => b.weather_pic = Some((w, Rc::new(d.unwrap_or_default()))),
+            }
+        }
         // 성문 그림 (GATE.E5)
         while let Some(&(idx, x, y)) = b.gate_queue.first() {
             match self.packs.get(&mut self.assets, "GATE.E5", idx) {
@@ -2525,10 +2533,8 @@ impl<A: Assets> Engine<A> {
                     .collect();
                 let kind = if op == 0x31 { 1 } else if a(7) == 1 { 2 } else { 0 };
                 let mut wait = 0;
+                // 원작 FUN_004438a5 는 상태만 퇴각(3)으로 바꾸고 HP 는 그대로 — "HP 0 이면" 사건이 다시 걸리지 않음 (사수관 화웅 무명장갑 두 번 문제)
                 for u in pick {
-                    if op == 0x53 {
-                        b.units[u].hp = 0;
-                    }
                     let (x, y) = (b.units[u].x, b.units[u].y);
                     if mode == 0 || mode == 0xFFFF {
                         b.focus(x, y);

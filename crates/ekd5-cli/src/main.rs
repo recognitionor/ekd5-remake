@@ -351,6 +351,18 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
                 println!("[{t:>6}] 장비 화면 시험");
             }
         }
+        // 시험: EKD5_PEEK=틱 — 그 틱에 화면 가운데에 가장 가까운 적의 이동 범위 보기
+        if std::env::var("EKD5_PEEK").ok().and_then(|v| v.parse::<u32>().ok()) == Some(t) {
+            if let ekd5::engine::Scene::Battle(b) = &mut eng.scene {
+                let (cx, cy) = ((b.cam.0 + 320) / 48, (b.cam.1 + 240) / 48);
+                let e = (0..b.units.len()).filter(|&i| b.units[i].visible && b.units[i].hp > 0 && b.units[i].side == ekd5::engine::battle::Side::Enemy).min_by_key(|&i| (b.units[i].x - cx).abs() + (b.units[i].y - cy).abs());
+                if let Some(u) = e {
+                    let cells = b.reachable(u);
+                    b.phase = ekd5::engine::battle::Phase::Peek { unit: u, cells };
+                    println!("[{t:>6}] 이동 범위 보기 시험 부대 {u}");
+                }
+            }
+        }
         // 시험: EKD5_TOOL=틱 — 그 틱에 첫 조조군 부대가 자기에게 첫 소모품을 씀 (도구 쓰기 연출)
         if std::env::var("EKD5_TOOL").ok().and_then(|v| v.parse::<u32>().ok()) == Some(t) {
             let items = eng.items.clone();
