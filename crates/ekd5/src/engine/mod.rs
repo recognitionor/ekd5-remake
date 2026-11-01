@@ -957,7 +957,9 @@ impl<A: Assets> Engine<A> {
             }
             0x13 => self.choice == args[0].i(),
             3 => !self.last_if,
-            // 값 비교 (원작 FUN_00413ca4): 0 돈 / 2 명성, 값, 0 이상 / 1 미만 / 그 외 같음. 명성 85 이상 → 가상 모드 분기
+            // 값 비교 (원작 FUN_00413ca4): 0 돈 / 2 사실 게이지, 값, 0 이상 / 1 미만 / 그 외 같음.
+            // 사실 게이지 (원작 +0x12, 상태 줄 왼쪽 빨간 새 = 사실, 오른쪽 파란 새 = 가상): R_32 에서 16 미만(가상 높음)이면 마왕 제갈량 갈래 (R_46~),
+            // R_39 85 이상이면 제위 권유, R_58 85 이상/미만으로 엔딩
             0x37 => {
                 let a = |i: usize| args.get(i).map_or(0, |a| a.i());
                 let v = match a(0) {
@@ -970,7 +972,7 @@ impl<A: Assets> Engine<A> {
                     1 => v < a(1),
                     _ => v == a(1),
                 };
-                self.log.push(format!("비교 {} = {v} {} {} → {r}", ["돈", "?", "명성"].get(a(0) as usize).unwrap_or(&"?"), ["≥", "<", "="].get(a(2) as usize).unwrap_or(&"="), a(1)));
+                self.log.push(format!("비교 {} = {v} {} {} → {r}", ["돈", "?", "사실"].get(a(0) as usize).unwrap_or(&"?"), ["≥", "<", "="].get(a(2) as usize).unwrap_or(&"="), a(1)));
                 r
             }
             _ if self.battle().is_some() => self.battle_cond(op, args),
@@ -2095,9 +2097,10 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x11 => {
-                // 단계 이동 (원작 FUN_00418077: 진행 단계 = 값, 새 스크립트 읽기). 갈림길·가상 모드·엔딩
-                self.log.push(format!("단계 이동 → {}", a(0)));
-                self.jump_stage = Some(a(0) as usize);
+                // 단계 이동 (원작 FUN_00418077: 진행 단계 = 값, 코드 9 → FUN_00412978 이 4 를 돌려 FUN_0041a5f6 이 단계 +1 후 읽기).
+                // 그래서 실제로는 값+1 단계 — 예: R_03 "그만둔다" op11 7 → R_04 (추격전 S_03 건너뜀), R_32 가상 높음 op11 91 → R_46 (마왕 갈래)
+                self.log.push(format!("단계 이동 → {}", a(0) + 1));
+                self.jump_stage = Some(a(0) as usize + 1);
                 vm.running = false;
                 return Ok(false);
             }

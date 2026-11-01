@@ -418,9 +418,9 @@
   movie.addEventListener("pointerdown", (e) => { e.preventDefault(); unlockAudio(); endMovie(); });
   w.enable_movies();
 
-  // ---------- 명성 게이지 (원작 FUN_00478905 / FUN_0040d717): 가로 200, 채움 = 명성×2, MARK 무늬
+  // ---------- 사실·가상 게이지 (원작 FUN_00478905 / FUN_0040d717): 가로 200, 채움(빨강) = 사실×2, 나머지(파랑) = 가상, MARK 무늬
   // 채움 0x00 (16 미만이면 0x40), 나머지 0xC0 (85 이상이면 0x40). 바뀔 때 다섯 번에 나눠 깜빡이며 움직임
-  const fameEl = document.getElementById("fame"), fameCv = document.getElementById("fameCv"), fameNum = document.getElementById("fameNum");
+  const fameEl = document.getElementById("fame"), fameCv = document.getElementById("fameCv"), fameTop = document.getElementById("fameTop"), fameBot = document.getElementById("fameBot");
   const fctx = fameCv.getContext("2d");
   let fameShown = -1, fameStep = 0, fameDrawn = -2, gcol = null, gcolAge = 0;
   function drawFame(v) {
@@ -441,7 +441,7 @@
     // 장면마다 팔레트가 바뀌니 색을 가끔 새로 받음
     if (++gcolAge > 30) { gcolAge = 0; gcol = null; fameDrawn = -2; }
     if (fameDrawn !== fameShown || !gcol) { drawFame(fameShown); fameDrawn = fameShown; }
-    fameNum.textContent = fameShown;
+    fameBot.textContent = "사실 " + fameShown; fameTop.textContent = "가상 " + (100 - fameShown);
   }
 
   // ---------- 루프 ----------

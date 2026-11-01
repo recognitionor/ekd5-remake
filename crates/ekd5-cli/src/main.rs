@@ -363,6 +363,24 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
                 }
             }
         }
+        // 시험: EKD5_FAME="틱:값" — 그 틱에 사실 게이지를 값으로 (가상 갈래 시험)
+        if let Some((ft, v)) = std::env::var("EKD5_FAME").ok().and_then(|v| { let (a, b) = v.split_once(':')?; Some((a.parse::<u32>().ok()?, b.parse::<i32>().ok()?)) }) {
+            if ft == t {
+                eng.fame = v;
+            }
+        }
+        // 시험: EKD5_REACH=틱 — 그 틱에 조조군 부대마다 갈 수 있는 칸 수와 둘레 지형
+        if std::env::var("EKD5_REACH").ok().and_then(|v| v.parse::<u32>().ok()) == Some(t) {
+            if let ekd5::engine::Scene::Battle(b) = &eng.scene {
+                for u in 0..b.units.len() {
+                    if b.units[u].side == ekd5::engine::battle::Side::Player && b.units[u].visible {
+                        let (x, y) = (b.units[u].x, b.units[u].y);
+                        let around: Vec<String> = [(0, -1), (1, 0), (0, 1), (-1, 0)].iter().map(|d| format!("{:#x}", b.terrain.get(((y + d.1) * b.cols + x + d.0) as usize).copied().unwrap_or(0xFF))).collect();
+                        println!("[{t}] 부대 {u} 인물 {} @{x},{y} 갈 칸 {} 둘레 지형 {:?} acted {} st {}", b.units[u].person, b.reachable(u).len(), around, b.units[u].acted, b.units[u].status);
+                    }
+                }
+            }
+        }
         // 시험: EKD5_TOOL=틱 — 그 틱에 첫 조조군 부대가 자기에게 첫 소모품을 씀 (도구 쓰기 연출)
         if std::env::var("EKD5_TOOL").ok().and_then(|v| v.parse::<u32>().ok()) == Some(t) {
             let items = eng.items.clone();

@@ -3472,9 +3472,12 @@ impl Battle {
             } else if reach.contains(&g) && !is_unit {
                 base[idx(g)] += 20;
             } else {
-                // 이번 이동으로 갈 수 있는 칸 가운데 목표에 가장 가까운 칸 = 경로 끝
+                // 이번 이동으로 갈 수 있는 칸 가운데 목표에 가장 가까운 칸 = 경로 끝.
+                // 길이 막혀 있으면 (석병 미로 등) 막힘을 무시하고 직선거리로 (원작 FUN_0043a4a8 두 번째 찾기)
                 let df = self.dist_field(self.units[u].job, g);
-                if let Some(&e) = cells.iter().min_by_key(|&&c| (df[idx(c)], cost[idx(c)])) {
+                let blocked = cells.iter().all(|&c| df[idx(c)] >= i32::MAX / 2);
+                let key = |c: (i32, i32)| if blocked { (c.0 - g.0).abs() + (c.1 - g.1).abs() } else { df[idx(c)] };
+                if let Some(&e) = cells.iter().min_by_key(|&&c| (key(c), cost[idx(c)])) {
                     base[idx(e)] += 10;
                     for d in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
                         let c = (e.0 + d.0, e.1 + d.1);

@@ -23,7 +23,7 @@
     overscroll-behavior: none; touch-action: none; -webkit-user-select: none; user-select: none; }
   #app { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
     padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
-  /* 비율 유지: 높이를 꽉 쓰고 남는 폭은 양옆 (왼쪽 명성 · 오른쪽 버튼) */
+  /* 비율 유지: 높이를 꽉 쓰고 남는 폭은 양옆 (왼쪽 사실·가상 게이지 · 오른쪽 버튼) */
   #screen { image-rendering: pixelated; background: #000; touch-action: none; display: block;
     width: min(calc(var(--vw) - var(--bar) - var(--side)), calc(var(--vh) * 4 / 3));
     height: min(var(--vh), calc((var(--vw) - var(--bar) - var(--side)) * 3 / 4)); }
@@ -34,13 +34,15 @@
     background: var(--btn-bg); color: var(--fg); font-size: 12px; font-weight: 600; line-height: 1.15; padding: 0; touch-action: manipulation; }
   #bar button:active, #bar button.on { background: rgba(255,255,255,.32); }
   #bar #cancel { height: 40px; background: rgba(220,80,80,.25); border-color: rgba(255,120,120,.5); }
-  /* 명성 게이지 (원작 상태줄 200×8, MARK 무늬) — 왼쪽에 세로로 */
+  /* 사실·가상 게이지 (원작 상태줄 200×8, MARK 무늬) — 왼쪽에 세로로 (아래 사실, 위 가상) */
   #fame { width: var(--side); height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; font-size: 11px; }
   #fameBox { width: 12px; height: 204px; position: relative; }
   #fameCv { position: absolute; left: 50%; top: 50%; width: 200px; height: 10px; transform: translate(-50%, -50%) rotate(-90deg);
     image-rendering: pixelated; background: #000; border: 1px solid var(--btn-bd); }
   #fame.blink #fameCv { opacity: .45; }
-  #fameLabel { writing-mode: vertical-rl; letter-spacing: 2px; }
+  /* 원작 상태 줄: 채운 쪽(빨간 새) = 사실, 나머지(파란 새) = 가상 */
+  .fameLabel { writing-mode: vertical-rl; letter-spacing: 1px; }
+  #fameTop { color: #8ab4ff; } #fameBot { color: #ff8a80; }
   #movie { display: none; position: fixed; inset: 0; z-index: 10; width: 100%; height: 100%; background: #000; object-fit: contain; }
   #movie.on { display: block; }
   #status { pointer-events: none; position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 15px; text-align: center;
@@ -48,14 +50,15 @@
   #status:empty { display: none; }
   #rotate { display: none; position: fixed; inset: 0; z-index: 20; background: #000;
     flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; font-size: 17px; }
-  /* 세로 배치: 위 화면, 아래 명성 막대와 버튼 */
+  /* 세로 배치: 위 화면, 아래 사실·가상 막대와 버튼 */
   body.port #app { flex-direction: column; justify-content: flex-start; gap: 6px; }
   body.port #screen { order: 0; width: var(--vw); height: calc(var(--vw) * 3 / 4); }
   body.port.fill #screen { width: var(--vw); height: min(calc(var(--vh) - 170px), calc(var(--vw) * 1.1)); }
   body.port #fame { order: 1; width: var(--vw); height: 22px; flex-direction: row; gap: 8px; }
   body.port #fameBox { width: 204px; height: 12px; }
   body.port #fameCv { transform: translate(-50%, -50%); }
-  body.port #fameLabel { writing-mode: horizontal-tb; letter-spacing: 0; }
+  body.port .fameLabel { writing-mode: horizontal-tb; letter-spacing: 0; }
+  body.port #fameBot { order: 0; } body.port #fameBox { order: 1; } body.port #fameTop { order: 2; }
   body.port #bar { order: 2; width: var(--vw); height: auto; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 6px 10px; box-sizing: border-box; }
   body.port #bar button { width: 100%; height: 52px; font-size: 15px; }
   body.port #bar #cancel { height: 52px; }
@@ -93,7 +96,7 @@
 </head>
 <body>
 <div id="app">
-  <div id="fame"><span id="fameNum">0</span><div id="fameBox"><canvas id="fameCv" width="200" height="8"></canvas></div><span id="fameLabel">명성</span></div>
+  <div id="fame"><span id="fameTop" class="fameLabel">가상</span><div id="fameBox"><canvas id="fameCv" width="200" height="8"></canvas></div><span id="fameBot" class="fameLabel">사실</span></div>
   <canvas id="screen" width="640" height="480"></canvas>
   <div id="bar">
     <button id="fast">속도<br>×1</button>
