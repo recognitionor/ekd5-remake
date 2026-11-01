@@ -132,7 +132,23 @@
   // 아이폰은 앱 전환·화면 잠금·전화 뒤 AudioContext 가 멈춘 채(interrupted, 또는 running 인데 소리 없음) 남는 일이 있음
   // → 화면에 다시 돌아온 뒤 첫 터치 때 새로 만듦 (풀어 둔 소리 버퍼는 그대로 씀)
   let ctxStale = false;
-  document.addEventListener("visibilitychange", () => { if (document.hidden) ctxStale = true; });
+  // 화면을 끄거나 다른 앱으로 가면 음악·동영상을 멈추고, 돌아오면 이어서 (오디오 세션 playback 이면 아이폰은 꺼진 화면에서도 계속 틂)
+  let bgmPausedByHide = false;
+  const onHide = () => {
+    ctxStale = true;
+    if (bgm && !bgm.paused) { bgm.pause(); bgmPausedByHide = true; }
+    const mv = document.getElementById("movie");
+    if (mv && !mv.paused) mv.pause();
+  };
+  const onShow = () => {
+    if (bgmPausedByHide && bgm && bgmOn && bgmTrack >= 0) bgm.play().catch(() => {});
+    bgmPausedByHide = false;
+    const mv = document.getElementById("movie");
+    if (mv && mv.classList.contains("on") && mv.paused) mv.play().catch(() => {});
+  };
+  document.addEventListener("visibilitychange", () => { if (document.hidden) onHide(); else onShow(); });
+  addEventListener("pagehide", onHide);
+  addEventListener("pageshow", () => { if (!document.hidden) onShow(); });
   function newCtx() {
     const old = actx;
     try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) { actx = null; }
@@ -250,13 +266,21 @@
       app.style.left = rot === "rotcw" ? W + "px" : "0px"; app.style.top = rot === "rotcw" ? "0px" : H + "px";
       bs.setProperty("--vw", (H - pl - pr) + "px"); bs.setProperty("--vh", (W - pt - pb) + "px");
     } else {
-      app.style.width = app.style.height = app.style.left = app.style.top = app.style.padding = "";
-      bs.removeProperty("--vw"); bs.removeProperty("--vh");
+      // 실제로 보이는 영역 (visualViewport) 에 맞춰 놓고 그 안에서 가운데 — 100vh·100dvh 는 아이폰 사파리·홈 화면 앱에서 실제와 어긋남
+      const vv = window.visualViewport;
+      const W = vv ? vv.width : innerWidth, H = vv ? vv.height : innerHeight;
+      const cs = getComputedStyle(document.getElementById("safeProbe"));
+      const [st, sr, sb, sl] = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"].map((k) => parseFloat(cs[k]) || 0);
+      app.style.padding = "";
+      app.style.left = (vv ? vv.offsetLeft : 0) + "px"; app.style.top = (vv ? vv.offsetTop : 0) + "px";
+      app.style.width = W + "px"; app.style.height = H + "px";
+      bs.setProperty("--vw", (W - sl - sr) + "px"); bs.setProperty("--vh", (H - st - sb) + "px");
     }
     orientBtn.textContent = "화면 방향: " + ({ auto: "자동 (폰 방향대로)", port: "세로 고정", land: "가로 고정" })[orient];
   }
   applyOrient();
   addEventListener("resize", applyOrient);
+  if (window.visualViewport) { visualViewport.addEventListener("resize", applyOrient); visualViewport.addEventListener("scroll", applyOrient); }
   addEventListener("orientationchange", () => setTimeout(applyOrient, 200));
   orientBtn.addEventListener("click", () => {
     orient = ({ auto: "land", land: "port", port: "auto" })[orient];

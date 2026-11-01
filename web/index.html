@@ -21,7 +21,7 @@
   html, body { margin: 0; height: 100%; background: #000; color: var(--fg); overflow: hidden;
     font-family: -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
     overscroll-behavior: none; touch-action: none; -webkit-user-select: none; user-select: none; }
-  #app { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+  #app { position: fixed; inset: 0; box-sizing: border-box; display: flex; align-items: center; justify-content: center;
     padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
   /* 비율 유지: 높이를 꽉 쓰고 남는 폭은 양옆 (왼쪽 사실·가상 게이지 · 오른쪽 버튼) */
   #screen { image-rendering: pixelated; background: #000; touch-action: none; display: block;

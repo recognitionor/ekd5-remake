@@ -80,6 +80,7 @@
 ## 웹
 - 버튼: 속도(누를 때마다 ×1→×1.5→×2→×4, localStorage ekd5-speed, ×4 는 대사 자동, F), 메뉴, 저장(5칸 슬롯 창: localStorage ekd5-slot-N, 저장·불러오기, 도중 불러오기는 sessionStorage ekd5-load 후 새로고침, 시작 때 고르기 창), 지도, 설정(배경음악·효과음·화면 방향 자동/세로 고정/가로 고정·화면 맞춤·전체 화면), 취소, 넘기기
 - 화면 방향: 세로면 body.port (위 화면·아래 사실·가상 게이지·버튼 4열), 원하는 방향과 폰 방향이 다르면 screen.orientation.lock 시도 + 앱을 90도 돌림 (body.rotcw/rotccw, 크기는 JS, 좌표 toGame 도 돌림) — 돌릴 때는 safe-area (노치·홈 막대) 여백을 #safeProbe 로 읽어 돌린 방향의 네 변 padding 으로 옮김 (안 하면 가로로 든 폰의 세로 고정에서 앱 위가 노치에 잘림). 세로는 가운데 정렬. 사실·가상 게이지 이름표는 바로 선 글자 두 줄 (위 가상·숫자, 아래 숫자·사실)
+- 웹 화면 맞춤: 돌리지 않을 때도 #app 을 visualViewport (실제 보이는 영역) 위치·크기로 놓고 --vw/--vh = 그 크기 − safe-area (100vh/dvh 는 아이폰에서 어긋남). 화면을 끄거나 앱을 벗어나면 (visibilitychange·pagehide) 음악·동영상 멈춤, 돌아오면 이어서 — 오디오 세션 playback 이면 아이폰은 꺼진 화면에서도 계속 틀기 때문
 - 전투 위 정보 띠 (24px, TOP_BAR) 는 맵 위에 겹치므로 카메라가 −24 까지 올라감 — 맨 윗줄 부대가 띠에 가리지 않음. 시험 EKD5_CAMTOP=틱
 - 난수: 원작은 전투마다 GetTickCount 씨앗 (FUN_00482060). 웹은 w.seed(시각) → 전투 시작·불러오기 때 새 씨앗 (CLI 는 고정)
 - (예전 설명) 소리(배경음악·효과음 켜고 끄기, localStorage ekd5-bgm/ekd5-sfx; 아이폰 audioSession: 음악 켬=playback, 끔=ambient 로 다른 앱 음악과 같이), 저장(중간 저장: 전투 내 차례·본진 → localStorage ekd5-quick), 지도(M), 취소, 넘기기, 꽉 채우기, 전체화면
