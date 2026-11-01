@@ -41,7 +41,9 @@
     image-rendering: pixelated; background: #000; border: 1px solid var(--btn-bd); }
   #fame.blink #fameCv { opacity: .45; }
   /* 원작 상태 줄: 채운 쪽(빨간 새) = 사실, 나머지(파란 새) = 가상 */
-  .fameLabel { writing-mode: vertical-rl; letter-spacing: 1px; }
+  /* 이름과 숫자를 바로 세워 두 줄로 (위: 가상·숫자, 아래: 숫자·사실) */
+  .fameLabel { display: flex; flex-direction: column; align-items: center; line-height: 1.15; font-size: 11px; font-weight: 700; white-space: nowrap; }
+  .fameLabel b { font-size: 13px; font-variant-numeric: tabular-nums; }
   #fameTop { color: #8ab4ff; } #fameBot { color: #ff8a80; }
   #movie { display: none; position: fixed; inset: 0; z-index: 10; width: 100%; height: 100%; background: #000; object-fit: contain; }
   #movie.on { display: block; }
@@ -51,19 +53,20 @@
   #rotate { display: none; position: fixed; inset: 0; z-index: 20; background: #000;
     flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; font-size: 17px; }
   /* 세로 배치: 위 화면, 아래 사실·가상 막대와 버튼 */
-  body.port #app { flex-direction: column; justify-content: flex-start; gap: 6px; }
+  body.port #app { flex-direction: column; justify-content: center; gap: 6px; }
   body.port #screen { order: 0; width: var(--vw); height: calc(var(--vw) * 3 / 4); }
   body.port.fill #screen { width: var(--vw); height: min(calc(var(--vh) - 170px), calc(var(--vw) * 1.1)); }
   body.port #fame { order: 1; width: var(--vw); height: 22px; flex-direction: row; gap: 8px; }
   body.port #fameBox { width: 204px; height: 12px; }
   body.port #fameCv { transform: translate(-50%, -50%); }
-  body.port .fameLabel { writing-mode: horizontal-tb; letter-spacing: 0; }
+  body.port .fameLabel { flex-direction: row; gap: 4px; font-size: 13px; }
   body.port #fameBot { order: 0; } body.port #fameBox { order: 1; } body.port #fameTop { order: 2; }
   body.port #bar { order: 2; width: var(--vw); height: auto; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 6px 10px; box-sizing: border-box; }
   body.port #bar button { width: 100%; height: 52px; font-size: 15px; }
   body.port #bar #cancel { height: 52px; }
   /* 폰이 화면 방향 고정을 못 하면 (아이폰) 앱 전체를 90도 돌려서 맞춤 */
-  body.rotcw #app, body.rotccw #app { inset: auto; width: 100vh; height: 100vw; top: 0; padding: 0; transform-origin: top left; }
+  /* 돌린 화면의 노치·홈 막대 여백은 JS 가 방향에 맞춰 padding 으로 넣음 */
+  body.rotcw #app, body.rotccw #app { inset: auto; width: 100vh; height: 100vw; top: 0; padding: 0; transform-origin: top left; box-sizing: border-box; }
   body.rotcw #app { left: 100vw; transform: rotate(90deg); }
   body.rotccw #app { left: 0; top: 100vh; transform: rotate(-90deg); }
 
@@ -96,7 +99,8 @@
 </head>
 <body>
 <div id="app">
-  <div id="fame"><span id="fameTop" class="fameLabel">가상</span><div id="fameBox"><canvas id="fameCv" width="200" height="8"></canvas></div><span id="fameBot" class="fameLabel">사실</span></div>
+  <div id="fame"><span id="fameTop" class="fameLabel"><span>가상</span><b id="fameTopN">-</b></span><div id="fameBox"><canvas id="fameCv" width="200" height="8"></canvas></div><span id="fameBot" class="fameLabel"><b id="fameBotN">-</b><span>사실</span></span></div>
+<div id="safeProbe" style="position:fixed;visibility:hidden;pointer-events:none;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)"></div>
   <canvas id="screen" width="640" height="480"></canvas>
   <div id="bar">
     <button id="fast">속도<br>×1</button>

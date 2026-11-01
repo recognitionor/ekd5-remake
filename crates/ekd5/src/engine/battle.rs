@@ -43,6 +43,9 @@ fn three() -> u8 {
 
 /// 날씨 표 (원작 0x498930): 기후 5종 × 6칸. 0 맑음 1 흐림 2 비 3 호우 4 눈
 pub const WEATHER: [[u8; 6]; 5] = [[0, 0, 0, 1, 2, 3], [0, 0, 0, 0, 1, 2], [0, 1, 2, 2, 3, 3], [0, 0, 1, 1, 4, 4], [0, 1, 4, 4, 4, 4]];
+/// 위 정보 띠 높이 — 카메라가 이만큼 맵 위로 더 올라갈 수 있어 맨 윗줄 부대가 띠에 가리지 않음
+/// (원작은 도구 막대가 맵 창 밖에 따로 있음)
+pub const TOP_BAR: i32 = 24;
 pub const WEATHER_NAME: [&str; 5] = ["맑음", "흐림", "비", "호우", "눈"];
 /// 날씨 그림 자리 (위 띠 안, [메뉴] 왼쪽 — 216×50 을 80×18 로 줄임)
 pub const WEATHER_WIN: (i32, i32, i32, i32) = (480, 3, 80, 18);
@@ -2222,7 +2225,7 @@ impl Battle {
     pub fn focus(&mut self, x: i32, y: i32) {
         let (mw, mh) = (self.cols * CELL, self.rows * CELL);
         self.cam.0 = (x * CELL + 24 - 320).clamp(0, (mw - 640).max(0));
-        self.cam.1 = (y * CELL + 24 - 240).clamp(0, (mh - 480).max(0));
+        self.cam.1 = (y * CELL + 24 - 240).clamp(-TOP_BAR, (mh - 480).max(-TOP_BAR));
     }
 
     /// 걷기 진행. 모두 섰으면 true
@@ -2383,7 +2386,7 @@ impl Battle {
                         if *moved {
                             let (mw, mh) = (self.cols * CELL, self.rows * CELL);
                             self.cam.0 = (*cx - (mx - *sx)).clamp(0, (mw - 640).max(0));
-                            self.cam.1 = (*cy - (my - *sy)).clamp(0, (mh - 480).max(0));
+                            self.cam.1 = (*cy - (my - *sy)).clamp(-TOP_BAR, (mh - 480).max(-TOP_BAR));
                         }
                     }
                 }

@@ -240,11 +240,17 @@
     const app = document.getElementById("app"), bs = document.body.style;
     if (rot) {
       const W = innerWidth, H = innerHeight;
+      // 폰의 노치·홈 막대 여백 (env safe-area) 을 돌린 앱의 네 변에 옮겨 넣음 — 안 넣으면 노치 쪽 변 (가로로 든 폰의 세로 고정이면 앱 위쪽) 이 잘림
+      const cs = getComputedStyle(document.getElementById("safeProbe"));
+      const [st, sr, sb, sl] = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"].map((k) => parseFloat(cs[k]) || 0);
+      // rotcw: 앱 위 = 폰 오른쪽, 아래 = 왼쪽, 왼쪽 = 위, 오른쪽 = 아래 / rotccw: 앱 위 = 폰 왼쪽, 아래 = 오른쪽, 왼쪽 = 아래, 오른쪽 = 위
+      const [pt, pr, pb, pl] = rot === "rotcw" ? [sr, sb, sl, st] : [sl, st, sr, sb];
+      app.style.padding = `${pt}px ${pr}px ${pb}px ${pl}px`;
       app.style.width = H + "px"; app.style.height = W + "px";
       app.style.left = rot === "rotcw" ? W + "px" : "0px"; app.style.top = rot === "rotcw" ? "0px" : H + "px";
-      bs.setProperty("--vw", H + "px"); bs.setProperty("--vh", W + "px");
+      bs.setProperty("--vw", (H - pl - pr) + "px"); bs.setProperty("--vh", (W - pt - pb) + "px");
     } else {
-      app.style.width = app.style.height = app.style.left = app.style.top = "";
+      app.style.width = app.style.height = app.style.left = app.style.top = app.style.padding = "";
       bs.removeProperty("--vw"); bs.removeProperty("--vh");
     }
     orientBtn.textContent = "화면 방향: " + ({ auto: "자동 (폰 방향대로)", port: "세로 고정", land: "가로 고정" })[orient];
@@ -420,7 +426,7 @@
 
   // ---------- 사실·가상 게이지 (원작 FUN_00478905 / FUN_0040d717): 가로 200, 채움(빨강) = 사실×2, 나머지(파랑) = 가상, MARK 무늬
   // 채움 0x00 (16 미만이면 0x40), 나머지 0xC0 (85 이상이면 0x40). 바뀔 때 다섯 번에 나눠 깜빡이며 움직임
-  const fameEl = document.getElementById("fame"), fameCv = document.getElementById("fameCv"), fameTop = document.getElementById("fameTop"), fameBot = document.getElementById("fameBot");
+  const fameEl = document.getElementById("fame"), fameCv = document.getElementById("fameCv"), fameTopN = document.getElementById("fameTopN"), fameBotN = document.getElementById("fameBotN");
   const fctx = fameCv.getContext("2d");
   let fameShown = -1, fameStep = 0, fameDrawn = -2, gcol = null, gcolAge = 0;
   function drawFame(v) {
@@ -441,7 +447,7 @@
     // 장면마다 팔레트가 바뀌니 색을 가끔 새로 받음
     if (++gcolAge > 30) { gcolAge = 0; gcol = null; fameDrawn = -2; }
     if (fameDrawn !== fameShown || !gcol) { drawFame(fameShown); fameDrawn = fameShown; }
-    fameBot.textContent = "사실 " + fameShown; fameTop.textContent = "가상 " + (100 - fameShown);
+    fameBotN.textContent = fameShown; fameTopN.textContent = 100 - fameShown;
   }
 
   // ---------- 루프 ----------

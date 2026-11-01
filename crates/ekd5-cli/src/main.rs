@@ -381,6 +381,13 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
                 }
             }
         }
+        // 시험: EKD5_CAMTOP=틱 — 그 틱에 맵 맨 윗줄로 화면 이동 (위 띠에 가리는지)
+        if std::env::var("EKD5_CAMTOP").ok().and_then(|v| v.parse::<u32>().ok()) == Some(t) {
+            if let ekd5::engine::Scene::Battle(b) = &mut eng.scene {
+                let x = b.cam.0 / 48 + 6;
+                b.focus(x, 0);
+            }
+        }
         // 시험: EKD5_TOOL=틱 — 그 틱에 첫 조조군 부대가 자기에게 첫 소모품을 씀 (도구 쓰기 연출)
         if std::env::var("EKD5_TOOL").ok().and_then(|v| v.parse::<u32>().ok()) == Some(t) {
             let items = eng.items.clone();
