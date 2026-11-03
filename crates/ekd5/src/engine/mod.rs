@@ -2671,7 +2671,7 @@ impl<A: Assets> Engine<A> {
             }
             // 승리 (원작 FUN_0044e6af): 아군이 아닌 승리 목표 장수가 퇴각했거나, 맵 위 적군이 없음
             0x42 => {
-                if b.cheat && b.turn > 3 {
+                if b.cheat && b.turn > 3 && std::env::var("EKD5_NOWIN").is_err() {
                     return true;
                 }
                 battle_won(b)

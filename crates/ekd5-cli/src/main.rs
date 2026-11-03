@@ -219,6 +219,7 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
         eng.restore(&r);
     }
     let snap = std::env::var("EKD5_SNAP").is_ok();
+    let mut overlap_seen: std::collections::HashSet<(u32, usize, usize)> = std::collections::HashSet::new();
     let shot_from: u32 = std::env::var("EKD5_SHOT_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     // 시험: 중간 저장 불러오기 (EKD5_QLOAD=파일), 그 틱에 중간 저장 (EKD5_QSAVE=틱:파일)
     if let Ok(f) = std::env::var("EKD5_QLOAD") {
@@ -386,6 +387,24 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
             if let ekd5::engine::Scene::Battle(b) = &mut eng.scene {
                 let x = b.cam.0 / 48 + 6;
                 b.focus(x, 0);
+            }
+        }
+        // 시험: EKD5_OVERLAP=1 — 보이는 부대가 같은 칸에 겹치면 (이동 중 아님) 처음 한 번씩 알림
+        if std::env::var("EKD5_OVERLAP").is_ok() {
+            if let ekd5::engine::Scene::Battle(b) = &eng.scene {
+                let idle = matches!(b.phase, ekd5::engine::battle::Phase::PlayerIdle | ekd5::engine::battle::Phase::TurnBanner { .. });
+                let live: Vec<usize> = (0..b.units.len()).filter(|&i| b.units[i].visible && b.units[i].hp > 0 && (idle || b.units[i].path.is_empty()) && b.units[i].leave.is_none()).collect();
+                for (k, &i) in live.iter().enumerate() {
+                    for &j in &live[k + 1..] {
+                        let vis = |k: usize| ((b.units[k].px / 48.0).round() as i32, (b.units[k].py / 48.0).round() as i32);
+                        if (b.units[i].x, b.units[i].y) == (b.units[j].x, b.units[j].y) || vis(i) == vis(j) {
+                            let key = (eng.stage, b.units[i].person, b.units[j].person);
+                            if overlap_seen.insert(key) {
+                                println!("[{t:>6}] 겹침 단계 {} 턴 {} {:?}{}@{},{} 그림{:?} · {:?}{}@{},{} 그림{:?}", eng.stage, b.turn, b.units[i].side, b.units[i].person, b.units[i].x, b.units[i].y, vis(i), b.units[j].side, b.units[j].person, b.units[j].x, b.units[j].y, vis(j));
+                            }
+                        }
+                    }
+                }
             }
         }
         // 시험: EKD5_TOOL=틱 — 그 틱에 첫 조조군 부대가 자기에게 첫 소모품을 씀 (도구 쓰기 연출)
