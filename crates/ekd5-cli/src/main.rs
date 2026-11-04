@@ -393,7 +393,7 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
         if std::env::var("EKD5_OVERLAP").is_ok() {
             if let ekd5::engine::Scene::Battle(b) = &eng.scene {
                 let idle = matches!(b.phase, ekd5::engine::battle::Phase::PlayerIdle | ekd5::engine::battle::Phase::TurnBanner { .. });
-                let live: Vec<usize> = (0..b.units.len()).filter(|&i| b.units[i].visible && b.units[i].hp > 0 && (idle || b.units[i].path.is_empty()) && b.units[i].leave.is_none()).collect();
+                let live: Vec<usize> = (0..b.units.len()).filter(|&i| b.units[i].visible && (idle || b.units[i].path.is_empty()) && b.units[i].leave.is_none()).collect();
                 for (k, &i) in live.iter().enumerate() {
                     for &j in &live[k + 1..] {
                         let vis = |k: usize| ((b.units[k].px / 48.0).round() as i32, (b.units[k].py / 48.0).round() as i32);
@@ -403,6 +403,22 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
                                 println!("[{t:>6}] 겹침 단계 {} 턴 {} {:?}{}@{},{} 그림{:?} · {:?}{}@{},{} 그림{:?}", eng.stage, b.turn, b.units[i].side, b.units[i].person, b.units[i].x, b.units[i].y, vis(i), b.units[j].side, b.units[j].person, b.units[j].x, b.units[j].y, vis(j));
                             }
                         }
+                    }
+                }
+            }
+        }
+        // 시험: EKD5_AIM="틱:책략" — 그 틱에 첫 조조군 부대가 그 책략 대상 고르기, 가장 가까운 적 칸에 범위 표시
+        if let Some((at, sid)) = std::env::var("EKD5_AIM").ok().and_then(|v| { let (a, b) = v.split_once(':')?; Some((a.parse::<u32>().ok()?, b.parse::<u8>().ok()?)) }) {
+            if at == t {
+                if let ekd5::engine::Scene::Battle(b) = &mut eng.scene {
+                    use ekd5::engine::battle::{Phase, Side};
+                    if let Some(u) = b.units.iter().position(|u| u.visible && u.hp > 0 && u.side == Side::Player) {
+                        let (x, y) = (b.units[u].x, b.units[u].y);
+                        let e = b.units.iter().filter(|e| e.visible && e.hp > 0 && e.side == Side::Enemy).min_by_key(|e| (e.x - x).abs() + (e.y - y).abs()).map(|e| (e.x, e.y));
+                        let cells = b.strat_cells(u, sid);
+                        b.strat_aim = e;
+                        if let Some(c) = e { b.focus(c.0, c.1); }
+                        b.phase = Phase::StratTarget { unit: u, from: (x, y), sid, cells };
                     }
                 }
             }

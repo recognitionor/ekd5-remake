@@ -360,6 +360,8 @@ pub struct Battle {
     pub shout: Option<usize>,
     /// 도구 쓰기 연출의 아이템 그림 (32×32, 엔진이 넣어 줌)
     pub tool_pic: Option<Rc<Pic>>,
+    /// 책략 대상 고르기에서 효과 범위를 보여 줄 칸
+    pub strat_aim: Option<(i32, i32)>,
     /// 장수 정보 창 열기 요청 (부대) — 길게 누르기·오른쪽 클릭 (원작 FUN_0047b36a)
     pub open_info: Option<usize>,
     /// 부대를 눌러 본 적이 있나 (처음 안내용)
@@ -561,6 +563,7 @@ impl Battle {
             shout: None,
             tool_pic: None,
             open_info: None,
+            strat_aim: None,
             unit_tapped: false,
             suppress_tap: false,
             item_rise: None,
@@ -710,7 +713,7 @@ impl Battle {
         const D: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
         let inb = |cx: i32, cy: i32| cx >= 0 && cy >= 0 && cx < self.cols && cy < self.rows;
         let taken = |cx: i32, cy: i32| {
-            self.units.iter().enumerate().any(|(i, o)| i != u && o.visible && o.hp > 0 && o.leave.is_none() && ((o.x, o.y) == (cx, cy) || o.path.back() == Some(&(cx, cy))))
+            self.units.iter().enumerate().any(|(i, o)| i != u && o.visible && ((o.x, o.y) == (cx, cy) || o.path.back() == Some(&(cx, cy))))
         };
         let ok = |cx: i32, cy: i32| inb(cx, cy) && !taken(cx, cy) && self.move_cost_of(u, cx, cy).is_some();
         let mut c = inb(x, y).then_some((x, y));
@@ -759,6 +762,26 @@ impl Battle {
 
     pub fn at(&self, x: i32, y: i32) -> Option<usize> {
         self.units.iter().position(|u| u.visible && u.hp > 0 && u.x == x && u.y == y)
+    }
+
+    /// 책략 효과 범위 칸 (대상 고르기 때 커서에 표시): 청룡은 시전자 둘레, 모래폭풍·현무·백호는 맞는 부대들, 그 밖은 고른 칸 둘레
+    pub fn strat_area_cells(&self, u: usize, sid: u8, c: (i32, i32)) -> Vec<(i32, i32)> {
+        let Some(st) = self.strat(sid) else { return Vec::new() };
+        let inb = |p: &(i32, i32)| p.0 >= 0 && p.1 >= 0 && p.0 < self.cols && p.1 < self.rows;
+        match sid {
+            64 => {
+                let (x, y) = (self.units[u].x, self.units[u].y);
+                Self::range_offsets(0xC).into_iter().map(|(dx, dy)| (x + dx, y + dy)).filter(inb).collect()
+            }
+            14 | 66 | 67 => self.strat_victims(u, sid, c).into_iter().map(|t| (self.units[t].x, self.units[t].y)).collect(),
+            _ => st.area_offsets().into_iter().map(|(dx, dy)| (c.0 + dx, c.1 + dy)).filter(inb).collect(),
+        }
+    }
+
+    /// 칸이 차 있나 (멈출 수 없음): 보이는 부대면 HP 0 이어도 — 쓰러졌지만 사건·퇴각 연출 전인 부대의 칸에
+    /// 다른 부대가 들어가 겹쳐 서던 문제 (원작은 퇴각 처리 FUN_004438a5 가 끝나야 칸이 빔)
+    pub fn occupied(&self, x: i32, y: i32) -> bool {
+        self.units.iter().any(|u| u.visible && u.x == x && u.y == y)
     }
 
     fn terr(&self, x: i32, y: i32) -> u8 {
@@ -867,7 +890,7 @@ impl Battle {
         let mut out = Vec::new();
         for y in 0..self.rows {
             for x in 0..self.cols {
-                if best[(y * self.cols + x) as usize] != i32::MAX && (self.at(x, y).is_none() || (x, y) == (u.x, u.y)) {
+                if best[(y * self.cols + x) as usize] != i32::MAX && (!self.occupied(x, y) || (x, y) == (u.x, u.y)) {
                     out.push((x, y));
                 }
             }
@@ -2615,6 +2638,7 @@ impl Battle {
                                 self.message = Some(("지금은 쓸 수 없습니다".into(), 40));
                             } else if self.units[unit].mp >= need {
                                 let cells = self.strat_cells(unit, sid);
+                                self.strat_aim = None;
                                 self.phase = Phase::StratTarget { unit, from, sid, cells };
                             } else {
                                 self.message = Some(("MP가 모자랍니다".into(), 40));
@@ -2663,11 +2687,20 @@ impl Battle {
                     let list = self.known_strategies(unit);
                     self.phase = Phase::StratList { unit, from, list };
                 } else if let Some(c) = tapped {
-                    if cells.contains(&c) && !self.strat_victims(unit, sid, c).is_empty() {
-                        self.phase = Phase::Cast { unit, sid, cell: c, t: 0 };
-                    } else {
+                    // 범위 책략은 먼저 누른 칸에 효과 범위를 보여 주고, 같은 칸을 다시 누르면 시전 (마우스는 올려 두면 보임)
+                    let wide = self.strat_area_cells(unit, sid, c).len() > 1;
+                    if !cells.contains(&c) || self.strat_victims(unit, sid, c).is_empty() {
                         self.message = Some(("대상이 없습니다".into(), 40));
+                        self.strat_aim = None;
+                    } else if wide && self.strat_aim != Some(c) && !inp.hover {
+                        self.strat_aim = Some(c);
+                    } else {
+                        self.strat_aim = None;
+                        self.phase = Phase::Cast { unit, sid, cell: c, t: 0 };
                     }
+                } else if inp.hover {
+                    // 마우스: 올린 칸
+                    self.strat_aim = inp.mouse.map(|(mx, my)| self.cell_at_screen(mx, my)).filter(|c| cells.contains(c));
                 }
             }
             Phase::Cast { unit, sid, cell, t } => {
@@ -3704,6 +3737,12 @@ impl Battle {
                 self.mark_pic(scr, 0xCC0, 48, 48, x * CELL - self.cam.0, y * CELL - self.cam.1);
             }
         }
+        // 책략 대상 고르기: 커서 칸의 효과 범위를 빨간 테두리 칸으로 (원작은 사거리·범위 그림 HITAREA/EFFAREA)
+        if let (Phase::StratTarget { unit, sid, .. }, Some(c)) = (&self.phase, self.strat_aim) {
+            for (x, y) in self.strat_area_cells(*unit, *sid, c) {
+                self.mark_pic(scr, 0xCC0, 48, 48, x * CELL - self.cam.0, y * CELL - self.cam.1);
+            }
+        }
         // 색 바꾸기 표 (원작 FUN_00432a30 어둡게: 각 채널 −4 / FUN_00432aee 독: 빨강·파랑 −6, 초록 그대로; 4비트 단위)
         let tint = |pal: &crate::palette::Palette, dr: u8, dg: u8, db: u8| -> Vec<u8> {
             (0..256usize)
@@ -3783,7 +3822,8 @@ impl Battle {
                     _ => (4 + step, true),
                 },
             };
-            let frame = if u.hp > 0 && u.hp * 4 < u.max_hp && u.pose.is_none() && !walking { 9 + step } else { frame };
+            // 지친 모습 (원작 FUN_004422bb: HP < 최대 HP/5 — 공격 중 잠깐 켜지는 표지 0x20 은 공격 연출 몫)
+            let frame = if u.hp > 0 && u.hp < u.max_hp / 5 && u.pose.is_none() && !walking { 9 + step } else { frame };
             // 사망: 무릎 꿇은 그림 (원작 UNIT_MOV +0x5100)
             let frame = if matches!(u.leave, Some((2, _))) { 9 } else { frame };
             let (mut sx, mut sy) = (u.px as i32 - self.cam.0, u.py as i32 - self.cam.1);
