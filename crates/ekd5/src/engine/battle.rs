@@ -766,7 +766,9 @@ impl Battle {
 
     /// 책략 효과 범위 칸 (대상 고르기 때 커서에 표시): 청룡은 시전자 둘레, 모래폭풍·현무·백호는 맞는 부대들, 그 밖은 고른 칸 둘레
     pub fn strat_area_cells(&self, u: usize, sid: u8, c: (i32, i32)) -> Vec<(i32, i32)> {
-        let Some(st) = self.strat(sid) else { return Vec::new() };
+        if self.strat(sid).is_none() {
+            return Vec::new();
+        }
         let inb = |p: &(i32, i32)| p.0 >= 0 && p.1 >= 0 && p.0 < self.cols && p.1 < self.rows;
         match sid {
             64 => {
@@ -774,8 +776,22 @@ impl Battle {
                 Self::range_offsets(0xC).into_iter().map(|(dx, dy)| (x + dx, y + dy)).filter(inb).collect()
             }
             14 | 66 | 67 => self.strat_victims(u, sid, c).into_iter().map(|t| (self.units[t].x, self.units[t].y)).collect(),
-            _ => st.area_offsets().into_iter().map(|(dx, dy)| (c.0 + dx, c.1 + dy)).filter(inb).collect(),
+            _ => self.area_at(u, sid, c).into_iter().filter(inb).collect(),
         }
+    }
+
+    /// 책략 효과 범위 칸 (원작 FUN_00437ea6): 0 한 칸, 1 십자, 2 3×3, 5 시전자→대상 방향으로 대상 칸부터 일직선 6칸 (폭염)
+    fn area_at(&self, u: usize, sid: u8, c: (i32, i32)) -> Vec<(i32, i32)> {
+        let Some(st) = self.strat(sid) else { return Vec::new() };
+        if st.area == 5 {
+            let (ux, uy) = (self.units[u].x, self.units[u].y);
+            let (dx, dy) = ((c.0 - ux).signum(), (c.1 - uy).signum());
+            if (dx, dy) == (0, 0) {
+                return vec![c];
+            }
+            return (0..=5).map(|k| (c.0 + dx * k, c.1 + dy * k)).collect();
+        }
+        st.area_offsets().into_iter().map(|(dx, dy)| (c.0 + dx, c.1 + dy)).collect()
     }
 
     /// 칸이 차 있나 (멈출 수 없음): 보이는 부대면 HP 0 이어도 — 쓰러졌지만 사건·퇴각 연출 전인 부대의 칸에
@@ -1205,10 +1221,10 @@ impl Battle {
             66 => (0..n).filter(|&t| live(t)).collect(),
             // 백호 (FUN_00426bab): 같은 편 모두
             67 => (0..n).filter(|&t| live(t) && !self.units[t].side.hostile(side)).collect(),
-            _ => st
-                .area_offsets()
+            _ => self
+                .area_at(u, sid, cell)
                 .into_iter()
-                .filter_map(|(dx, dy)| self.at(cell.0 + dx, cell.1 + dy))
+                .filter_map(|(x, y)| self.at(x, y))
                 .filter(|&t| if st.target == 0 { self.units[t].side.hostile(side) } else { !self.units[t].side.hostile(side) })
                 .filter(|&t| terr_ok(t))
                 .collect(),
