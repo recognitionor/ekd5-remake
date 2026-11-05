@@ -521,6 +521,34 @@ impl<A: Assets> Engine<A> {
         o
     }
 
+    /// 합류 (원작 FUN_0040c70f): 이미 있으면 그대로. 아니면 원자료에서 다시 읽어 아군 기준 레벨 (FUN_0040c5d2) + 조정치
+    /// (50 이하 +값 최대 50, 그 위 −(값−50), 최소 1) 로 키움. 병과 승급·장비는 Officer::enlist
+    fn join_officer(&mut self, p: usize, adj: i32) {
+        if self.roster.contains(&p) {
+            return;
+        }
+        let base = self.top_level() as i32;
+        let lv = if adj <= 50 { (base + adj).min(50) } else { base - (adj - 50) }.max(1) as u8;
+        let r = self.person_data.get(p * 32..p * 32 + 32).map(|r| r.to_vec()).unwrap_or_else(|| vec![0; 32]);
+        let mut o = crate::officer::Officer::from_data(p, &r);
+        o.enlist(&self.jobs, lv);
+        self.log.push(format!("합류 {} Lv{} 병과 {}", self.persons.get(p).map(|x| x.name.as_str()).unwrap_or(""), o.level, o.job));
+        self.officers.insert(p, o);
+        self.roster.push(p);
+    }
+
+    /// 이탈 (원작 FUN_0040c70f 인자 0xFF): 합류해 있었으면 장비 셋을 창고로. 다음 등장 때는 원자료에서 다시 읽음 (FUN_0044ecdc)
+    fn leave_officer(&mut self, p: usize) {
+        if !self.roster.contains(&p) {
+            return;
+        }
+        let o = self.officer(p);
+        self.inventory.extend(o.weapon.into_iter().chain(o.armor).chain(o.acc.map(|id| (id, 1))));
+        self.log.push(format!("이탈 {}", self.persons.get(p).map(|x| x.name.as_str()).unwrap_or("")));
+        self.officers.remove(&p);
+        self.roster.retain(|&x| x != p);
+    }
+
     /// 조조군 평균 레벨 (원작 FUN_0041adb4: 출진 장수 목록 DAT_00495498 에서 위아래 1/4 빼고 평균).
     /// 아직 출진을 안 골랐으면 동료 전체
     fn army_level(&mut self) -> u8 {
@@ -1656,10 +1684,14 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x3B => {
-                // 합류 (인물, 레벨?, ?)
-                let p = a(0) as usize;
-                if p < 0x200 && !self.roster.contains(&p) {
-                    self.roster.push(p);
+                // 합류·이탈 (원작 FUN_00416d15 → FUN_0040c70f): 인물, 0 합류 / 0xFF·0xFFFF 이탈, 레벨 조정치. 전투 중에는 무시
+                let (p, mode, adj) = (a(0) as usize, a(1), if a(2) == 0xFFFF { 0 } else { a(2) });
+                if p < 0x200 && !matches!(self.scene, Scene::Battle(_)) {
+                    match mode {
+                        0 => self.join_officer(p, adj),
+                        0xFF | 0xFFFF => self.leave_officer(p),
+                        _ => {}
+                    }
                 }
             }
             0x1A => {

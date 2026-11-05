@@ -317,8 +317,20 @@ impl Officer {
     /// 레벨에 맞는 기본 장비 (원작 FUN_004083d7): 직업이 쓸 수 있는 첫 무기 계열(직업 +9..+22) / 방어구 계열(+23..+26) 에서
     /// 등급 = min(레벨/12, 2), 아이템 레벨 = 레벨 < 36 이면 (레벨%12)/4+1, 아니면 3. 무기 = 계열/2×3+등급, 방어구 = 0x26 + 같은 식
     pub fn auto_equip(&mut self, jobs: &[u8], slot: u8) {
-        let tier = (self.level / 12).min(2);
-        let lv = if self.level < 36 { (self.level % 12) / 4 + 1 } else { 3 };
+        self.equip_tiered(jobs, slot, false);
+    }
+
+    /// lower (FUN_004083d7 인자 1, 합류할 때): 한 단계 아래 — 레벨을 하나 낮추고, 0 이 되면 첫 등급은 Lv1, 그 위는 아래 등급 Lv3
+    fn equip_tiered(&mut self, jobs: &[u8], slot: u8, lower: bool) {
+        let mut tier = (self.level / 12).min(2);
+        let mut lv = if self.level < 36 { (self.level % 12) / 4 + 1 } else { 3 };
+        if lower {
+            lv -= 1;
+            if lv == 0 {
+                lv = if tier == 0 { 1 } else { 3 };
+                tier = tier.saturating_sub(1);
+            }
+        }
         let can = |k: usize| jobs.get(self.job as usize * 27 + 9 + k).copied().unwrap_or(0) != 0;
         let (range, base) = if slot == 0 { (0..14, 0u8) } else { (14..18, 0x26u8) };
         let start = range.start;
@@ -332,6 +344,18 @@ impl Officer {
             }
             self.gear_exp[slot as usize] = 0;
         }
+    }
+
+    /// 합류할 때 키우기 (원작 FUN_0040c70f): 레벨 0 에서 lv 번 오름 (오름 폭은 처음 병과), 그 뒤 병과 승급 Lv15 +1 / Lv30 +2,
+    /// 무기·방어구는 그 레벨 자동 장비보다 한 단계 아래 (FUN_004083d7 인자 1)
+    pub fn enlist(&mut self, jobs: &[u8], lv: u8) {
+        self.level = 0;
+        self.level_up(jobs, lv);
+        if self.job < 0x27 {
+            self.job += if lv < 15 { 0 } else if lv < 30 { 1 } else { 2 };
+        }
+        self.equip_tiered(jobs, 0, true);
+        self.equip_tiered(jobs, 1, true);
     }
 
     /// 장비 특수 효과 (원작 FUN_00407df9 / FUN_00407ee2): 무기·방어구는 특수 무기(종류 홀수, 0x12 미만)일 때
