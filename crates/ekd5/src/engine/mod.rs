@@ -173,7 +173,7 @@ pub struct Engine<A: Assets> {
     /// DATA.E5[0] 원자료, 아이템 표
     pub person_data: Rc<Vec<u8>>,
     /// 불러온 장수 레벨 (자료 적재 뒤 적용)
-    pending_offs: Vec<(usize, u8, u8, Option<(u8, u8)>, Option<(u8, u8)>, Option<u8>, [u8; 2])>,
+    pending_offs: Vec<(usize, u8, u8, Option<(u8, u8)>, Option<(u8, u8)>, Option<u8>, [u8; 2], Option<(u8, [u16; 5], u16, u16)>)>,
     pub items: Rc<Vec<u8>>,
     /// 장(이야기 단계)마다 상점 목록 (DATA.E5[2], 36바이트 × 58: u16 무기상 주인, u16 도구상 주인, 무기·방어구 16, 도구 16, 0xFF 없음 — 원작 FUN_0041dd5e / FUN_0040e13c)
     pub shops: Rc<Vec<u8>>,
@@ -454,11 +454,17 @@ impl<A: Assets> Engine<A> {
             }
         }
         let has_eq = self.pending_offs.iter().any(|o| o.3.is_some() || o.4.is_some() || o.5.is_some());
-        for (p, lv, ex, w, ar, ac, ge) in std::mem::take(&mut self.pending_offs) {
+        for (p, lv, ex, w, ar, ac, ge, grown) in std::mem::take(&mut self.pending_offs) {
             if let Some(r) = self.person_data.get(p * 32..p * 32 + 32) {
                 let mut o = crate::officer::Officer::from_data(p, r);
                 o.set_level(&self.jobs, lv);
                 o.exp = ex;
+                if let Some((job, stats, hp, mp)) = grown {
+                    o.job = job;
+                    o.stats = stats;
+                    o.max_hp = hp;
+                    o.max_mp = mp;
+                }
                 if has_eq {
                     o.weapon = w;
                     o.armor = ar;
@@ -2293,6 +2299,7 @@ impl<A: Assets> Engine<A> {
         let sortie_chosen = self.sortie_chosen.clone();
         let avg = self.army_level() as i32;
         let jobs = self.jobs.clone();
+        let chapter = self.chapter;
         // 필요한 인물 능력 미리
         let mut offs: HashMap<usize, crate::officer::Officer> = HashMap::new();
         let want: Vec<usize> = match op {
@@ -2305,7 +2312,12 @@ impl<A: Assets> Engine<A> {
         };
         for p in want {
             if p < persons.len() {
-                let o = self.officer(p);
+                // 합류하지 않은 부대는 원자료에서 다시 읽음 (원작 FUN_0044ecdc)
+                let o = if matches!(op, 0x46 | 0x47) && !roster.contains(&p) {
+                    crate::officer::Officer::from_data(p, self.person_data.get(p * 32..p * 32 + 32).unwrap_or(&[]))
+                } else {
+                    self.officer(p)
+                };
                 offs.insert(p, o);
             }
         }
@@ -2347,14 +2359,14 @@ impl<A: Assets> Engine<A> {
                     if pid == 0xFFFF || pid as usize >= persons.len() {
                         continue;
                     }
-                    let (side, hidden, x, y, lv, ai, tx, ty) = if op == 0x46 {
-                        (battle::Side::Ally, r[1].i() == 1, r[2].i(), r[3].i(), r[5].i(), r[7].i(), r[9].i(), r[10].i())
+                    let (side, hidden, x, y, rank, lv, ai, tx, ty) = if op == 0x46 {
+                        (battle::Side::Ally, r[1].i() == 1, r[2].i(), r[3].i(), r[4].i(), r[5].i(), r[7].i(), r[9].i(), r[10].i())
                     } else {
-                        (battle::Side::Enemy, r[1].i() == 1, r[3].i(), r[4].i(), r[6].i(), r[8].i(), r[10].i(), r[11].i())
+                        (battle::Side::Enemy, r[1].i() == 1, r[3].i(), r[4].i(), r[5].i(), r[6].i(), r[8].i(), r[10].i(), r[11].i())
                     };
                     let mut o = offs.get(&(pid as usize)).cloned().unwrap();
                     if !roster.contains(&(pid as usize)) {
-                        o.set_level(&jobs, level_of(lv));
+                        o.deploy(&jobs, rank as u8, chapter, level_of(lv));
                         // 원작: 목록 부대는 레벨에 맞는 무기·방어구를 자동 장착 (op48 로 바꿀 수 있음)
                         o.auto_equip(&jobs, 0);
                         o.auto_equip(&jobs, 1);
@@ -3307,7 +3319,7 @@ impl<A: Assets> Engine<A> {
             .values()
             .map(|o| {
                 let it = |x: Option<(u8, u8)>| x.map_or("255.0".into(), |(i, l)| format!("{i}.{l}"));
-                format!("{}:{}:{}:{}:{}:{}:{}:{}", o.person, o.level, o.exp, it(o.weapon), it(o.armor), o.acc.unwrap_or(255), o.gear_exp[0], o.gear_exp[1])
+                format!("{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}", o.person, o.level, o.exp, it(o.weapon), it(o.armor), o.acc.unwrap_or(255), o.gear_exp[0], o.gear_exp[1], o.job, o.stats.map(|v| v.to_string()).join("."), o.max_hp, o.max_mp)
             })
             .collect();
         let inv: Vec<String> = self.inventory.iter().map(|(i, l)| format!("{i}.{l}")).collect();
@@ -3334,12 +3346,17 @@ impl<A: Assets> Engine<A> {
             o.split(',').filter_map(|e| {
                 let v: Vec<&str> = e.split(':').collect();
                 let n = |i: usize| v.get(i).and_then(|x| x.parse::<u32>().ok());
+                // 예전 판 저장에는 없음 (레벨로 다시 계산)
+                let grown = |v: &[&str]| -> Option<(u8, [u16; 5], u16, u16)> {
+                    let st: Vec<u16> = v.get(9)?.split('.').filter_map(|x| x.parse().ok()).collect();
+                    Some((v.get(8)?.parse().ok()?, st.try_into().ok()?, v.get(10)?.parse().ok()?, v.get(11)?.parse().ok()?))
+                };
                 let eq = |i: usize| -> Option<(u8, u8)> {
                     let (a, b) = v.get(i)?.split_once('.')?;
                     let a: u8 = a.parse().ok()?;
                     (a != 255).then_some((a, b.parse().ok()?))
                 };
-                Some((n(0)? as usize, n(1)? as u8, n(2)? as u8, eq(3), eq(4), n(5).filter(|&x| x != 255).map(|x| x as u8), [n(6).unwrap_or(0) as u8, n(7).unwrap_or(0) as u8]))
+                Some((n(0)? as usize, n(1)? as u8, n(2)? as u8, eq(3), eq(4), n(5).filter(|&x| x != 255).map(|x| x as u8), [n(6).unwrap_or(0) as u8, n(7).unwrap_or(0) as u8], grown(&v)))
             }).collect()
         });
         self.gold = f.get(5).and_then(|g| g.parse().ok()).unwrap_or(0);

@@ -39,6 +39,7 @@ EKD5_AUTOPLAY=1 EKD5_CHEAT=1 EKD5_AUTO=6 EKD5_PRESS="20:20" \
 | `EKD5_SNAP` / `EKD5_RESTORE=문자열` | 단계마다 진행 상태 문자열 출력 / 그 상태에서 시작 |
 | `EKD5_QSAVE=틱:파일` / `EKD5_QLOAD=파일` | 중간 저장 (전투 중, 본진) 쓰기 / 불러오기 |
 | `EKD5_AUTOPLAY_END=틱`, `EKD5_AUTO_END=틱` | 그 틱부터 사람이 조작하는 상태로 |
+| `EKD5_PROMOTE=틱:레벨` | 화면 위쪽 조조군 부대 하나를 그 레벨로 올리고 인수를 씀 (승급 연출 확인) |
 | `EKD5_TAPS=틱:x:y,…` | 그 틱에 화면 좌표를 누름 |
 | `EKD5_ALT=틱:x:y` | 정보 보기 (오른쪽 클릭·길게 누르기) |
 | `EKD5_FORCE=틱:블록` | 사건 블록 강제 실행 (예: 일기토 장면) |

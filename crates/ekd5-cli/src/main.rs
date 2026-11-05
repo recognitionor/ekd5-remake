@@ -382,6 +382,22 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
                 }
             }
         }
+        // 인수 승급 시험: 틱:인수를 쓸 레벨 — 첫 조조군 부대에 그 레벨로 인수를 씀
+        if let Some((pt, lv)) = std::env::var("EKD5_PROMOTE").ok().and_then(|v| { let (a, b) = v.split_once(':')?; Some((a.parse::<u32>().ok()?, b.parse::<u8>().ok()?)) }) {
+            if t == pt {
+                if let ekd5::engine::Scene::Battle(b) = &mut eng.scene {
+                    let u = (0..b.units.len()).find(|&i| b.units[i].side == ekd5::engine::battle::Side::Player && b.units[i].visible && b.units[i].hp > 0 && b.units[i].job % 3 != 2 && b.units[i].job < 0x27 && b.units[i].x * 48 >= b.cam.0 && b.units[i].x * 48 < b.cam.0 + 590 && b.units[i].y * 48 >= b.cam.1 && b.units[i].y * 48 < b.cam.1 + 280);
+                    if let Some(u) = u {
+                        println!("[{t:>6}] 승급 시험 인물 {} ({}, {}) 병과 {}", b.units[u].person, b.units[u].x, b.units[u].y, b.units[u].job);
+                        b.units[u].off.level = lv;
+                        b.units[u].level = lv as i32;
+                        b.inventory.push((0x61, 1));
+                        let inv = b.inventory.len() - 1;
+                        b.phase = ekd5::engine::battle::Phase::ToolUse { unit: u, target: u, inv, t: 0 };
+                    }
+                }
+            }
+        }
         // 시험: EKD5_CAMTOP=틱 — 그 틱에 맵 맨 윗줄로 화면 이동 (위 띠에 가리는지)
         if std::env::var("EKD5_CAMTOP").ok().and_then(|v| v.parse::<u32>().ok()) == Some(t) {
             if let ekd5::engine::Scene::Battle(b) = &mut eng.scene {

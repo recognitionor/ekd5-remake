@@ -346,6 +346,68 @@ impl Officer {
         }
     }
 
+    /// 목록 부대 (원작 FUN_0044ecdc → FUN_004449e5): 원자료 상태에서 병과와 레벨을 정함. 승급 값 1 = Lv15 +1, 2 = Lv15 +1 / Lv30 +2.
+    /// 일반 병사 (인물 0xAD 초과) 는 승급 값 대신 장 (0 없음, 1 → 1, 2·3 → 2). 능력은 FUN_00408dbd 만큼 더함
+    pub fn deploy(&mut self, jobs: &[u8], rank: u8, chapter: u8, lv: u8) {
+        let rank = if self.person > 0xAD {
+            match chapter {
+                0 => 0,
+                1 => 1,
+                2 | 3 => 2,
+                _ => rank,
+            }
+        } else {
+            rank
+        };
+        if self.job < 0x27 {
+            self.job += match rank {
+                1 if lv > 14 => 1,
+                2 if lv >= 30 => 2,
+                2 if lv > 14 => 1,
+                _ => 0,
+            };
+        }
+        self.level = lv;
+        for i in 0..7 {
+            let v = self.deploy_gain(jobs, i);
+            match i {
+                0..=4 => self.stats[i] = (self.stats[i] + v).min(255),
+                5 => self.max_hp = (self.max_hp + v).min(500),
+                _ => self.max_mp = (self.max_mp + v).min(250),
+            }
+        }
+    }
+
+    /// 레벨 하나 오를 때 능력 i 의 폭 (원작 FUN_00407758): 병과 표, 능력 5개는 처음 능력 등급과 평균
+    fn gain_of(&self, jobs: &[u8], job: u8, i: usize) -> u16 {
+        let j = jobs.get(job as usize * 27 + 2 + i).copied().unwrap_or(0) as u16;
+        if i < 5 { (j + Self::base_grade(self.base[i])) >> 1 } else { j }
+    }
+
+    /// 지금 레벨까지 능력 i 가 는 양 (원작 FUN_00408dbd): 승급 병과는 앞 15 레벨씩 아래 병과 폭 (원작 그대로 2단계도 바로 아래 병과)
+    fn deploy_gain(&self, jobs: &[u8], i: usize) -> u16 {
+        let mut n = self.level.saturating_sub(1) as u16;
+        let mut v = 0;
+        if self.job < 0x27 {
+            let k = self.job % 3;
+            if k == 2 && self.level >= 30 {
+                v += self.gain_of(jobs, self.job - 1, i) * 15;
+                n = n.saturating_sub(15);
+            }
+            if k != 0 && n + 1 > 14 {
+                v += self.gain_of(jobs, self.job - 1, i) * 15;
+                n = n.saturating_sub(15);
+            }
+        }
+        v + n * self.gain_of(jobs, self.job, i)
+    }
+
+    /// 인수 승급 (원작 FUN_0041fa2b): HP·MP 는 지금 병과 폭의 2배
+    pub fn promote_gain(&mut self, jobs: &[u8]) {
+        self.max_hp = (self.max_hp + self.gain_of(jobs, self.job, 5) * 2).min(500);
+        self.max_mp = (self.max_mp + self.gain_of(jobs, self.job, 6) * 2).min(250);
+    }
+
     /// 합류할 때 키우기 (원작 FUN_0040c70f): 레벨 0 에서 lv 번 오름 (오름 폭은 처음 병과), 그 뒤 병과 승급 Lv15 +1 / Lv30 +2,
     /// 무기·방어구는 그 레벨 자동 장비보다 한 단계 아래 (FUN_004083d7 인자 1)
     pub fn enlist(&mut self, jobs: &[u8], lv: u8) {

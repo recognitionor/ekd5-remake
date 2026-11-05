@@ -126,6 +126,8 @@ pub enum Phase {
     ToolTarget { unit: usize, from: (i32, i32), inv: usize, cells: Vec<(i32, i32)> },
     /// 도구 쓰기 연출 (원작 FUN_0041ecb2): 아이템을 들고 (5단위) → SE41, 머리 위로 (10단위) → 상대에게 스며듦 (16단위) → 효과·HP 창
     ToolUse { unit: usize, target: usize, inv: usize, t: u32 },
+    /// 인수 승급 연출 (원작 FUN_0041fa2b): 돌기 → 밝아짐 → 새 병과로 어두워짐 → 알림
+    Promote { unit: usize, target: usize, t: u32 },
     Ai { side: Side, idx: usize, stage: u8 },
     /// 원작 전투 메뉴 (0 메뉴, 1 장수 일람, 2 소유 아이템, 3 지형 정보, 4 승리 조건) — 목록과 줄별 부대
     Sys { kind: u8, list: Box<super::ui::ListBox>, units: Vec<usize> },
@@ -176,6 +178,11 @@ impl GearUp {
 }
 
 /// 받침이 있나 (마지막 글자)
+// 인수 승급 연출 시간 (틱): 돌기 27, 밝아짐·어두워짐 16단위씩
+const PROMO_SPIN: u32 = 27;
+const PROMO_SWAP: u32 = PROMO_SPIN + 24;
+const PROMO_END: u32 = PROMO_SWAP + 24;
+
 pub(super) fn has_batchim(s: &str) -> bool {
     s.chars().rev().find(|c| !c.is_whitespace()).is_some_and(|c| {
         let n = c as u32;
@@ -2688,6 +2695,9 @@ impl Battle {
                     self.phase = Phase::ToolList { unit, from, list };
                 } else if let Some(c) = tapped {
                     match self.at(c.0, c.1).filter(|&t| cells.contains(&c) && !self.units[t].side.hostile(Side::Player) && self.tool_ok(inv, t)) {
+                        Some(t) if self.tool_refusal(inv, t).is_some() => {
+                            self.message = self.tool_refusal(inv, t).map(|m| (m, 60));
+                        }
                         Some(t) => {
                             self.units[unit].dir = 0;
                             self.units[unit].pose = Some(6);
@@ -2749,6 +2759,12 @@ impl Battle {
                 if t == 23 {
                     self.units[unit].motion = None;
                 }
+                if t == 47 && self.inventory.get(inv).is_some_and(|&(it, _)| self.items.get(it as usize * 25 + 17) == Some(&0x4C)) {
+                    self.inventory.remove(inv);
+                    self.tool_pic = None;
+                    self.phase = Phase::Promote { unit, target, t: 0 };
+                    return false;
+                }
                 if t == 47 {
                     let before = (self.units[target].hp, self.units[target].mp);
                     let msg = self.use_tool(inv, target);
@@ -2769,6 +2785,18 @@ impl Battle {
                     return true;
                 }
                 self.phase = Phase::ToolUse { unit, target, inv, t: t + 1 };
+            }
+            Phase::Promote { unit, target, t } => {
+                if self.promote_step(target, t) {
+                    self.units[unit].acted = true;
+                    self.phase = Phase::PlayerIdle;
+                    self.after_player_action();
+                    return true;
+                }
+                // 새 병과 그림을 기다림
+                if t != PROMO_SWAP || self.units[target].spc.is_some() {
+                    self.phase = Phase::Promote { unit, target, t: t + 1 };
+                }
             }
             Phase::Attack { unit, target, t } => {
                 if self.attack_step(unit, target, t) {
@@ -2797,7 +2825,74 @@ impl Battle {
         out
     }
 
-    /// 소모품 사용 (원작 아이템 종류 0x3f HP, 0x40 MP, 0x41~0x45 상태 치료, 0x46~0x4a 능력 열매, 0x4b 경험, 0x4c 인삼)
+    /// 인수를 쓸 수 없는 까닭 (원작 FUN_0041ea39 종류 0x4c)
+    fn tool_refusal(&self, inv: usize, t: usize) -> Option<String> {
+        let &(it, _) = self.inventory.get(inv)?;
+        if self.items.get(it as usize * 25 + 17) != Some(&0x4C) {
+            return None;
+        }
+        let o = &self.units[t].off;
+        if o.job >= 0x27 {
+            Some("클래스 업을 할 수 없는 부대입니다.".into())
+        } else if o.job % 3 == 2 {
+            Some("더 이상 클래스를 올릴 수 없습니다.".into())
+        } else if (o.level as u32) < (o.job as u32 % 3 + 1) * 15 {
+            Some(format!("다음 클래스는 레벨이 {}이상 필요합니다.", (o.job as u32 % 3 + 1) * 15))
+        } else {
+            None
+        }
+    }
+
+    /// 인수 승급 한 걸음 (원작 FUN_0041fa2b, 단위 ×1.5): 최대 HP·MP +지금 병과 폭×2 후 가득, 돌기 → SE33 밝아짐 16단위 →
+    /// 병과 +1 → SE12 어두워짐 16단위 → "%s%s %s%s 클래스가 올라갔다!" + 새 병과에서 처음 배울 수 있고 레벨이 된 책략. 끝나면 true
+    fn promote_step(&mut self, target: usize, t: u32) -> bool {
+        match t {
+            0 => {
+                let (jobs, items, tick) = (self.jobs.clone(), self.items.clone(), self.anim_tick);
+                let un = &mut self.units[target];
+                un.off.promote_gain(&jobs);
+                un.max_hp = un.off.hp_max(&items) as i32;
+                un.hp = un.max_hp;
+                un.mp = un.off.mp_max(&items) as i32;
+                un.pose = None;
+                un.motion = Some((11, tick));
+            }
+            PROMO_SPIN => {
+                self.units[target].motion = None;
+                self.sounds.push("SE33.WAV".into());
+            }
+            _ if t == PROMO_SWAP - 1 => {
+                let un = &mut self.units[target];
+                un.off.job += 1;
+                un.job = un.off.job;
+                un.sprite_idx = sprite_index(un.person, un.job, un.side);
+                (un.sprite, un.atk, un.spc) = (None, None, None);
+            }
+            PROMO_SWAP if self.units[target].spc.is_some() => self.sounds.push("SE12.WAV".into()),
+            PROMO_END => {
+                let un = &self.units[target];
+                let name: String = self.names.get(un.person).map_or("", |s| s.as_str()).chars().filter(|c| !c.is_ascii_digit()).collect();
+                let job = self.job_names.get(un.job as usize).cloned().unwrap_or_default();
+                let last_l = job.chars().last().is_some_and(|c| (c as u32).checked_sub(0xAC00).is_some_and(|n| n % 28 == 8));
+                let ro = if has_batchim(&job) && !last_l { "으로" } else { "로" };
+                let mut msgs = VecDeque::new();
+                msgs.push_back(format!("{name}{} {job}{ro} 클래스가 올라갔다!", if has_batchim(&name) { "은" } else { "는" }));
+                for st in self.strategies.iter() {
+                    let at = |j: u8| st.learn.get(j as usize).copied().unwrap_or(0);
+                    if at(un.job - 1) == 0 && at(un.job) != 0 && at(un.job) <= un.off.level {
+                        msgs.push_back(format!("책략「{}」{} 배웠다!", st.name, if has_batchim(&st.name) { "을" } else { "를" }));
+                    }
+                }
+                self.cast_log.push(format!("@승급 {} → 병과 {} HP {}", un.person, un.job, un.max_hp));
+                // 돌기·SE11 은 건너뜀
+                self.lvup = Some(LvUp { u: target, msgs, t: 28 });
+            }
+            _ => {}
+        }
+        t >= PROMO_END && !self.run_levelup()
+    }
+
+    /// 소모품 사용 (원작 아이템 종류 0x3f HP, 0x40 MP, 0x41~0x45 상태 치료, 0x46~0x4a 능력 열매, 0x4b 경험, 0x4c 인수 = promote_step)
     /// 도구를 그 부대에 쓸 수 있나 (원작 FUN_0041ea39: 약은 해당 상태일 때만)
     fn tool_ok(&self, inv: usize, t: usize) -> bool {
         let Some(&(it, _)) = self.inventory.get(inv) else { return false };
@@ -2864,11 +2959,7 @@ impl Battle {
                 un.max_hp = un.off.hp_max(&items) as i32;
                 format!("경험+{v}")
             }
-            _ => {
-                un.hp = un.max_hp;
-                un.mp = un.off.mp_max(&items) as i32;
-                "완전 회복".into()
-            }
+            _ => String::new(),
         }
     }
 
@@ -3806,6 +3897,32 @@ impl Battle {
                     2 if n < 52 => whiten = ((n - 36) / 2 + 1) as u8,
                     2 => dissolve = (n - 52) as i32 + 1,
                     _ => {}
+                }
+            }
+            // 승급: 앉은 그림 (UNIT_SPC 넷째) 을 밝게 (원작 FUN_00432970) — 앞 16단위 n/2+1, 뒤 16단위 (16−n)/2
+            if let Phase::Promote { target, t, .. } = self.phase {
+                if i == target && (PROMO_SPIN..PROMO_END).contains(&t) {
+                    let n = (t - PROMO_SPIN) * 2 / 3;
+                    let lv = if n < 16 { n / 2 + 1 } else { (32 - n.min(32)) / 2 } as u8;
+                    let lut: Vec<u8> = (0..256usize)
+                        .map(|c| {
+                            let q = scr.pal[c];
+                            let f = |v: u8| ((v / 16 + lv).min(15)) * 17;
+                            if c == 0 { 0 } else { crate::palette::nearest(&scr.pal, [f(q[0]), f(q[1]), f(q[2])]) }
+                        })
+                        .collect();
+                    let (sx, sy) = (u.px as i32 - self.cam.0, u.py as i32 - self.cam.1);
+                    if let Some(spc) = &u.spc {
+                        for yy in 0..48usize {
+                            for xx in 0..48usize {
+                                let c = spc.px.get(4 * 2304 + yy * 48 + xx).copied().unwrap_or(0);
+                                if c != 0 {
+                                    scr.fill(sx + xx as i32, sy + yy as i32, 1, 1, lut[c as usize]);
+                                }
+                            }
+                        }
+                    }
+                    continue;
                 }
             }
             // 사망 하얘짐 (원작 FUN_00432970: 4비트 채널 + n)
