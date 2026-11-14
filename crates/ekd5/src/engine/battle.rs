@@ -2288,7 +2288,8 @@ impl Battle {
         } else if kind == 1 {
             self.sounds.push("SE06.WAV".into());
         }
-        leave_units(kind) * 3 / 2
+        // 마지막 장이 사라지는 틱까지 기다림
+        leave_units(kind) * 3 / 2 + 1
     }
 
     /// 걷는 소리 (원작 FUN_004414fb): 도착 칸 지형 2 → 27, 7 → 26, 9·13 → 29, 10 → 28,
@@ -3320,22 +3321,27 @@ impl Battle {
         Some(p)
     }
 
+    /// 원작 FUN_004438a5 처럼 한 부대씩: 화면 밖이면 그 부대가 보이게 옮기고 (FUN_00456ef0) SE16 + 깜빡임
     pub fn retreat_fallen(&mut self) -> u32 {
         if self.leave_busy() {
             return 0;
         }
-        let mut w = 0;
-        for i in 0..self.units.len() {
-            let u = &self.units[i];
-            if u.visible && u.hp <= 0 && u.leave.is_none() {
-                w = w.max(self.start_leave(i, 0));
-            }
+        let Some(i) = (0..self.units.len()).find(|&i| self.units[i].visible && self.units[i].hp <= 0 && self.units[i].leave.is_none()) else { return 0 };
+        let (x, y) = (self.units[i].x, self.units[i].y);
+        if x * CELL < self.cam.0 || x * CELL + CELL > self.cam.0 + 640 || y * CELL < self.cam.1 + TOP_BAR || y * CELL + CELL > self.cam.1 + 480 {
+            self.focus(x, y);
         }
-        w
+        self.start_leave(i, 0)
+    }
+
+    /// 쓰러졌는데 아직 퇴각 연출 전인 부대가 있나 (그동안 차례를 넘기지 않음)
+    pub fn fallen_pending(&self) -> bool {
+        self.units.iter().any(|u| u.visible && u.hp <= 0 && u.leave.is_none()) || self.units.iter().any(|u| u.leave.is_some())
     }
 
     fn after_player_action(&mut self) {
-        if self.alive(Side::Player).all(|i| self.units[i].acted) {
+        // 쓰러진 부대가 있으면 퇴각 연출이 끝난 뒤 update_player 첫머리에서 넘김
+        if self.alive(Side::Player).all(|i| self.units[i].acted) && !self.fallen_pending() {
             self.end_player_turn();
         }
     }
@@ -3696,7 +3702,8 @@ impl Battle {
             self.ai_order_side = None;
             return (false, true);
         };
-        if !(self.units[u].visible && self.units[u].hp > 0 && self.units[u].side == side) {
+        // 공격 중 반격으로 쓰러져도 그 공격 연출 (반격·HP 창) 은 끝까지 — 건너뛰기는 행동을 시작하기 전에만
+        if stage == 0 && !(self.units[u].visible && self.units[u].hp > 0 && self.units[u].side == side) {
             self.phase = Phase::Ai { side, idx: idx + 1, stage: 0 };
             return (false, false);
         }
@@ -3771,7 +3778,6 @@ impl Battle {
                 self.attack_target = Some((t, tt + 1));
                 if done {
                     self.attack_target = None;
-                    // 죽은 부대가 목록에서 빠지므로 같은 번호를 다시 (자기 자신이 죽지는 않음)
                     self.units[u].acted = true;
                     self.phase = Phase::Ai { side, idx: idx + 1, stage: 0 };
                     return (true, false);

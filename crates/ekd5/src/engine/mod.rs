@@ -3041,7 +3041,8 @@ impl<A: Assets> Engine<A> {
             battle::Phase::Ai { side, .. } => {
                 let (c, done) = b.update_ai();
                 check = c;
-                if done {
+                // 쓰러진 부대의 퇴각 연출이 끝난 뒤에 다음 편으로
+                if done && !b.fallen_pending() {
                     b.phase = match side {
                         battle::Side::Player => battle::Phase::TurnBanner { t: 0, side: battle::Side::Ally },
                         battle::Side::Ally => battle::Phase::TurnBanner { t: 0, side: battle::Side::Enemy },
@@ -3324,7 +3325,11 @@ impl<A: Assets> Engine<A> {
             .collect();
         let inv: Vec<String> = self.inventory.iter().map(|(i, l)| format!("{i}.{l}")).collect();
         let spr: Vec<String> = self.sprite_over.iter().map(|(p, v)| format!("{p}.{v}")).collect();
-        format!("3;{};{};{};{};{};{};{};{};{};{}", self.stage, flags.join(","), roster.join(","), offs.join(","), self.gold, inv.join(","), self.fame, self.face_state, self.chapter, spr.join(","))
+        // 전투 단계에서 찍히는 저장은 앞 이야기 단계의 본진에서 정한 출진 (고른 장수·출진 규칙·최대 인원) 도 가져가야 함
+        let ids = |v: &[usize]| v.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(".");
+        let chosen = self.sortie_chosen.as_deref().filter(|c| !c.is_empty()).map_or("-".into(), ids);
+        let rule = self.last_camp_rule.as_ref().map_or("-".into(), |r| format!("{}/{}/{}", r.max, ids(&r.forced), ids(&r.excluded)));
+        format!("3;{};{};{};{};{};{};{};{};{};{};{};{};{}", self.stage, flags.join(","), roster.join(","), offs.join(","), self.gold, inv.join(","), self.fame, self.face_state, self.chapter, spr.join(","), chosen, rule, self.sortie_max)
     }
 
     /// 불러오기 (제목 화면에서 시작하면 그 단계부터)
@@ -3375,6 +3380,13 @@ impl<A: Assets> Engine<A> {
                 Some((a.parse().ok()?, b.parse().ok()?))
             }).collect()
         });
+        let ids = |s: &str| -> Vec<usize> { s.split('.').filter_map(|x| x.parse().ok()).collect() };
+        self.sortie_chosen = f.get(11).filter(|s| **s != "-").map(|s| ids(s));
+        self.last_camp_rule = f.get(12).filter(|s| **s != "-").and_then(|s| {
+            let v: Vec<&str> = s.split('/').collect();
+            Some(camp::SortieRule { max: v.first()?.parse().ok()?, forced: ids(v.get(1)?), excluded: ids(v.get(2)?) })
+        });
+        self.sortie_max = f.get(13).and_then(|g| g.parse().ok()).unwrap_or(0);
         true
     }
 
