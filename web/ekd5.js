@@ -409,7 +409,10 @@
     if (mode === "load") add("저장으로", () => openSlots("save"));
     const auto = ls.get("ekd5-save");
     if (mode !== "save" && auto && !/^[123];0;/.test(auto)) {
-      add(`자동 저장 (${auto.split(";")[1]}단계 시작)`, () => {
+      // 본진 이어하기 저장은 중간 저장 형식 (JSON, 단계 = 출진 전 이야기 단계)
+      let label = auto.split(";")[1] + "단계 시작";
+      if (auto[0] === "{") { try { label = (JSON.parse(auto).stage + 1) + "단계 출진 전 본진"; } catch (_) { label = "본진"; } }
+      add(`자동 저장 (${label})`, () => {
         if (mode === "start") { withStr(auto, (p, n) => w.restore(p, n)); closeSlots(); }
         else { try { sessionStorage.setItem("ekd5-load", "auto"); } catch (_) {} location.reload(); }
       });

@@ -320,6 +320,13 @@ impl<A: Assets> Engine<A> {
         true
     }
 
+    /// 지금 본진을 이어하기 저장으로 둠 (load_stage 가 다음 전투 단계의 자동 저장으로 씀)
+    pub(super) fn keep_depart_save(&mut self) {
+        if let Some(q) = self.quick_save() {
+            self.depart_save = Some((self.stage, q));
+        }
+    }
+
     /// 본진 메뉴 "보물 해금" (원작에 없는 편의 기능 — 보물도감을 채운 회차의 관상가 노인 FUN_00436ed3 과 같은 대사·효과).
     /// 자료가 아직이면 false
     pub fn camp_unlock(&mut self, camp: &mut Camp) -> bool {
@@ -368,11 +375,17 @@ impl<A: Assets> Engine<A> {
     }
 
     /// 출진 단추 (원작 FUN_0041aac4): 출진 장수를 고른 뒤 출진 블록. 고를 것이 없으면 바로
-    fn camp_depart(&mut self, camp: Camp) -> bool {
+    fn camp_depart(&mut self, mut camp: Camp) -> bool {
         let Some(body) = camp.depart else {
             self.camp = Some(camp);
             return true;
         };
+        // 이어하기용: 출진을 누른 순간의 본진 (원작은 본진에서만 저장) — 다음 전투 단계가 시작될 때 자동 저장으로 내보냄
+        camp.view = CampView::Field;
+        camp.info = None;
+        self.camp = Some(camp);
+        self.keep_depart_save();
+        let camp = self.camp.take().unwrap();
         let s = camp.section;
         match self.open_sortie(camp.rule.clone(), Some((body, s))) {
             Some(ch) => {

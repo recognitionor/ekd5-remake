@@ -259,6 +259,8 @@ pub struct Engine<A: Assets> {
     last_camp_rule: Option<camp::SortieRule>,
     /// 재정비용: 작전회의(본진)가 열렸을 때의 중간 저장 (단계, 저장 문자열). 전투에 이기면 지움 — 원작에 없는 편의 기능
     pub(super) camp_snap: Option<(u32, String)>,
+    /// 출진을 누른 순간의 본진 중간 저장 (단계, 문자열) — 다음 전투 단계의 자동 저장
+    pub(super) depart_save: Option<(u32, String)>,
     sortie_chosen: Option<Vec<usize>>,
     /// 사건 처리 뒤 돌아갈 전투 단계
     resume: Option<battle::Phase>,
@@ -347,6 +349,7 @@ impl<A: Assets> Engine<A> {
             mark_data: Rc::new(Vec::new()),
             sortie_ui: None,
             camp_snap: None,
+            depart_save: None,
             equip_ui: None,
             imsg: None,
             sortie_sort: (1, 2),
@@ -792,6 +795,9 @@ impl<A: Assets> Engine<A> {
                         }
                         self.sortie_chosen = Some(ch);
                     }
+                    if self.camp.is_some() {
+                        self.keep_depart_save();
+                    }
                     if let Some(c) = self.camp.take() {
                         if self.sortie_chosen.is_none() {
                             self.sortie_chosen = Some(self.auto_sortie(&c.rule));
@@ -901,7 +907,9 @@ impl<A: Assets> Engine<A> {
                     self.log.push(format!("단계 {n}: {name}"));
                     self.note_treasures();
                     if self.quick.is_none() {
-                        self.save_out = Some(self.snapshot());
+                        // 전투 단계: 바로 앞 본진에서 출진했으면 그 본진 (이어하면 본진에서 시작), 아니면 단계 시작 저장
+                        let camp_save = self.depart_save.take().filter(|d| n % 2 == 1 && d.0 + 1 == n).map(|d| d.1);
+                        self.save_out = Some(camp_save.unwrap_or_else(|| self.snapshot()));
                     }
                     let mut vm = Vm::new(Rc::new(s));
                     if n % 2 == 1 && self.quick.is_none() {
@@ -3334,6 +3342,10 @@ impl<A: Assets> Engine<A> {
 
     /// 불러오기 (제목 화면에서 시작하면 그 단계부터)
     pub fn restore(&mut self, s: &str) -> bool {
+        // 본진 이어하기 저장 (중간 저장 형식)
+        if s.starts_with('{') {
+            return self.quick_restore(s);
+        }
         let f: Vec<&str> = s.split(';').collect();
         if f.len() < 4 || !matches!(f[0], "1" | "2" | "3") {
             return false;
