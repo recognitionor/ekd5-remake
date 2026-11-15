@@ -333,19 +333,31 @@
   });
 
   // ---------- 새 버전 알림 (홈 화면 앱은 새로고침 단추가 없음) ----------
-  // 배포 때 version.txt 가 바뀜. 앱으로 돌아올 때·1분마다 확인해서 (전투 중에도), 바뀌었으면 단추를 띄움 (누를 때만 새로고침 — 하던 게임은 먼저 저장)
+  // 배포 때 version.txt 가 바뀌고, 같은 번호가 BUILD_VER 로 이 파일에도 새겨짐 (scripts/deploy.sh).
+  // 켤 때 한 번: 서버 번호와 다르면 (옛 화면이 남아 있음) 바로 새로고침 — 아직 게임을 시작하기 전이라 안전. 한 번만 시도.
+  // 그 뒤 10분마다·앱으로 돌아올 때: 바뀌었으면 단추를 띄움 (누를 때만 새로고침 — 하던 게임은 먼저 저장)
+  const BUILD_VER = "dev";
   const updBtn = document.getElementById("update");
-  let myVer = null;
-  async function checkVer() {
+  let myVer = BUILD_VER === "dev" ? null : BUILD_VER;
+  async function checkVer(first) {
     try {
       const v = (await (await fetch("version.txt", { cache: "no-store" })).text()).trim();
-      if (myVer === null) myVer = v; else if (v && v !== myVer) updBtn.style.display = "block";
+      if (!v) return;
+      if (myVer === null) { myVer = v; return; }
+      if (v === myVer) return;
+      let tried = null;
+      try { tried = sessionStorage.getItem("ekd5-ver-reload"); } catch (_) {}
+      if (first && tried !== v) {
+        try { sessionStorage.setItem("ekd5-ver-reload", v); } catch (_) {}
+        location.reload();
+      } else {
+        updBtn.style.display = "block";
+      }
     } catch (_) {}
   }
-  checkVer();
-  setInterval(checkVer, 60000);
-  window.addEventListener("focus", checkVer);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) checkVer(); });
+  checkVer(true);
+  setInterval(() => checkVer(false), 600000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) checkVer(false); });
   updBtn.addEventListener("click", () => location.reload());
 
   // ---------- 회차 공통 기록 (엔딩·보물도감) ----------
