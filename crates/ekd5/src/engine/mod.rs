@@ -722,7 +722,7 @@ impl<A: Assets> Engine<A> {
                 *t += 1;
                 // 패배 뒤 고르기 (원작은 "한번 더 플레이하시겠습니까?" → 첫 화면에서 불러오기. 편의 기능으로 바꿈):
                 // 0 다시 도전 (이 전투 처음부터), 1 재정비 (이 전투 전 작전회의로 — 그때 자동 저장이 있을 때만)
-                let can_regroup = self.camp_snap.is_some();
+                let can_regroup = self.camp_snap.as_ref().is_some_and(|c| c.0 + 1 == self.stage);
                 let inp = self.input.clone();
                 if can_regroup && inp.pressed & (key::UP | key::DOWN | key::LEFT | key::RIGHT) != 0 {
                     *sel ^= 1;
@@ -3293,7 +3293,7 @@ impl<A: Assets> Engine<A> {
                         let lo = palette::nearest(&scr.pal, [120, 100, 80]);
                         // 아래 검은 띠에 나란히
                         let dim = palette::nearest(&scr.pal, [60, 50, 40]);
-                        let can_regroup = self.camp_snap.is_some();
+                        let can_regroup = self.camp_snap.as_ref().is_some_and(|c| c.0 + 1 == self.stage);
                         for (k, s) in ["다시 도전한다", "재정비한다 (작전회의로)"].iter().enumerate() {
                             let c = if k == 1 && !can_regroup { dim } else if *sel == k { hi } else { lo };
                             let x = if k == 0 { 120 } else { 420 };

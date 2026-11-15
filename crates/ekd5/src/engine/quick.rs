@@ -173,6 +173,19 @@ impl<A: Assets> Engine<A> {
         serde_json::to_string(&q).ok()
     }
 
+    /// 웹: 자동 저장 (출진 직전 본진) 을 재정비 저장 대신으로. 재정비 저장이 없을 때만 (새로고침·저장 칸 불러오기로 사라졌을 때).
+    /// 쓸 때는 지금 전투 바로 앞 본진인지 (단계 + 1) 확인
+    pub fn set_regroup(&mut self, s: &str) {
+        if self.camp_snap.is_some() {
+            return;
+        }
+        if let Ok(q) = serde_json::from_str::<QuickSave>(s) {
+            if q.camp_section.is_some() && q.battle.is_none() {
+                self.camp_snap = Some((q.stage, s.to_string()));
+            }
+        }
+    }
+
     /// 중간 저장 불러오기 (제목 화면 전에). 실제 장면은 단계 자료를 읽을 때 만듦
     pub fn quick_restore(&mut self, s: &str) -> bool {
         let Ok(q) = serde_json::from_str::<QuickSave>(s) else { return false };

@@ -226,6 +226,10 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
         let s = fs::read_to_string(&f).unwrap();
         println!("중간 저장 불러오기 {}", eng.quick_restore(&s));
     }
+    // 시험: EKD5_REGROUP=파일 — 웹이 켤 때 넘기는 자동 저장 (출진 직전 본진) 을 재정비 저장 대신으로
+    if let Ok(f) = std::env::var("EKD5_REGROUP") {
+        eng.set_regroup(&fs::read_to_string(f).unwrap_or_default());
+    }
     let qsave: Option<(u32, String)> = std::env::var("EKD5_QSAVE").ok().and_then(|v| { let (a, b) = v.split_once(':')?; Some((a.parse().ok()?, b.to_string())) });
     // 시험: 시작 플래그 (EKD5_FLAGS="0,100")
     for f in std::env::var("EKD5_FLAGS").unwrap_or_default().split(',').filter_map(|v| v.parse::<usize>().ok()) {

@@ -436,6 +436,8 @@
   }
   document.getElementById("save").addEventListener("click", (e) => { e.preventDefault(); openSlots("save"); });
   // 시작: 도중에 고른 칸이 있으면 그것, 아니면 저장이 있을 때 고르기 창
+  // 재정비 저장 대신: 자동 저장이 출진 직전 본진이면 엔진에 알려 둠 (새로고침해도 패배 뒤 재정비 가능. 엔진이 단계를 맞춰 봄)
+  { const a = ls.get("ekd5-save"); if (a && a[0] === "{") withStr(a, (p, n) => w.set_regroup(p, n)); }
   let want = null;
   try { want = sessionStorage.getItem("ekd5-load"); sessionStorage.removeItem("ekd5-load"); } catch (_) {}
   if (want === "auto" && ls.get("ekd5-save")) withStr(ls.get("ekd5-save"), (p, n) => w.restore(p, n));

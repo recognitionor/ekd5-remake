@@ -238,6 +238,15 @@ pub extern "C" fn take_events() -> *const u8 {
     })
 }
 
+/// 자동 저장 (출진 직전 본진) 을 재정비 저장 대신으로 (불러온 뒤 부름)
+/// # Safety
+/// 유효한 UTF-8 포인터
+#[no_mangle]
+pub unsafe extern "C" fn set_regroup(ptr: *const u8, len: usize) {
+    let s = str_at(ptr, len);
+    with(|app| app.engine.set_regroup(&s));
+}
+
 /// 저장 문자열로 이어하기 (제목 화면 전에 부름). 성공 1
 /// # Safety
 /// 유효한 UTF-8 포인터
