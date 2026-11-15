@@ -326,6 +326,19 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
                 }
             }
         }
+        // 시험: EKD5_UNLOCK=틱 — 그 틱 뒤 처음 본진이 열리면 자동 진행을 멈추고 메뉴 "보물 해금"
+        if let Some(ut) = std::env::var("EKD5_UNLOCK").ok().and_then(|v| v.parse::<u32>().ok()) {
+            if t >= ut && eng.autoplay && !eng.waiting_text() && eng.camp.as_ref().is_some_and(|c| matches!(c.view, ekd5::engine::camp::CampView::Field | ekd5::engine::camp::CampView::Menu(_))) {
+                if let Some(mut c) = eng.camp.take() {
+                    let ok = eng.camp_unlock(&mut c);
+                    eng.camp = Some(c);
+                    if ok {
+                        eng.autoplay = false;
+                        println!("[{t:>6}] 보물 해금 시험");
+                    }
+                }
+            }
+        }
         // 시험: EKD5_INFO="틱:탭" — 그 틱에 첫 조조군 부대의 장수 정보 창 (탭 0 능력 1 장비 2 책략 3 열전 4 부대특성, 9 = 안내 보기)
         if let Some((it, tab)) = std::env::var("EKD5_INFO").ok().and_then(|v| { let (a, b) = v.split_once(':')?; Some((a.parse::<u32>().ok()?, b.parse::<u8>().ok()?)) }) {
             if it == t {

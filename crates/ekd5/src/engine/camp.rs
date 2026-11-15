@@ -66,7 +66,7 @@ pub const CAMP_BTN_Y: i32 = 390;
 fn menu_box() -> ListBox {
     let mut m = ListBox::new("본진", 220);
     m.y = 120;
-    for t in ["대화", "장비", "구입", "매각", "도구 보기", "보물도감", "장수 정보", "출진"] {
+    for t in ["대화", "장비", "구입", "매각", "도구 보기", "보물도감", "장수 정보", "보물 해금", "출진"] {
         m.push(t, "", true);
     }
     m
@@ -280,7 +280,12 @@ impl<A: Assets> Engine<A> {
                     camp.view = CampView::Field;
                     self.open_info(list, 0);
                 }
-                Pick::Row(7) => return self.camp_depart(camp),
+                Pick::Row(7) => {
+                    if !self.camp_unlock(&mut camp) {
+                        camp.view = CampView::Menu(m);
+                    }
+                }
+                Pick::Row(8) => return self.camp_depart(camp),
                 Pick::Cancel => camp.view = CampView::Field,
                 _ => camp.view = CampView::Menu(m),
             },
@@ -313,6 +318,18 @@ impl<A: Assets> Engine<A> {
         }
         self.camp = Some(camp);
         true
+    }
+
+    /// 본진 메뉴 "보물 해금" (원작에 없는 편의 기능 — 보물도감을 채운 회차의 관상가 노인 FUN_00436ed3 과 같은 대사·효과).
+    /// 자료가 아직이면 false
+    pub fn camp_unlock(&mut self, camp: &mut Camp) -> bool {
+        match self.unlock_treasures() {
+            Err(super::Pending) => false,
+            Ok(pages) => {
+                camp.view = if self.battle_dialog(pages) { CampView::Running } else { CampView::Field };
+                true
+            }
+        }
     }
 
     /// 본진 단추 (원작 FUN_0041c4b2): 이번 본진에서 처음 누르면 조조가 지시하고 담당 장수가 "예!" 한 뒤 그 화면.

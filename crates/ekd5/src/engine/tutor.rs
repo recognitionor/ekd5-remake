@@ -84,6 +84,47 @@ impl<A: Assets> Engine<A> {
         }
     }
 
+    /// 본진 메뉴 "보물 해금": 아직 없는 보물을 모두 (무기·방어구 Lv3, AllTreasure 와 같은 레벨) 창고로.
+    /// 대사는 노인의 보물도감 해방 ("booky") + 결과 알림. 자료가 아직이면 Err
+    pub fn unlock_treasures(&mut self) -> Result<Vec<story::Page>, Pending> {
+        let text = match self.assets.get("TUTOR.TXT") {
+            Asset::Pending => return Err(Pending),
+            Asset::Ready(d) => String::from_utf8_lossy(&d).to_string(),
+            Asset::Missing => String::new(),
+        };
+        let mut owned: Vec<u8> = self.inventory.iter().map(|x| x.0).collect();
+        for p in &self.roster {
+            if let Some(o) = self.officers.get(p) {
+                owned.extend([o.weapon.map(|w| w.0), o.armor.map(|a| a.0), o.acc].into_iter().flatten());
+            }
+        }
+        let give: Vec<u8> = (0..0x68u8).filter(|&id| self.is_treasure(id) && !owned.contains(&id)).collect();
+        let mut pages = Vec::new();
+        if give.is_empty() {
+            pages.push(story::Page { person: None, face: None, name: String::new(), lines: vec!["보물을 이미 모두 가지고 있습니다.".into()] });
+            return Ok(pages);
+        }
+        for l in text.lines() {
+            let mut it = l.splitn(3, '|');
+            if let (Some("booky"), Some(w), Some(t)) = (it.next(), it.next(), it.next()) {
+                let pid: usize = w.parse().unwrap_or(0x9d);
+                let name = self.persons.get(pid).map(|p| p.name.clone()).unwrap_or_default();
+                let face = (pid < self.persons.len()).then(|| self.face_of(pid));
+                pages.push(story::Page { person: Some(pid), face, name, lines: t.split("\\n").map(|s| s.to_string()).collect() });
+            }
+        }
+        for &id in &give {
+            let k = self.items.get(id as usize * 25 + 17).copied().unwrap_or(0xFF);
+            self.inventory.push((id, if k < 0x12 { 3 } else { 1 }));
+        }
+        self.note_treasures();
+        self.sounds.push(Sound::Effect("SE39.WAV".into()));
+        self.sounds.push(Sound::Effect("SE14.WAV".into()));
+        self.log.push(format!("보물 해금 {}개", give.len()));
+        pages.push(story::Page { person: None, face: None, name: String::new(), lines: vec![format!("보물 {}개를 손에 넣었습니다!", give.len())] });
+        Ok(pages)
+    }
+
     /// op10: 노인 시작. 자료가 아직이면 Err
     pub fn start_tutor(&mut self) -> Result<(), Pending> {
         let d = match self.assets.get("TUTOR.TXT") {
