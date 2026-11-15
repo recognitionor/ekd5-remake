@@ -796,6 +796,12 @@ impl<A: Assets> Engine<A> {
                         self.sortie_chosen = Some(ch);
                     }
                     if self.camp.is_some() {
+                        // 사람이 할 때 update_camp 가 만드는 재정비 저장도 똑같이
+                        if self.camp_snap.as_ref().is_none_or(|s| s.0 != self.stage) {
+                            if let Some(q) = self.quick_save() {
+                                self.camp_snap = Some((self.stage, q));
+                            }
+                        }
                         self.keep_depart_save();
                     }
                     if let Some(c) = self.camp.take() {
