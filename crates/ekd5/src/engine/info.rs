@@ -301,6 +301,7 @@ impl<A: Assets> Engine<A> {
         let unit_note = wrap(&self.imsg_text(350 + v.off.job as usize), RIGHT.2 - 20);
         let strat_desc = strat_sel.and_then(|i| v.strats.get(i)).map(|s| wrap(&self.imsg_text(150 + s.0 as usize), RIGHT.2 - 20)).unwrap_or_default();
         let icons: Vec<Option<Rc<Pic>>> = [v.off.weapon.map(|w| w.0), v.off.armor.map(|a| a.0), v.off.acc].iter().map(|id| id.and_then(|i| self.icons.item_big(&items, i, &pal))).collect();
+        // 무력·지력·통솔·민첩·운은 자료 값의 2배로 보여 줌 (원작 FUN_0040743a 인자 1 — 장수 정보 FUN_0045e697, 출진 FUN_0047a5e3)
         let ps = self.persons.get(v.person).map(|x| x.stats).unwrap_or_default();
         let mv = jobs.get(v.off.job as usize * 27).copied().unwrap_or(0) as i32 + v.off.equip_bonus(&items, 7) as i32;
         let Some(f) = self.font.as_ref() else { return };
@@ -370,7 +371,7 @@ impl<A: Assets> Engine<A> {
         match tab {
             // 능력: 무력·지력·통솔·민첩·운 / 공격력·정신력·방어력·순발력·사기 / 이동력
             0 => {
-                for (i, (label, val)) in [("무력", ps[0]), ("지력", ps[2]), ("통솔", ps[1]), ("민첩", ps[3]), ("운", ps[4])].into_iter().enumerate() {
+                for (i, (label, val)) in [("무력", ps[0]), ("지력", ps[2]), ("통솔", ps[1]), ("민첩", ps[3]), ("운", ps[4])].map(|(l, v)| (l, v as u32 * 2)).into_iter().enumerate() {
                     let (x, y) = (rx + 12 + (i % 3) as i32 * 96, ry + 12 + (i / 3) as i32 * 22);
                     draw_text(scr, f, x, y, label, TEXT);
                     draw_text(scr, f, x + 40, y, &format!("{val:3}"), TEXT);

@@ -404,9 +404,10 @@ impl<A: Assets> Engine<A> {
         draw_text(scr, f, x0 + 80, 46, &name, super::story::NAME);
         draw_text(scr, f, x0 + 80, 68, self.job_names.get(o.job as usize).map_or("", |s| s.as_str()), super::story::TEXT);
         draw_text(scr, f, x0 + 80, 90, &format!("Lv {}", o.level), super::story::TEXT);
+        // 무력·지력·통솔·민첩·운은 자료 값의 2배로 보여 줌 (원작 FUN_0040743a 인자 1 — 장수 정보 FUN_0045e697, 출진 FUN_0047a5e3)
         let ps = self.persons.get(p).map(|x| x.stats).unwrap_or_default();
         // 무력·지력·통솔력 / 민첩성·운 (원작 +18 무력, +19 통솔, +20 지력, +21 민첩, +22 운)
-        for (i, (label, v)) in [("무력", ps[0]), ("지력", ps[2]), ("통솔", ps[1]), ("민첩", ps[3]), ("운", ps[4])].into_iter().enumerate() {
+        for (i, (label, v)) in [("무력", ps[0]), ("지력", ps[2]), ("통솔", ps[1]), ("민첩", ps[3]), ("운", ps[4])].map(|(l, v)| (l, v as u32 * 2)).into_iter().enumerate() {
             let (x, y) = (x0 + 8 + (i / 3) as i32 * 104, 130 + (i % 3) as i32 * 18);
             draw_text(scr, f, x, y, label, super::story::TEXT);
             draw_text(scr, f, x + 40, y, &format!("{v:3}"), super::story::TEXT);

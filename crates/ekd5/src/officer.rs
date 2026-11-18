@@ -172,7 +172,8 @@ impl Officer {
         if let Some(id) = self.acc {
             b += item_bonus(items, id, 1, stat);
         }
-        b
+        // 원작은 한 바이트에 더해 감 (FUN_00407ffe: char 합) — 255 를 넘으면 다시 0 부터
+        b & 0xFF
     }
 
     /// 장비를 넣은 최대 HP·MP (원작 FUN_004075bb / FUN_004075ea: 보정 5·6, 상한 500·250)
