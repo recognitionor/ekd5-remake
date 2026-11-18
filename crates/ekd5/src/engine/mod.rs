@@ -3279,7 +3279,12 @@ impl<A: Assets> Engine<A> {
                 scr.blit(pic, 0, ((H - pic.h) / 2) as i32, None);
                 scr.level = (*t / 2).min(16) as u8;
             }
-            Scene::Story(st) => st.render(scr, self.font.as_ref(), self.tick),
+            Scene::Story(st) => {
+                if st.mark.is_empty() {
+                    st.mark = self.mark_data.clone();
+                }
+                st.render(scr, self.font.as_ref(), self.tick)
+            }
             Scene::Battle(b) => b.render(scr, self.font.as_ref(), self.tick),
             Scene::Over { pic, t, sel } => {
                 scr.clear(0);

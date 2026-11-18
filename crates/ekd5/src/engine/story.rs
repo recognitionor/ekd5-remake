@@ -73,6 +73,8 @@ pub struct Story {
     pub cam: (i32, i32),
     /// 말풍선 화살표 16×16 (MARK.E5 0x194C0 세로, 0x193C0 가로)
     pub arrows: Option<Rc<(Vec<u8>, Vec<u8>)>>,
+    /// MARK.E5 (이야기 장면 말풍선 표시)
+    pub mark: Rc<Vec<u8>>,
 }
 
 impl Default for Story {
@@ -106,6 +108,7 @@ impl Default for Story {
             speaker_cell: None,
             cam: (0, 0),
             arrows: None,
+            mark: Rc::new(Vec::new()),
         }
     }
 }
@@ -465,6 +468,22 @@ impl Story {
             Some((bx, by, ..)) => (bx, by),
             None => (if self.left { 16 } else { 176 }, if speaker_low { 56 } else { 318 }),
         };
+        // 이야기 장면: 말하는 인물 머리 옆 말풍선 표시 (원작 FUN_0042fa65 → FUN_0042b139: 인물 방향 0·1 은 MARK 0x840 을
+        // 그림 왼쪽 +40, 2·3 은 0xA80 을 −16, 그림 위끝 −16 에 24×24)
+        if bubble.is_none() && self.speaker_y.is_none() {
+            if let Some(a) = p.person.and_then(|id| self.actors.iter().find(|a| a.id == id)) {
+                let (sx, sy) = self.screen_pos(a.x, a.y);
+                let (off, mx) = if a.dir < 2 { (0x840, sx + 40) } else { (0xA80, sx - 16) };
+                let my = sy - 64 - 16;
+                if let Some(m) = self.mark.get(off..off + 576) {
+                    for (k, &c) in m.iter().enumerate() {
+                        if c != 0 {
+                            scr.fill(mx + (k % 24) as i32, my + (k / 24) as i32, 1, 1, c);
+                        }
+                    }
+                }
+            }
+        }
         frame_box(scr, x, y, 448, 96);
         let (fx, tx) = if self.left { (x + 8, x + 0x70) } else { (x + 0x178, x + 0x20) };
         if let Some(face) = &self.face {
