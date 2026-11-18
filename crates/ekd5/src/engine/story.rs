@@ -137,7 +137,13 @@ fn flip(p: &Pic) -> Pic {
 }
 
 /// 프레임 f 를 48×1280 세로 띠에서
-fn frame_strip(d: Vec<u8>) -> Pic {
+fn frame_strip(mut d: Vec<u8>) -> Pic {
+    // 물건 그림 (깃발 등, PMAPOBJ 189~191) 은 쓰지 않는 장을 한 색 (31) 으로 꽉 채워 둠 → 빈 장으로 (안 그리면 검은 네모)
+    for fr in d.chunks_mut(48 * 64) {
+        if fr.len() == 48 * 64 && fr[0] != 0 && fr.iter().all(|&c| c == fr[0]) {
+            fr.fill(0);
+        }
+    }
     Pic::new(48, 1280, d)
 }
 
