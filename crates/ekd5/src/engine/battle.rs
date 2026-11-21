@@ -292,6 +292,8 @@ pub struct Battle {
     pub cheat: bool,
     strike_t: u32,
     killed_by: Option<usize>,
+    /// 방천화극 이어 치기를 이번 공격에 했나 (원작 FUN_0043fbea: 한 번만)
+    chained: bool,
     cast_fx: Vec<(i32, i32)>,
     /// 맵 물체 (op58): (x, y, 종류, 원래 지형). 종류 0 불, 1 짚더미, 2 타는 짚더미, 4.. 성문 등 (GATE.E5)
     pub objs: Vec<(i32, i32, u8, u8)>,
@@ -552,6 +554,7 @@ impl Battle {
             cheat: false,
             strike_t: 0,
             killed_by: None,
+            chained: false,
             cast_fx: Vec::new(),
             objs: Vec::new(),
             overlay: Vec::new(),
@@ -1338,14 +1341,27 @@ impl Battle {
 
     /// 지금 쓸 수 있나 (원작 FUN_00422439): 불 계통은 비·호우·눈이면 못 씀, 명상은 HP 3 이상, 청룡은 비 이상, 주작은 맑음, 현무는 흐림
     pub fn strat_usable(&self, u: usize, sid: u8) -> bool {
+        self.strat_block(u, sid).is_none()
+    }
+
+    /// 책략을 지금 못 쓰는 까닭 (원작 FUN_00422439 의 알림 그대로). 불 계통은 비·호우·눈이면 안 됨, 0x3e 는 HP 3 이상,
+    /// 사신 책략 (64..67) 은 그 번호의 보옥 ('2') 을 장비해야 하고 (배운 병과도), 청룡 악천후·주작 맑음·현무 흐림일 때만
+    pub fn strat_block(&self, u: usize, sid: u8) -> Option<String> {
         let w = self.weather();
+        if (64..=67).contains(&sid) && self.sp(u, 0x32) != Some(sid) {
+            let st = self.strat(sid).map_or(String::new(), |s| s.name.clone());
+            let gem = (0..0x68u8)
+                .find(|&i| self.items.get(i as usize * 25 + 17) == Some(&0x32) && self.items.get(i as usize * 25 + 21) == Some(&sid))
+                .map_or(String::new(), |i| crate::officer::item_name(&self.items, i));
+            return Some(format!("{st}{} 발동하려면 {gem}{} 필요합니다.", if has_batchim(&st) { "을" } else { "를" }, if has_batchim(&gem) { "이" } else { "가" }));
+        }
         match sid {
-            0..=4 => w <= 1,
-            62 => self.units[u].hp >= 3,
-            64 => w >= 2,
-            65 => w == 0,
-            66 => w == 1,
-            _ => true,
+            0..=4 if w > 1 => Some("악천후 때는 사용할 수 없습니다.".into()),
+            62 if self.units[u].hp < 3 => Some("HP가 모자랍니다.".into()),
+            64 if w < 2 => Some("악천후 때 이외는 사용할 수 없습니다.".into()),
+            65 if w != 0 => Some("맑은 날씨 이외는 사용할 수 없습니다.".into()),
+            66 if w != 1 => Some("흐린 날씨 이외는 사용할 수 없습니다.".into()),
+            _ => None,
         }
     }
 
@@ -1410,6 +1426,12 @@ impl Battle {
         } else {
             x.saturating_sub(y / 3) * 30 / (y / 3).max(1) + 30
         }
+    }
+
+    /// 책략 위력 보정 (원작 FUN_0043e0ba): 낙뢰 (0x14) 를 무희계 (병종 12) 가 쓰면 피해 2배 (명중 1.5배와 따로)
+    fn boost_power(&self, u: usize, sid: u8, pw: u32) -> u32 {
+        let j = self.units[u].job;
+        if sid == 0x14 && j < 0x27 && j / 3 == 12 { pw * 2 } else { pw }
     }
 
     /// 책략 피해 (원작 FUN_0043e0ba)
@@ -1656,6 +1678,7 @@ impl Battle {
         let text = match eff {
             // 피해 (FUN_004257d6 → FUN_0043e0ba: 판정에 실패하면 0 → 실패 연출)
             Effect::Damage(pw) => {
+                let pw = self.boost_power(u, sid, pw);
                 if sid == 0x26 || roll(self, sid) {
                     dmg = self.strat_damage(u, t, pw, cat);
                 }
@@ -1776,6 +1799,7 @@ impl Battle {
         };
         if dmg > 0 {
             self.units[t].hp -= dmg.min(self.units[t].hp.max(0));
+            self.auto_bean(t);
             if hostile {
                 // 맞은 쪽 방어구 경험치: 시전자 레벨이 낮으면 3, 아니면 4
                 let k = if self.units[u].level < self.units[t].level { 3 } else { 4 };
@@ -2095,11 +2119,12 @@ impl Battle {
                     let jobs = self.jobs.clone();
                     self.units[i].off.gain_exp(&jobs, base * v as u32 / 10);
                 }
+                // 원작 FUN_0043eeed: 셋 다 기본치 (맹덕신서 보정, 최소 10) × 특수치 / 10
                 if let Some(v) = self.sp(i, 0x16) {
-                    self.gear_exp(i, 0, v as u32);
+                    self.gear_exp(i, 0, base * v as u32 / 10);
                 }
                 if let Some(v) = self.sp(i, 0x17) {
-                    self.gear_exp(i, 1, v as u32);
+                    self.gear_exp(i, 1, base * v as u32 / 10);
                 }
             }
             let items = self.items.clone();
@@ -2293,7 +2318,7 @@ impl Battle {
 
     /// 맞은 뒤 장비·직업 효과 (원작 FUN_00405be9): 유성추·금화관포·여포궁·이광궁 = 혼란·독·포박·봉책,
     /// 직업 0x32/0x31/0x2A 는 60 % 로 혼란/독/포박. 콩주머니('>') 는 회복의 콩으로 30 회복
-    fn after_hit(&mut self, x: usize, y: usize) {
+    fn after_hit(&mut self, x: usize, y: usize, hp_hit: bool) {
         if self.units[y].hp <= 0 {
             return;
         }
@@ -2313,7 +2338,15 @@ impl Battle {
                 self.units[y].status |= bit;
             }
         }
-        if self.sp(y, 0x3E).is_some() && self.units[y].hp < self.units[y].max_hp {
+        if hp_hit {
+            self.auto_bean(y);
+        }
+    }
+
+    /// 콩주머니 ('>', 원작 FUN_00405be9 물리 / FUN_00424b40 책략): HP 피해를 받고 살아 있으면 회복의 콩 (0x57, +30) 을 자동으로 —
+    /// 조조군은 창고에 있을 때만 하나 써서, 그 밖은 그냥
+    fn auto_bean(&mut self, y: usize) {
+        if self.units[y].hp > 0 && self.sp(y, 0x3E).is_some() && self.units[y].hp < self.units[y].max_hp {
             let free = self.units[y].side != Side::Player;
             let have = self.inventory.iter().position(|it| it.0 == 87);
             if free || have.is_some() {
@@ -2734,9 +2767,9 @@ impl Battle {
                         let k = ((my - by - 8) / 22) as usize;
                         if let Some(&sid) = list.get(k) {
                             let need = self.strat_mp(unit, sid);
-                            if !self.strat_usable(unit, sid) {
+                            if let Some(why) = self.strat_block(unit, sid) {
                                 // 원작 FUN_00422439 → FUN_00431c4c(2)
-                                self.message = Some(("지금은 쓸 수 없습니다".into(), 40));
+                                self.message = Some((why, 60));
                             } else if self.units[unit].mp >= need {
                                 let cells = self.strat_cells(unit, sid);
                                 self.strat_aim = None;
@@ -3072,6 +3105,7 @@ impl Battle {
             self.resolve(a, d);
             self.strike_t = 0;
             self.killed_by = None;
+            self.chained = false;
             self.atk_exp = (self.units[a].side == Side::Player).then(|| (a, self.units[a].off.exp, self.units[a].off.level));
         }
         if let Phase::Attack { t: tt, .. } = &mut self.phase {
@@ -3160,13 +3194,17 @@ impl Battle {
                         let m = v.min(self.units[y].mp);
                         self.units[y].mp -= m;
                         self.units[y].pose = Some(9);
+                        // 원작 FUN_00405be9: MP 로 받은 피해에도 상태이상 무기는 걸림 (콩주머니는 HP 피해일 때만)
+                        if m > 0 {
+                            self.after_hit(x, y, false);
+                        }
                         format!("MP-{m}")
                     }
                     Some(v) => {
                         self.units[y].hp -= v;
                         self.units[y].pose = Some(if v > 0 { 9 } else { 2 });
                         if v > 0 {
-                            self.after_hit(x, y);
+                            self.after_hit(x, y, true);
                         }
                         if self.units[y].hp <= 0 {
                             self.killed_by = Some(x);
@@ -3235,11 +3273,12 @@ impl Battle {
         if self.run_levelup() {
             return false;
         }
-        // 방천화극('.'): 쓰러뜨리면 사거리 안 다른 적을 이어서 (원작 FUN_0043cbeb)
-        if self.killed_by == Some(a) && self.units[a].hp > 0 && self.sp(a, 0x2E).is_some() {
+        // 방천화극('.'): 쓰러뜨리면 사거리 안 다른 적을 이어서 — 한 번만 (원작 FUN_0043cbeb / FUN_0043fbea)
+        if !self.chained && self.killed_by == Some(a) && self.units[a].hp > 0 && self.sp(a, 0x2E).is_some() {
             let from = (self.units[a].x, self.units[a].y);
             if let Some(n) = self.targets_from(a, from).into_iter().find(|&t| self.units[t].hp > 0) {
                 self.killed_by = None;
+                self.chained = true;
                 self.resolve(a, n);
                 self.strike_t = 0;
                 return false;
@@ -3529,7 +3568,7 @@ impl Battle {
         let pct = |b: &Self, o: usize, d: i32| d * 10 / b.units[o].max_hp.max(1);
         let mut sc = match sid {
             0..=8 | 0xA..=0xD | 0xF..=0x14 | 0x21..=0x24 => {
-                let pw = strategy::power(sid);
+                let pw = self.boost_power(u, sid, strategy::power(sid));
                 let ok = (self.rand(100) as u32) < self.strat_rate_for(u, t, sid);
                 let d = if ok { self.strat_damage_base(u, t, pw, st.cat) as i32 } else { 0 };
                 let mut sc = if d == 0 { 0 } else if d >= tu.hp { 76 } else if pct(self, t, d) >= 3 { 30 } else if pct(self, t, d) >= 1 { 10 } else { 1 };
