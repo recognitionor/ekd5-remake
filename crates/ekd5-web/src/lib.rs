@@ -224,6 +224,9 @@ pub extern "C" fn take_events() -> *const u8 {
         if let Some(c) = app.engine.common_out.take() {
             lines.push(format!("{{\"common\":{c:?}}}"));
         }
+        if let Some(b) = app.engine.branch_out.take() {
+            lines.push(format!("{{\"branch\":{b:?}}}"));
+        }
         if let Some(sv) = app.engine.save_out.take() {
             lines.push(format!("{{\"save\":{sv:?}}}"));
         }

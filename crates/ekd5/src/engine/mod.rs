@@ -259,6 +259,12 @@ pub struct Engine<A: Assets> {
     last_camp_rule: Option<camp::SortieRule>,
     /// 재정비용: 작전회의(본진)가 열렸을 때의 중간 저장 (단계, 저장 문자열). 전투에 이기면 지움 — 원작에 없는 편의 기능
     pub(super) camp_snap: Option<(u32, String)>,
+    /// 사실·가상 갈림길 (R_32 = 64단계, 원작에 없는 편의 기능): 0 없음 / 1 안내 대사 / 2 선택지 / 3 답 읽기
+    route_step: u8,
+    /// 갈림길에서 고른 루트 (None = 게이지대로, Some(true) = 가상, Some(false) = 사실) — R_32 의 사실 16 비교를 덮음
+    route_pick: Option<bool>,
+    /// 갈림길 저장 (64단계 시작) — 웹이 따로 보관해 두 루트를 모두 할 수 있게
+    pub branch_out: Option<String>,
     /// 출진을 누른 순간의 본진 중간 저장 (단계, 문자열) — 다음 전투 단계의 자동 저장
     pub(super) depart_save: Option<(u32, String)>,
     sortie_chosen: Option<Vec<usize>>,
@@ -350,6 +356,9 @@ impl<A: Assets> Engine<A> {
             sortie_ui: None,
             camp_snap: None,
             depart_save: None,
+            route_step: 0,
+            route_pick: None,
+            branch_out: None,
             equip_ui: None,
             imsg: None,
             sortie_sort: (1, 2),
@@ -912,6 +921,13 @@ impl<A: Assets> Engine<A> {
                     self.end_checked = false;
                     self.log.push(format!("단계 {n}: {name}"));
                     self.note_treasures();
+                    self.route_pick = None;
+                    self.route_step = 0;
+                    if n == 64 && self.quick.is_none() {
+                        // 사실·가상 갈림길: 이 단계 시작을 따로 저장하고, 첫머리에 루트를 물음
+                        self.branch_out = Some(self.snapshot());
+                        self.route_step = 1;
+                    }
                     if self.quick.is_none() {
                         // 전투 단계: 바로 앞 본진에서 출진했으면 그 본진 (이어하면 본진에서 시작), 아니면 단계 시작 저장
                         let camp_save = self.depart_save.take().filter(|d| n % 2 == 1 && d.0 + 1 == n).map(|d| d.1);
@@ -945,7 +961,8 @@ impl<A: Assets> Engine<A> {
                     } else if !matches!(self.scene, Scene::Story(_)) {
                         self.scene = Scene::Story(Box::default());
                     }
-                    if !self.apply_quick(&mut vm) {
+                    // 갈림길이면 첫 블록 조건 (사실 비교) 을 고르기 전에 평가하지 않도록 절 시작을 미룸 (run_script 의 route_step)
+                    if !self.apply_quick(&mut vm) && self.route_step == 0 {
                         if let Err(e) = self.start_section(&mut vm, 0) {
                             self.error = Some(e.0);
                         }
@@ -1015,11 +1032,17 @@ impl<A: Assets> Engine<A> {
                     2 => self.fame,
                     _ => 0,
                 };
-                let r = match a(2) {
+                let mut r = match a(2) {
                     0 => v >= a(1),
                     1 => v < a(1),
                     _ => v == a(1),
                 };
+                // 갈림길에서 루트를 골랐으면 R_32 의 "사실 16 미만 → 가상" 비교를 그대로 따름
+                if a(0) == 2 && a(1) == 16 && self.stage == 64 {
+                    if let Some(fake) = self.route_pick {
+                        r = if a(2) == 1 { fake } else { !fake };
+                    }
+                }
                 self.log.push(format!("비교 {} = {v} {} {} → {r}", ["돈", "?", "사실"].get(a(0) as usize).unwrap_or(&"?"), ["≥", "<", "="].get(a(2) as usize).unwrap_or(&"="), a(1)));
                 r
             }
@@ -1230,6 +1253,44 @@ impl<A: Assets> Engine<A> {
             self.enter_after_choice = false;
             if let Err(e) = vm.enter_body(true) {
                 self.error = Some(e.0);
+            }
+        }
+        // 사실·가상 갈림길 (원작에 없는 편의 기능): 안내 → 선택지 → 답. 첫째 = 원작대로 게이지를 따름
+        if self.route_step > 0 && self.wait == Wait::None {
+            match self.route_step {
+                1 => {
+                    let page = story::Page {
+                        person: None,
+                        face: None,
+                        name: String::new(),
+                        lines: vec!["사실·가상 갈림길입니다.".into(), format!("지금 사실 게이지는 {} 입니다 (16 미만이면 가상).", self.fame), "이 단계 시작은 따로 저장되어,".into(), "불러오기에서 다른 루트로 다시 할 수 있습니다.".into()],
+                    };
+                    self.route_step = if self.battle_dialog(vec![page]) { 2 } else { 1 };
+                    self.vm = Some(vm);
+                    return;
+                }
+                2 => {
+                    if let Some(st) = self.ui() {
+                        st.choices = vec!["게이지대로 (원작)".into(), "사실 루트로".into(), "가상 루트로 (마왕 제갈량)".into()];
+                        st.choice_sel = 0;
+                    }
+                    self.wait = Wait::Choice;
+                    self.route_step = 3;
+                    self.vm = Some(vm);
+                    return;
+                }
+                _ => {
+                    self.route_step = 0;
+                    self.route_pick = match self.choice {
+                        2 => Some(false),
+                        3 => Some(true),
+                        _ => None,
+                    };
+                    self.log.push(format!("갈림길 선택 {} (사실 {})", ["게이지대로", "사실", "가상"][(self.choice.clamp(1, 3) - 1) as usize], self.fame));
+                    if let Err(e) = self.start_section(&mut vm, 0) {
+                        self.error = Some(e.0);
+                    }
+                }
             }
         }
         let mut budget = 300;
