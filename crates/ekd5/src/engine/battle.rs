@@ -2192,7 +2192,8 @@ impl Battle {
         };
         strike(self, a, d, false, true, false, &mut hp);
         if hp[&d] > 0 && (self.rand(100) as u32) < Self::ratio_curve(self.val(a, 3), self.val(d, 3)) {
-            strike(self, a, d, false, false, true, &mut hp);
+            // 연속 공격 두 번째도 원작은 같은 타격 함수 (FUN_00406851 고리 → FUN_00406163) 라 회심이 날 수 있음
+            strike(self, a, d, false, true, true, &mut hp);
         }
         // 범위 공격: 둘레의 적도 한 번씩
         let (ax, ay, dx, dy) = (self.units[a].x, self.units[a].y, self.units[d].x, self.units[d].y);
@@ -2209,10 +2210,11 @@ impl Battle {
         let can_counter = |b: &Self, hp: &std::collections::HashMap<usize, i32>| {
             hp[&d] > 0 && hp[&a] > 0 && b.units[d].status & status::CONFUSE == 0 && b.sp(a, 0x2C).is_none() && b.in_range(d, (dx, dy), (ax, ay))
         };
+        // 반격도 원작은 같은 타격 함수 (FUN_004066fa → FUN_00406851) 라 회심이 남 (옥새면 반드시)
         if can_counter(self, &hp) {
-            strike(self, d, a, true, false, false, &mut hp);
+            strike(self, d, a, true, true, false, &mut hp);
             if self.sp(d, 0x28).is_some() && can_counter(self, &hp) {
-                strike(self, d, a, true, false, false, &mut hp);
+                strike(self, d, a, true, true, false, &mut hp);
             }
         }
     }
