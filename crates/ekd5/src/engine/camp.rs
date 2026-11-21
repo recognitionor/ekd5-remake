@@ -395,7 +395,7 @@ impl<A: Assets> Engine<A> {
         }
         let pages = vec![
             self.say(157, "조조님, 보물도감의 진정한 힘으로\n모든 보물을 손에 넣으실 수 있습니다."),
-            self.say(157, "다만 보물의 힘이 커지는 만큼\n적들 또한 강해질 것입니다.\n(이번 회차 동안 적 레벨 +3, 되돌릴 수 없음)"),
+            self.say(157, "다만 보물의 힘이 커지는 만큼\n적들 또한 강해질 것입니다.\n(엔딩까지 모든 전투에서 적 레벨 +3, 되돌릴 수 없음)"),
             self.say(157, "조조님, 어떻습니까?\n보물을 받으시겠습니까?"),
         ];
         camp.view = if self.battle_dialog(pages) { CampView::UnlockAsk(0) } else { CampView::Field };
@@ -412,7 +412,7 @@ impl<A: Assets> Engine<A> {
         self.sounds.push(super::Sound::Effect("SE39.WAV".into()));
         self.sounds.push(super::Sound::Effect("SE14.WAV".into()));
         self.log.push(format!("보물 해금 {}개 (적 레벨 +3)", give.len()));
-        pages.push(super::story::Page { person: None, face: None, name: String::new(), lines: vec![format!("보물 {}개를 손에 넣었습니다!", give.len()), "이번 회차는 적이 강해집니다 (적 레벨 +3).".into()] });
+        pages.push(super::story::Page { person: None, face: None, name: String::new(), lines: vec![format!("보물 {}개를 손에 넣었습니다!", give.len()), "엔딩까지 모든 전투의 적이 강해집니다 (적 레벨 +3).".into()] });
         camp.view = if self.battle_dialog(pages) { CampView::Running } else { CampView::Field };
         true
     }
