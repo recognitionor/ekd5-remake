@@ -2488,7 +2488,8 @@ impl<A: Assets> Engine<A> {
                     let (side, hidden, x, y, rank, lv, ai, tx, ty) = if op == 0x46 {
                         (battle::Side::Ally, r[1].i() == 1, r[2].i(), r[3].i(), r[4].i(), r[5].i(), r[7].i(), r[9].i(), r[10].i())
                     } else {
-                        (battle::Side::Enemy, r[1].i() == 1, r[3].i(), r[4].i(), r[5].i(), r[6].i(), r[8].i(), r[10].i(), r[11].i())
+                        // 원작 FUN_00414d74: 인자 1 은 제3 세력 표시 (편 3 — 우리는 따로 없어 예전처럼 숨김으로 둠: S_05 유비군·S_07 부호), 인자 2 가 처음에 숨김
+                        (battle::Side::Enemy, r[1].i() == 1 || r[2].i() == 1, r[3].i(), r[4].i(), r[5].i(), r[6].i(), r[8].i(), r[10].i(), r[11].i())
                     };
                     let mut o = offs.get(&(pid as usize)).cloned().unwrap();
                     if !roster.contains(&(pid as usize)) {
