@@ -1399,7 +1399,8 @@ impl<A: Assets> Engine<A> {
                                     b.sortie.push(pid);
                                 }
                                 if b.unit_of(pid).is_none() {
-                                    let u = b.make_unit(offs[k].clone(), battle::Side::Player, x, y);
+                                    let mut u = b.make_unit(offs[k].clone(), battle::Side::Player, x, y);
+                                    u.dir = b.slot_dir.get(k).copied().unwrap_or(0);
                                     b.units.push(u);
                                     let ui = b.units.len() - 1;
                                     // 나중에 등장하는 칸은 숨겨 둠, 나머지는 빈 칸에 (원작 FUN_00444c58)
@@ -2502,6 +2503,8 @@ impl<A: Assets> Engine<A> {
                     }
                     let mut u = b.make_unit(o, side, x, y);
                     u.visible = !hidden;
+                    // 처음 방향 (원작 인자 0x45 → FUN_0044bca7/FUN_0044bc68: 0..3 그대로, 그 밖 = 2 아래)
+                    u.dir = battle::orig_dir(if op == 0x46 { r[6].i() } else { r[7].i() }).unwrap_or(0);
                     u.ai = if ai == 0xFFFF { 1 } else { ai as u8 };
                     if matches!(u.ai, 4 | 6) {
                         u.ai_target = Some((tx, ty));
@@ -2526,6 +2529,10 @@ impl<A: Assets> Engine<A> {
                 let i = a(0) as usize;
                 if i < b.slots.len() {
                     b.slots[i] = (a(1), a(2));
+                    // 방향 (원작 인자 3: 0 위·1 오른쪽·2 아래·3 왼쪽)
+                    if let Some(d) = b.slot_dir.get_mut(i) {
+                        *d = battle::orig_dir(a(3)).unwrap_or(0);
+                    }
                     // 마지막 인자 1 = 처음엔 없고 op4c 방식 1 (출진 번호) 로 나중에 등장
                     if let Some(h) = b.slot_hidden.get_mut(i) {
                         *h = a(4) == 1;
@@ -2551,6 +2558,7 @@ impl<A: Assets> Engine<A> {
                             None => offs.get(&pid).map(|o| {
                                 let mut nu = b.make_unit(o.clone(), battle::Side::Player, x, y);
                                 nu.visible = false;
+                                nu.dir = b.slot_dir.get(k).copied().unwrap_or(0);
                                 b.units.push(nu);
                                 b.units.len() - 1
                             }),
@@ -2565,13 +2573,16 @@ impl<A: Assets> Engine<A> {
                         }
                     }
                 } else if let Some(u) = b.unit_of(a(1) as usize) {
-                    // 숨어 있던 부대가 제자리에 나타남 — 그 칸이 차 있으면 가까운 빈 칸 (원작 FUN_004590ce → FUN_00444c58)
-                    if !b.units[u].visible {
+                    // 숨어 있던 부대가 제자리에 나타남 — 그 칸이 차 있으면 가까운 빈 칸 (원작 FUN_004590ce → FUN_00444c58).
+                    // 원작은 숨어 있던 (상태 1) 부대만, 화면 이동 + SE15 (특수 부대는 솟아오름) + 4단위 대기
+                    if !b.units[u].visible && b.units[u].hp > 0 {
                         let (x, y) = (b.units[u].x, b.units[u].y);
                         b.place_at(u, x, y);
+                        b.units[u].visible = true;
+                        b.units[u].fade = 16;
+                        let w = b.appear_fx(u);
+                        self.wait = Wait::Ticks(w);
                     }
-                    b.units[u].visible = true;
-                    b.units[u].fade = 16;
                 }
             }
             0x55 => {
@@ -2579,11 +2590,13 @@ impl<A: Assets> Engine<A> {
                 let pid = if a(0) == 1 { b.list47.get(a(2) as usize).copied() } else { Some(a(1) as usize) };
                 if let Some(u) = pid.and_then(|p| b.unit_of(p)) {
                     if !b.units[u].visible && b.units[u].hp > 0 {
-                        let (x, y) = b.place_at(u, a(3), a(4));
+                        b.place_at(u, a(3), a(4));
                         b.units[u].visible = true;
-                        b.focus(x, y);
-                        self.sounds.push(Sound::Effect("SE15.WAV".into()));
-                        self.wait = Wait::Ticks(6);
+                        if let Some(d) = battle::orig_dir(a(5)) {
+                            b.units[u].dir = d;
+                        }
+                        let w = b.appear_fx(u);
+                        self.wait = Wait::Ticks(w);
                     }
                 }
             }
@@ -2725,10 +2738,41 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x4F => {
-                // 방향 바꾸기 (인물, 대상 인물, …)
-                if let (Some(u), Some(t)) = (b.unit_of(a(0) as usize), b.unit_of(a(1) as usize)) {
-                    let (dx, dy) = (b.units[t].x - b.units[u].x, b.units[t].y - b.units[u].y);
-                    b.units[u].dir = if dx.abs() > dy.abs() { if dx < 0 { 2 } else { 3 } } else if dy < 0 { 1 } else { 0 };
+                // 방향 바꾸기 (원작 FUN_00418375 → FUN_00459408): 인물, 대상 인물 (FFFF = 방향 값으로), 방향 (0 위·1 오른쪽·2 아래·3 왼쪽),
+                // 등 돌리기 (1 = 대상 반대쪽, FFFF 0), 그 부대로 화면 이동 + 8단위 대기 (FFFF 1), 바꾼 뒤 8단위 대기 (FFFF 1).
+                // 방향이 바뀔 때만 SE06 과 대기. 맵 위에 있는 부대만
+                let flag = |i: usize, d: i32| if a(i) == 0xFFFF { d } else { a(i) } == 1;
+                let (back, look, after) = (flag(3, 0), flag(4, 1), flag(5, 1));
+                if let Some(u) = b.unit_of(a(0) as usize).filter(|&u| b.units[u].visible && b.units[u].hp > 0) {
+                    let want = if a(1) == 0xFFFF {
+                        battle::orig_dir(a(2))
+                    } else {
+                        b.unit_of(a(1) as usize).filter(|&t| b.units[t].visible).map(|t| {
+                            let (dx, dy) = (b.units[t].x - b.units[u].x, b.units[t].y - b.units[u].y);
+                            let d = if dx.abs() > dy.abs() { if dx < 0 { 2 } else { 3 } } else if dy < 0 { 1 } else { 0 };
+                            // 등 돌리기: 반대쪽 (우리 값 0↔1, 2↔3)
+                            if back { d ^ 1 } else { d }
+                        })
+                    };
+                    if let Some(d) = want.filter(|&d| d != b.units[u].dir) {
+                        let mut w = 0;
+                        if look {
+                            let (x, y) = (b.units[u].x, b.units[u].y);
+                            if x * battle::CELL < b.cam.0 || x * battle::CELL + battle::CELL > b.cam.0 + 640 || y * battle::CELL < b.cam.1 + battle::TOP_BAR || y * battle::CELL + battle::CELL > b.cam.1 + 480 {
+                                b.focus(x, y);
+                            }
+                            w += 8;
+                        }
+                        b.units[u].dir = d;
+                        b.units[u].pose = None;
+                        b.sounds.push("SE06.WAV".into());
+                        if after {
+                            w += 8;
+                        }
+                        if w > 0 {
+                            self.wait = Wait::Ticks(w * 3 / 2);
+                        }
+                    }
                 }
             }
             0x50 => {

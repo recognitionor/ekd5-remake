@@ -101,6 +101,9 @@ pub struct Unit {
     pub leave: Option<(u8, u32)>,
     /// 스크립트 동작 (op50, 원작 FUN_0045976f 의 1..12) 과 남은 틱 — 잠깐 보여주고 원래 그림으로
     pub motion: Option<(u8, u32)>,
+    /// 솟아오르며 나타나기 (원작 FUN_004590ce 의 특수 등장: 위에서부터 4줄씩 12단위) 진행 틱
+    #[serde(default)]
+    pub appear: Option<u32>,
 }
 
 /// 전투 단계
@@ -232,6 +235,8 @@ pub struct Battle {
     pub slots: Vec<(i32, i32)>,
     /// 출진 칸이 '나중에 등장' 인가 (원작 op4b 마지막 인자 1 → op4c 방식 1 출진 번호로 불러냄)
     pub slot_hidden: Vec<bool>,
+    /// 출진 칸 방향 (원작 op4b 인자 3, 우리 방향 값으로)
+    pub slot_dir: Vec<u8>,
     pub targets: Vec<usize>,
     /// 승리 목표 장수 (원작 op45 인자 5 → +0x3d04/06: 이 장수가 퇴각하면 승리) · 패배 목표 장수 (인자 7 → +0x3d08/0a: 대개 조조)
     pub win_target: Option<usize>,
@@ -431,6 +436,17 @@ fn unique_group(person: usize, job: u8) -> Option<u8> {
     })
 }
 
+/// 원작 방향 값 (0 위·1 오른쪽·2 아래·3 왼쪽, FUN_0043737a) → 우리 값 (0 아래·1 위·2 왼쪽·3 오른쪽). 그 밖 = 없음
+pub fn orig_dir(v: i32) -> Option<u8> {
+    match v {
+        0 => Some(1),
+        1 => Some(3),
+        2 => Some(0),
+        3 => Some(2),
+        _ => None,
+    }
+}
+
 pub fn sprite_index(person: usize, job: u8, side: Side) -> usize {
     let g = unique_group(person, job).unwrap_or_else(|| JOB_GROUP.get(job as usize).copied().unwrap_or(0));
     if g < 0x22 {
@@ -488,6 +504,7 @@ impl Battle {
             ui: story::Story::default(),
             slots: vec![(0, 0); 16],
             slot_hidden: vec![false; 16],
+            slot_dir: vec![0; 16],
             targets: Vec::new(),
             win_target: None,
             level_bias: 0,
@@ -707,6 +724,7 @@ impl Battle {
             pose: None,
             fade: 16,
             leave: None,
+            appear: None,
             motion: None,
             off,
         }
@@ -752,6 +770,25 @@ impl Battle {
     }
 
     /// 부대를 (x, y) 근처 빈 칸에 바로 놓음 (등장·출진 배치·증원)
+    /// 숨어 있던 부대가 나타나는 연출 (원작 FUN_004590ce / FUN_0045b181): 그 칸이 보이게 화면 이동, 보통은 SE15,
+    /// 특수 부대 (인물 0xA2..0xA9 이거나 병과 0x31·0x32, FUN_004593a1) 는 SE42 와 함께 솟아오름 (12단위). 그 뒤 4단위 대기. 반환: 대기 틱
+    pub fn appear_fx(&mut self, u: usize) -> u32 {
+        let (x, y) = (self.units[u].x, self.units[u].y);
+        if x * CELL < self.cam.0 || x * CELL + CELL > self.cam.0 + 640 || y * CELL < self.cam.1 + TOP_BAR || y * CELL + CELL > self.cam.1 + 480 {
+            self.focus(x, y);
+        }
+        let un = &self.units[u];
+        let special = (0xA2..=0xA9).contains(&un.person) || matches!(un.job, 0x31 | 0x32);
+        if special {
+            self.sounds.push("SE42.WAV".into());
+            self.units[u].appear = Some(0);
+            (12 + 4) * 3 / 2
+        } else {
+            self.sounds.push("SE15.WAV".into());
+            4 * 3 / 2
+        }
+    }
+
     pub fn place_at(&mut self, u: usize, x: i32, y: i32) -> (i32, i32) {
         let (x, y) = self.free_cell(u, x, y);
         let un = &mut self.units[u];
@@ -2357,6 +2394,9 @@ impl Battle {
             // 움직이거나 공격·피격 자세가 되면 다시 그려짐 → 동작 자세 풀림
             if un.motion.is_some() && (!un.path.is_empty() || un.pose.is_some()) {
                 un.motion = None;
+            }
+            if let Some(t) = un.appear {
+                un.appear = if t >= 18 { None } else { Some(t + 1) };
             }
             if let Some((k, t)) = un.leave {
                 let end = leave_units(k) * 3 / 2;
@@ -4113,8 +4153,10 @@ impl Battle {
                     _ => None,
                 };
                 let mask = mo.and_then(|o| self.mark.get(o..o + 2304));
+                // 솟아오르며 나타나기: 위에서부터 단위마다 4줄씩
+                let reveal = u.appear.map_or(48, |t| (((t * 2 / 3) + 1) * 4).min(48) as i32);
                 for yy in 0..48 {
-                    if yy >= 48 - sink {
+                    if yy >= 48 - sink || yy >= reveal {
                         continue;
                     }
                     for xx in 0..48 {

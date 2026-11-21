@@ -31,6 +31,8 @@ pub struct BattleSave {
     #[serde(default)]
     pub slot_hidden: Vec<bool>,
     #[serde(default)]
+    pub slot_dir: Vec<u8>,
+    #[serde(default)]
     pub no_retire_line: Vec<usize>,
     #[serde(default)]
     pub win_target: Option<usize>,
@@ -137,6 +139,7 @@ impl<A: Assets> Engine<A> {
                 list47: b.list47.clone(),
                 sortie: b.sortie.clone(),
                 slot_hidden: b.slot_hidden.clone(),
+                slot_dir: b.slot_dir.clone(),
                 no_retire_line: b.no_retire_line.clone(),
                 win_target: b.win_target,
                 lose_target: b.lose_target,
@@ -280,6 +283,9 @@ impl<A: Assets> Engine<A> {
             b.list47 = bs.list47;
             b.sortie = bs.sortie;
             b.no_retire_line = bs.no_retire_line;
+            if !bs.slot_dir.is_empty() {
+                b.slot_dir = bs.slot_dir;
+            }
             if !bs.slot_hidden.is_empty() {
                 b.slot_hidden = bs.slot_hidden;
             }
