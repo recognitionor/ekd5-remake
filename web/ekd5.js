@@ -438,6 +438,14 @@
         else { try { sessionStorage.setItem("ekd5-load", "branch"); } catch (_) {} location.reload(); }
       });
     }
+    // 회차 이어하기: 엔딩을 본 뒤 갈림길부터, 엔딩 때 장수·장비·창고·돈 그대로 (적 레벨 상한 없음)
+    const carry = ls.get("ekd5-carry");
+    if (mode !== "save" && branch && carry) {
+      add("갈림길부터 이어하기 (엔딩 때 장수 그대로)", () => {
+        if (mode === "start") { withStr(branch, (p, n) => w.restore(p, n)); withStr(carry, (p, n) => w.set_carry(p, n)); closeSlots(); }
+        else { try { sessionStorage.setItem("ekd5-load", "carry"); } catch (_) {} location.reload(); }
+      });
+    }
     if (mode === "start") add("처음부터", closeSlots);
     else add("닫기", closeSlots);
     slotsEl.style.display = "flex";
@@ -450,6 +458,7 @@
   try { want = sessionStorage.getItem("ekd5-load"); sessionStorage.removeItem("ekd5-load"); } catch (_) {}
   if (want === "auto" && ls.get("ekd5-save")) withStr(ls.get("ekd5-save"), (p, n) => w.restore(p, n));
   else if (want === "branch" && ls.get("ekd5-branch")) withStr(ls.get("ekd5-branch"), (p, n) => w.restore(p, n));
+  else if (want === "carry" && ls.get("ekd5-branch") && ls.get("ekd5-carry")) { withStr(ls.get("ekd5-branch"), (p, n) => w.restore(p, n)); withStr(ls.get("ekd5-carry"), (p, n) => w.set_carry(p, n)); }
   else if (want && ls.get("ekd5-slot-" + want)) withStr(ls.get("ekd5-slot-" + want), (p, n) => w.quick_restore(p, n));
   else {
     const any = [...Array(NSLOT)].some((_, k) => ls.get("ekd5-slot-" + (k + 1)));
@@ -524,6 +533,7 @@
       else if ("movie" in e) playMovie(e.movie);
       else if ("common" in e) { try { localStorage.setItem("ekd5-common", e.common); } catch (_) {} }
       else if ("ending" in e) { try { const k = "ekd5-endings", v = new Set((localStorage.getItem(k) || "").split(",").filter(Boolean)); v.add(String(e.ending)); localStorage.setItem(k, [...v].join(",")); } catch (_) {} }
+      else if ("carry" in e) { try { localStorage.setItem("ekd5-carry", e.carry); } catch (_) {} }
       else if ("branch" in e) { try { localStorage.setItem("ekd5-branch", e.branch); } catch (_) {} }
       else if ("save" in e) { try { if (e.save) localStorage.setItem("ekd5-save", e.save); else localStorage.removeItem("ekd5-save"); } catch (_) {} }
       else if ("log" in e) console.log("[ekd5]", e.log);

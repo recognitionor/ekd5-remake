@@ -75,6 +75,9 @@ pub struct QuickSave {
     /// 전투 중 저장: 이 전투 앞 작전회의 저장 (게임 오버 뒤 "재정비" 용). 불러온 뒤에도 재정비할 수 있게
     #[serde(default)]
     pub camp_snap: Option<(u32, String)>,
+    /// 회차 이어하기 중 (적 레벨 상한 없음)
+    #[serde(default)]
+    pub carry: bool,
 }
 
 fn on(flags: &[bool]) -> Vec<usize> {
@@ -168,6 +171,7 @@ impl<A: Assets> Engine<A> {
                 _ => Default::default(),
             },
             camp_snap: if battle.is_some() { self.camp_snap.clone() } else { None },
+            carry: self.carry,
             battle,
         };
         serde_json::to_string(&q).ok()
@@ -225,6 +229,7 @@ impl<A: Assets> Engine<A> {
         if q.camp_snap.is_some() {
             self.camp_snap = q.camp_snap.clone();
         }
+        self.carry = q.carry;
         self.quick = Some(q);
         true
     }

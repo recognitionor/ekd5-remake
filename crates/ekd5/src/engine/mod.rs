@@ -74,6 +74,14 @@ pub struct Packs {
 #[derive(Debug)]
 pub struct Pending;
 
+/// 회차 이어하기 자료: 엔딩 때 조조군 장수·창고·돈
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Carry {
+    officers: Vec<crate::officer::Officer>,
+    inventory: Vec<(u8, u8)>,
+    gold: i32,
+}
+
 impl Packs {
     /// 묶음 `name`의 i번째 항목. Ok(None) = 없음
     pub fn get<A: Assets>(&mut self, assets: &mut A, name: &str, i: usize) -> Result<Option<Vec<u8>>, Pending> {
@@ -265,6 +273,11 @@ pub struct Engine<A: Assets> {
     route_pick: Option<bool>,
     /// 갈림길 저장 (64단계 시작) — 웹이 따로 보관해 두 루트를 모두 할 수 있게
     pub branch_out: Option<String>,
+    /// 회차 이어하기 (원작에 없는 편의 기능): 엔딩 때 장수·창고·돈 (웹 ekd5-carry), 불러올 것, 이어하는 중인가
+    /// (이어하는 중이면 적 레벨 상한 50 을 풂 — 우리는 50 그대로)
+    pub carry_out: Option<String>,
+    carry_pending: Option<Carry>,
+    pub carry: bool,
     /// 출진을 누른 순간의 본진 중간 저장 (단계, 문자열) — 다음 전투 단계의 자동 저장
     pub(super) depart_save: Option<(u32, String)>,
     sortie_chosen: Option<Vec<usize>>,
@@ -359,6 +372,9 @@ impl<A: Assets> Engine<A> {
             route_step: 0,
             route_pick: None,
             branch_out: None,
+            carry_out: None,
+            carry_pending: None,
+            carry: false,
             equip_ui: None,
             imsg: None,
             sortie_sort: (1, 2),
@@ -487,7 +503,30 @@ impl<A: Assets> Engine<A> {
                 self.officers.insert(p, o);
             }
         }
+        // 회차 이어하기: 갈림길 저장을 불러온 뒤, 그때 있던 장수는 엔딩 때 능력·장비로, 창고·돈은 엔딩 때로
+        if let Some(c) = self.carry_pending.take() {
+            for o in c.officers {
+                if self.roster.contains(&o.person) {
+                    self.officers.insert(o.person, o);
+                }
+            }
+            self.inventory = c.inventory;
+            self.gold = c.gold;
+            self.carry = true;
+            self.log.push("회차 이어하기".into());
+        }
         true
+    }
+
+    /// 웹: 회차 이어하기 자료 (갈림길 저장을 restore 한 뒤 부름)
+    pub fn set_carry(&mut self, s: &str) -> bool {
+        match serde_json::from_str::<Carry>(s) {
+            Ok(c) => {
+                self.carry_pending = Some(c);
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// 전투에서 자란 조조군 장수 능력을 반영
@@ -923,9 +962,11 @@ impl<A: Assets> Engine<A> {
                     self.note_treasures();
                     self.route_pick = None;
                     self.route_step = 0;
-                    if n == 64 && self.quick.is_none() {
+                    if n == 64 && self.quick.is_none() && !self.carry {
                         // 사실·가상 갈림길: 이 단계 시작을 따로 저장하고, 첫머리에 루트를 물음
                         self.branch_out = Some(self.snapshot());
+                    }
+                    if n == 64 && self.quick.is_none() {
                         self.route_step = 1;
                     }
                     if self.quick.is_none() {
@@ -2088,6 +2129,9 @@ impl<A: Assets> Engine<A> {
             0x0F => {
                 // 엔딩 (원작 FUN_00417cc6: 엔딩 번호를 SVCMN.E5S 에 기록 → END.AVI → 제목)
                 self.log.push(format!("엔딩 {}", a(0)));
+                // 이어하기용: 엔딩 때 장수·창고·돈 (갈림길 저장과 합쳐 다른 루트를 키운 그대로)
+                let c = Carry { officers: self.roster.iter().filter_map(|p| self.officers.get(p).cloned()).collect(), inventory: self.inventory.clone(), gold: self.gold };
+                self.carry_out = serde_json::to_string(&c).ok();
                 if (0..3).contains(&a(0)) {
                     self.endings |= 1 << a(0);
                 }
@@ -2375,6 +2419,7 @@ impl<A: Assets> Engine<A> {
         let avg = self.army_level() as i32;
         let jobs = self.jobs.clone();
         let chapter = self.chapter;
+        let carry = self.carry;
         // 필요한 인물 능력 미리
         let mut offs: HashMap<usize, crate::officer::Officer> = HashMap::new();
         let want: Vec<usize> = match op {
@@ -2405,13 +2450,15 @@ impl<A: Assets> Engine<A> {
         // 기준 레벨 = 평균 + 보정 (1 이상). 부대 조정치: 0xFFFF 0, 50 이하 = 기준 + 값 (최대 50), 그 위 = 기준 − (값−50) (최소 1)
         // (원작 FUN_00414995 op46 / FUN_00414d74 op47)
         let base = (avg + b.level_bias).max(1);
+        // 회차 이어하기면 적 레벨 상한 50 없이 계산대로 (우리 평균 50 이면 이름 있는 장수 +6 → 54)
+        let cap = if carry { 255 } else { 50 };
         let level_of = |adj: i32| -> u8 {
             if adj == 0xFFFF {
-                base.min(50) as u8
+                base.min(cap) as u8
             } else if adj <= 50 {
-                (base + adj).clamp(1, 50) as u8
+                (base + adj).clamp(1, cap) as u8
             } else {
-                (base - (adj - 50)).clamp(1, 50) as u8
+                (base - (adj - 50)).clamp(1, cap) as u8
             }
         };
         match op {
@@ -3092,7 +3139,7 @@ impl<A: Assets> Engine<A> {
                         self.log.push(format!("아군 차례 {t}턴"));
                         if std::env::var("EKD5_DUMP").is_ok() {
                             if let Some(b) = self.battle() {
-                                let l: Vec<String> = b.units.iter().filter(|u| u.hp > 0).map(|u| format!("{:?}{}@{},{}{}a{}s{}j{}", u.side, u.person, u.x, u.y, if u.visible { "" } else { "h" }, u.ai, u.sprite_idx, u.job)).collect();
+                                let l: Vec<String> = b.units.iter().filter(|u| u.hp > 0).map(|u| format!("{:?}{}@{},{}{}a{}s{}j{}L{}", u.side, u.person, u.x, u.y, if u.visible { "" } else { "h" }, u.ai, u.sprite_idx, u.job, u.level)).collect();
                                 let l = l.join(" ");
                                 self.log.push(l);
                             }
@@ -3409,7 +3456,7 @@ impl<A: Assets> Engine<A> {
         let ids = |v: &[usize]| v.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(".");
         let chosen = self.sortie_chosen.as_deref().filter(|c| !c.is_empty()).map_or("-".into(), ids);
         let rule = self.last_camp_rule.as_ref().map_or("-".into(), |r| format!("{}/{}/{}", r.max, ids(&r.forced), ids(&r.excluded)));
-        format!("3;{};{};{};{};{};{};{};{};{};{};{};{};{}", self.stage, flags.join(","), roster.join(","), offs.join(","), self.gold, inv.join(","), self.fame, self.face_state, self.chapter, spr.join(","), chosen, rule, self.sortie_max)
+        format!("3;{};{};{};{};{};{};{};{};{};{};{};{};{};{}", self.stage, flags.join(","), roster.join(","), offs.join(","), self.gold, inv.join(","), self.fame, self.face_state, self.chapter, spr.join(","), chosen, rule, self.sortie_max, self.carry as u8)
     }
 
     /// 불러오기 (제목 화면에서 시작하면 그 단계부터)
@@ -3471,6 +3518,7 @@ impl<A: Assets> Engine<A> {
             Some(camp::SortieRule { max: v.first()?.parse().ok()?, forced: ids(v.get(1)?), excluded: ids(v.get(2)?) })
         });
         self.sortie_max = f.get(13).and_then(|g| g.parse().ok()).unwrap_or(0);
+        self.carry = f.get(14) == Some(&"1");
         true
     }
 

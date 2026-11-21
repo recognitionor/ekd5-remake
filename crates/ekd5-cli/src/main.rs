@@ -226,6 +226,10 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
         let s = fs::read_to_string(&f).unwrap();
         println!("중간 저장 불러오기 {}", eng.quick_restore(&s));
     }
+    // 시험: EKD5_CARRY=파일 — 회차 이어하기 자료 (EKD5_RESTORE 로 갈림길 저장을 연 뒤)
+    if let Ok(f) = std::env::var("EKD5_CARRY") {
+        println!("이어하기 자료 {}", eng.set_carry(&fs::read_to_string(f).unwrap_or_default()));
+    }
     // 시험: EKD5_REGROUP=파일 — 웹이 켤 때 넘기는 자동 저장 (출진 직전 본진) 을 재정비 저장 대신으로
     if let Ok(f) = std::env::var("EKD5_REGROUP") {
         eng.set_regroup(&fs::read_to_string(f).unwrap_or_default());
@@ -506,6 +510,16 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
                     fs::write(qf, s).unwrap();
                     println!("[{t:>6}] 중간 저장 → {qf}");
                 }
+            }
+        }
+        if let Some(c) = eng.carry_out.take() {
+            if snap {
+                println!("[{t:>6}] CARRY {c}");
+            }
+        }
+        if let Some(b) = eng.branch_out.take() {
+            if snap {
+                println!("[{t:>6}] BRANCH {b}");
             }
         }
         if let Some(sv) = eng.save_out.take() {
