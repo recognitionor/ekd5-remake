@@ -2450,8 +2450,8 @@ impl<A: Assets> Engine<A> {
         // 기준 레벨 = 평균 + 보정 (1 이상). 부대 조정치: 0xFFFF 0, 50 이하 = 기준 + 값 (최대 50), 그 위 = 기준 − (값−50) (최소 1)
         // (원작 FUN_00414995 op46 / FUN_00414d74 op47)
         let base = (avg + b.level_bias).max(1);
-        // 회차 이어하기면 적 레벨 상한 50 없이 계산대로 (우리 평균 50 이면 이름 있는 장수 +6 → 54)
-        let cap = if carry { 255 } else { 50 };
+        // 회차 이어하기면 적 레벨 상한 60 (원작 50 — 우리 평균 50 이면 이름 있는 장수 +6 → 54)
+        let cap = if carry { 60 } else { 50 };
         let level_of = |adj: i32| -> u8 {
             if adj == 0xFFFF {
                 base.min(cap) as u8
