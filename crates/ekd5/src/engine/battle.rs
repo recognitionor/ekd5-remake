@@ -104,6 +104,32 @@ pub struct Unit {
     /// 솟아오르며 나타나기 (원작 FUN_004590ce 의 특수 등장: 위에서부터 4줄씩 12단위) 진행 틱
     #[serde(default)]
     pub appear: Option<u32>,
+    /// 제3 세력 (원작 편 3: 적군 목록 인자 1 — 움직임·공격은 적군과 같고, 진영 조건 2 = 적군만 / 3 = 제3 세력만 / 5 = 둘 다로 갈림)
+    #[serde(default)]
+    pub third: bool,
+}
+
+impl Unit {
+    /// 원작 진영 번호 (0 조조군, 1 우군, 2 적군, 3 제3 세력)
+    pub fn camp(&self) -> i32 {
+        match self.side {
+            Side::Player => 0,
+            Side::Ally => 1,
+            Side::Enemy if self.third => 3,
+            Side::Enemy => 2,
+        }
+    }
+
+    /// 대본 진영 조건 (원작 FUN_0044e93d): 0..3 그 진영, 4 조조군·우군, 5 적군·제3 세력, 그 밖 모두
+    pub fn in_camp(&self, k: i32) -> bool {
+        let c = self.camp();
+        match k {
+            0..=3 => c == k,
+            4 => c <= 1,
+            5 => c >= 2,
+            _ => true,
+        }
+    }
 }
 
 /// 전투 단계
@@ -725,6 +751,7 @@ impl Battle {
             fade: 16,
             leave: None,
             appear: None,
+            third: false,
             motion: None,
             off,
         }

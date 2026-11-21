@@ -2489,8 +2489,8 @@ impl<A: Assets> Engine<A> {
                     let (side, hidden, x, y, rank, lv, ai, tx, ty) = if op == 0x46 {
                         (battle::Side::Ally, r[1].i() == 1, r[2].i(), r[3].i(), r[4].i(), r[5].i(), r[7].i(), r[9].i(), r[10].i())
                     } else {
-                        // 원작 FUN_00414d74: 인자 1 은 제3 세력 표시 (편 3 — 우리는 따로 없어 예전처럼 숨김으로 둠: S_05 유비군·S_07 부호), 인자 2 가 처음에 숨김
-                        (battle::Side::Enemy, r[1].i() == 1 || r[2].i() == 1, r[3].i(), r[4].i(), r[5].i(), r[6].i(), r[8].i(), r[10].i(), r[11].i())
+                        // 원작 FUN_00414d74: 인자 1 은 제3 세력 (편 3 — 움직임·공격은 적군과 같음, S_05 유비군·S_07 부호), 인자 2 가 처음에 숨김
+                        (battle::Side::Enemy, r[2].i() == 1, r[3].i(), r[4].i(), r[5].i(), r[6].i(), r[8].i(), r[10].i(), r[11].i())
                     };
                     let mut o = offs.get(&(pid as usize)).cloned().unwrap();
                     if !roster.contains(&(pid as usize)) {
@@ -2503,6 +2503,7 @@ impl<A: Assets> Engine<A> {
                     }
                     let mut u = b.make_unit(o, side, x, y);
                     u.visible = !hidden;
+                    u.third = op == 0x47 && r[1].i() == 1;
                     // 처음 방향 (원작 인자 0x45 → FUN_0044bca7/FUN_0044bc68: 0..3 그대로, 그 밖 = 2 아래)
                     u.dir = battle::orig_dir(if op == 0x46 { r[6].i() } else { r[7].i() }).unwrap_or(0);
                     u.ai = if ai == 0xFFFF { 1 } else { ai as u8 };
@@ -2614,13 +2615,7 @@ impl<A: Assets> Engine<A> {
                         match mode {
                             1 => b.list47.get(a(2) as usize) == Some(&u.person),
                             2 => {
-                                let in_side = match side {
-                                    0 => u.side == battle::Side::Player,
-                                    1 => u.side == battle::Side::Ally,
-                                    2 | 3 | 5 => u.side == battle::Side::Enemy,
-                                    4 => u.side != battle::Side::Enemy,
-                                    _ => true,
-                                };
+                                let in_side = u.in_camp(side);
                                 in_side && (x1..=x2).contains(&u.x) && (y1..=y2).contains(&u.y)
                             }
                             _ => u.person == a(1) as usize,
@@ -2678,13 +2673,7 @@ impl<A: Assets> Engine<A> {
                         if mode == 0 || mode == 0xFFFF {
                             return u.person == pid as usize;
                         }
-                        let in_side = match side {
-                            0 => u.side == battle::Side::Player,
-                            1 => u.side == battle::Side::Ally,
-                            2 | 3 | 5 => u.side == battle::Side::Enemy,
-                            4 => u.side != battle::Side::Enemy,
-                            _ => true,
-                        };
+                        let in_side = u.in_camp(side);
                         in_side && (x1..=x2).contains(&u.x) && (y1..=y2).contains(&u.y)
                     })
                     .collect();
@@ -2710,13 +2699,7 @@ impl<A: Assets> Engine<A> {
                         if mode == 0 || mode == 0xFFFF {
                             return u.person == pid as usize;
                         }
-                        let in_side = match side {
-                            0 => u.side == battle::Side::Player,
-                            1 => u.side == battle::Side::Ally,
-                            2 | 3 | 5 => u.side == battle::Side::Enemy,
-                            4 => u.side != battle::Side::Enemy,
-                            _ => true,
-                        };
+                        let in_side = u.in_camp(side);
                         in_side && (x1..=x2).contains(&u.x) && (y1..=y2).contains(&u.y)
                     })
                     .collect();
@@ -2904,19 +2887,7 @@ impl<A: Assets> Engine<A> {
                     .iter()
                     .filter(|u| u.visible && u.hp > 0)
                     .filter(|u| !area || ((x1..=x2).contains(&u.x) && (y1..=y2).contains(&u.y)))
-                    .filter(|u| {
-                        let c = match u.side {
-                            battle::Side::Player => 0,
-                            battle::Side::Ally => 1,
-                            battle::Side::Enemy => 2,
-                        };
-                        match kind {
-                            0..=3 => c == kind,
-                            4 => c <= 1,
-                            5 => c >= 2,
-                            _ => true,
-                        }
-                    })
+                    .filter(|u| u.in_camp(kind))
                     .count() as i32;
                 match cmp {
                     0 => cnt >= n,
