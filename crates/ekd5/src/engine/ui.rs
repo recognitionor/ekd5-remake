@@ -20,6 +20,8 @@ pub struct ListBox {
     pub footer: String,
     /// 줄마다 아이콘 (원작 ImageList)
     pub icons: Vec<Option<std::rc::Rc<Pic>>>,
+    /// 손가락으로 끌어 넘기기 (누른 y, 그때 top, 움직였나, 누른 줄) — 손을 뗄 때 안 움직였으면 그 줄을 고름
+    drag: Option<(i32, usize, bool, usize)>,
 }
 
 impl PartialEq for ListBox {
@@ -39,7 +41,7 @@ pub enum Pick {
 
 impl ListBox {
     pub fn new(title: &str, w: i32) -> Self {
-        Self { title: title.into(), rows: Vec::new(), sel: 0, top: 0, x: 320 - w / 2, y: 60, w, visible: 12, footer: String::new(), icons: Vec::new() }
+        Self { title: title.into(), rows: Vec::new(), sel: 0, top: 0, x: 320 - w / 2, y: 60, w, visible: 12, footer: String::new(), icons: Vec::new(), drag: None }
     }
 
     pub fn push(&mut self, l: impl Into<String>, r: impl Into<String>, ok: bool) {
@@ -55,17 +57,43 @@ impl ListBox {
         if n == 0 {
             return if inp.pressed & key::CANCEL != 0 || tapped { Pick::Cancel } else { Pick::None };
         }
+        let keys = inp.pressed & (key::DOWN | key::UP) != 0;
         if inp.pressed & key::DOWN != 0 {
             self.sel = (self.sel + 1) % n;
         }
         if inp.pressed & key::UP != 0 {
             self.sel = (self.sel + n - 1) % n;
         }
-        if self.sel < self.top {
-            self.top = self.sel;
+        // 키로 옮길 때만 고른 줄이 보이게 (끌어 넘긴 뒤에는 그대로)
+        if keys {
+            if self.sel < self.top {
+                self.top = self.sel;
+            }
+            if self.sel >= self.top + self.visible {
+                self.top = self.sel + 1 - self.visible;
+            }
         }
-        if self.sel >= self.top + self.visible {
-            self.top = self.sel + 1 - self.visible;
+        // 손가락 (마우스) 으로 끌기: 누른 채 움직이면 목록을 넘기고, 안 움직이고 떼면 누른 줄을 고름
+        if let Some((sy, stop, moved, k)) = self.drag {
+            match inp.mouse {
+                Some((_, my)) if inp.held & key::DECIDE != 0 => {
+                    let moved = moved || (my - sy).abs() > 10;
+                    if moved && n > self.visible {
+                        let t = stop as i32 - (my - sy) / ROW;
+                        self.top = t.clamp(0, (n - self.visible) as i32) as usize;
+                    }
+                    self.drag = Some((sy, stop, moved, k));
+                    return Pick::None;
+                }
+                _ => {
+                    self.drag = None;
+                    if !moved && k < n {
+                        self.sel = k;
+                        return if self.rows[k].2 { Pick::Row(k) } else { Pick::None };
+                    }
+                    return Pick::None;
+                }
+            }
         }
         if inp.pressed & key::CANCEL != 0 {
             return Pick::Cancel;
@@ -88,6 +116,12 @@ impl ListBox {
                 if mx >= self.x && mx < self.x + self.w && my >= top_y && my < bottom {
                     let k = self.top + ((my - top_y) / ROW) as usize;
                     if k < n {
+                        // 손가락·마우스로 누름: 뗄 때까지 기다림 (그사이 끌면 넘기기)
+                        if inp.click {
+                            self.sel = k;
+                            self.drag = Some((my, self.top, false, k));
+                            return Pick::None;
+                        }
                         self.sel = k;
                         return if self.rows[k].2 { Pick::Row(k) } else { Pick::None };
                     }

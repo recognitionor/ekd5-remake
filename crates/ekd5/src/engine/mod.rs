@@ -278,6 +278,8 @@ pub struct Engine<A: Assets> {
     pub carry_out: Option<String>,
     carry_pending: Option<Carry>,
     pub carry: bool,
+    /// 보물 해금에 동의한 회차 (원작에 없는 편의 기능): 적 레벨 +3, 상한 53 (이어하기면 60)
+    pub hard: bool,
     /// 출진을 누른 순간의 본진 중간 저장 (단계, 문자열) — 다음 전투 단계의 자동 저장
     pub(super) depart_save: Option<(u32, String)>,
     sortie_chosen: Option<Vec<usize>>,
@@ -375,6 +377,7 @@ impl<A: Assets> Engine<A> {
             carry_out: None,
             carry_pending: None,
             carry: false,
+            hard: false,
             equip_ui: None,
             imsg: None,
             sortie_sort: (1, 2),
@@ -2420,6 +2423,7 @@ impl<A: Assets> Engine<A> {
         let jobs = self.jobs.clone();
         let chapter = self.chapter;
         let carry = self.carry;
+        let hard = self.hard;
         // 필요한 인물 능력 미리
         let mut offs: HashMap<usize, crate::officer::Officer> = HashMap::new();
         let want: Vec<usize> = match op {
@@ -2451,7 +2455,7 @@ impl<A: Assets> Engine<A> {
         // (원작 FUN_00414995 op46 / FUN_00414d74 op47)
         let base = (avg + b.level_bias).max(1);
         // 회차 이어하기면 적 레벨 상한 60 (원작 50 — 우리 평균 50 이면 이름 있는 장수 +6 → 54)
-        let cap = if carry { 60 } else { 50 };
+        let cap = if carry { 60 } else if hard { 53 } else { 50 };
         let level_of = |adj: i32| -> u8 {
             if adj == 0xFFFF {
                 base.min(cap) as u8
@@ -2488,7 +2492,9 @@ impl<A: Assets> Engine<A> {
                     };
                     let mut o = offs.get(&(pid as usize)).cloned().unwrap();
                     if !roster.contains(&(pid as usize)) {
-                        o.deploy(&jobs, rank as u8, chapter, level_of(lv));
+                        // 보물 해금 회차는 적군 목록 부대 +3 (상한 cap)
+                        let lvl = if hard && op == 0x47 { (level_of(lv) as i32 + 3).min(cap) as u8 } else { level_of(lv) };
+                        o.deploy(&jobs, rank as u8, chapter, lvl);
                         // 원작: 목록 부대는 레벨에 맞는 무기·방어구를 자동 장착 (op48 로 바꿀 수 있음)
                         o.auto_equip(&jobs, 0);
                         o.auto_equip(&jobs, 1);
@@ -3456,7 +3462,7 @@ impl<A: Assets> Engine<A> {
         let ids = |v: &[usize]| v.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(".");
         let chosen = self.sortie_chosen.as_deref().filter(|c| !c.is_empty()).map_or("-".into(), ids);
         let rule = self.last_camp_rule.as_ref().map_or("-".into(), |r| format!("{}/{}/{}", r.max, ids(&r.forced), ids(&r.excluded)));
-        format!("3;{};{};{};{};{};{};{};{};{};{};{};{};{};{}", self.stage, flags.join(","), roster.join(","), offs.join(","), self.gold, inv.join(","), self.fame, self.face_state, self.chapter, spr.join(","), chosen, rule, self.sortie_max, self.carry as u8)
+        format!("3;{};{};{};{};{};{};{};{};{};{};{};{};{};{};{}", self.stage, flags.join(","), roster.join(","), offs.join(","), self.gold, inv.join(","), self.fame, self.face_state, self.chapter, spr.join(","), chosen, rule, self.sortie_max, self.carry as u8, self.hard as u8)
     }
 
     /// 불러오기 (제목 화면에서 시작하면 그 단계부터)
@@ -3519,6 +3525,7 @@ impl<A: Assets> Engine<A> {
         });
         self.sortie_max = f.get(13).and_then(|g| g.parse().ok()).unwrap_or(0);
         self.carry = f.get(14) == Some(&"1");
+        self.hard = f.get(15) == Some(&"1");
         true
     }
 

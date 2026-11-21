@@ -43,6 +43,10 @@ pub enum CampView {
     Items(ListBox, Vec<Option<(u8, u8)>>),
     /// 대화 블록 실행 중
     Running,
+    /// 보물 해금: 0 허자장 권유 대사 중 → 선택지, 1 선택 기다림 → 답
+    UnlockAsk(u8),
+    /// 놓친 보물 목록 (첫 줄 = 모두 받기) + 줄마다 아이템
+    Missed(ListBox, Vec<u8>),
 }
 
 #[derive(Clone, Debug)]
@@ -66,7 +70,7 @@ pub const CAMP_BTN_Y: i32 = 390;
 fn menu_box() -> ListBox {
     let mut m = ListBox::new("본진", 220);
     m.y = 120;
-    for t in ["대화", "장비", "구입", "매각", "도구 보기", "보물도감", "장수 정보", "보물 해금", "출진"] {
+    for t in ["대화", "장비", "구입", "매각", "도구 보기", "보물도감", "장수 정보", "보물 해금", "놓친 보물", "출진"] {
         m.push(t, "", true);
     }
     m
@@ -169,6 +173,31 @@ impl<A: Assets> Engine<A> {
             }
             camp.view = CampView::Field;
             self.camp_action(k);
+        }
+        // 보물 해금: 권유 대사 → 선택지 → 받기 / 거절
+        if let CampView::UnlockAsk(step) = camp.view {
+            if self.wait != super::Wait::None {
+                self.camp = Some(camp);
+                return false;
+            }
+            if step == 0 {
+                if let Some(st) = self.ui() {
+                    st.choices = vec!["기꺼이 받겠소.".into(), "그런 건 필요없소.".into()];
+                    st.choice_sel = 0;
+                }
+                self.wait = super::Wait::Choice;
+                camp.view = CampView::UnlockAsk(1);
+            } else if self.choice == 1 {
+                self.hard = true;
+                if !self.unlock_give(&mut camp) {
+                    self.hard = false;
+                }
+            } else {
+                let pages = vec![self.say(0, "아니, 마음은 고맙지만\n현재의 상태로 충분하다고 생각하오."), self.say(157, "그렇습니까…….\n마음이 바뀌시면 언제든 불러 주십시오.")];
+                camp.view = if self.battle_dialog(pages) { CampView::Running } else { CampView::Field };
+            }
+            self.camp = Some(camp);
+            return false;
         }
         // 대화 블록이 끝나면 메뉴로
         if matches!(camp.view, CampView::Running) {
@@ -285,7 +314,8 @@ impl<A: Assets> Engine<A> {
                         camp.view = CampView::Menu(m);
                     }
                 }
-                Pick::Row(8) => return self.camp_depart(camp),
+                Pick::Row(8) => camp.view = self.missed_view(),
+                Pick::Row(9) => return self.camp_depart(camp),
                 Pick::Cancel => camp.view = CampView::Field,
                 _ => camp.view = CampView::Menu(m),
             },
@@ -314,7 +344,31 @@ impl<A: Assets> Engine<A> {
                 }
                 _ => camp.view = CampView::Items(l, ids),
             },
-            CampView::Running | CampView::Order(_) => {}
+            CampView::Missed(mut l, ids) => match l.update(&inp, tapped) {
+                Pick::Cancel => camp.view = CampView::Field,
+                Pick::Row(k) => {
+                    let take: Vec<u8> = if k == 0 { ids.clone() } else { ids.get(k - 1).copied().into_iter().collect() };
+                    if take.is_empty() {
+                        camp.view = CampView::Missed(l, ids);
+                    } else {
+                        // 그때 얻었을 레벨 (원작 op3d 자동 레벨: 아군 기준 레벨)
+                        let top = self.top_level();
+                        self.give_treasures(&take, |e, id| e.script_item_level(id, 0, top));
+                        self.sounds.push(super::Sound::Effect("SE14.WAV".into()));
+                        let msg = if take.len() == 1 {
+                            let n = item_name(&self.items, take[0]);
+                            format!("{n}{} 손에 넣었습니다!", if super::battle::has_batchim(&n) { "을" } else { "를" })
+                        } else {
+                            format!("보물 {}개를 손에 넣었습니다!", take.len())
+                        };
+                        self.log.push(format!("놓친 보물 {}개", take.len()));
+                        let page = super::story::Page { person: None, face: None, name: String::new(), lines: vec![msg] };
+                        camp.view = if self.battle_dialog(vec![page]) { CampView::Running } else { CampView::Field };
+                    }
+                }
+                Pick::None => camp.view = CampView::Missed(l, ids),
+            },
+            CampView::Running | CampView::Order(_) | CampView::UnlockAsk(_) => {}
         }
         self.camp = Some(camp);
         true
@@ -327,16 +381,62 @@ impl<A: Assets> Engine<A> {
         }
     }
 
-    /// 본진 메뉴 "보물 해금" (원작에 없는 편의 기능 — 보물도감을 채운 회차의 관상가 노인 FUN_00436ed3 과 같은 대사·효과).
-    /// 자료가 아직이면 false
+    /// 본진 메뉴 "보물 해금" (원작에 없는 편의 기능 — 보물도감을 채운 회차의 관상가 노인 FUN_00436ed3 처럼 허자장이 보물을 줌).
+    /// 처음엔 허자장이 "적도 강해진다 (이번 회차 적 레벨 +3)" 를 알리고 동의를 받음. 한 번 동의한 회차는 묻지 않고 줌. 자료가 아직이면 false
     pub fn camp_unlock(&mut self, camp: &mut Camp) -> bool {
-        match self.unlock_treasures() {
-            Err(super::Pending) => false,
-            Ok(pages) => {
-                camp.view = if self.battle_dialog(pages) { CampView::Running } else { CampView::Field };
-                true
+        if self.missing_treasures().is_empty() {
+            let page = super::story::Page { person: None, face: None, name: String::new(), lines: vec!["보물을 이미 모두 가지고 있습니다.".into()] };
+            camp.view = if self.battle_dialog(vec![page]) { CampView::Running } else { CampView::Field };
+            return true;
+        }
+        if self.hard {
+            return self.unlock_give(camp);
+        }
+        let pages = vec![
+            self.say(157, "조조님, 보물도감의 진정한 힘으로\n모든 보물을 손에 넣으실 수 있습니다."),
+            self.say(157, "다만 보물의 힘이 커지는 만큼\n적들 또한 강해질 것입니다.\n(이번 회차 동안 적 레벨 +3, 되돌릴 수 없음)"),
+            self.say(157, "조조님, 어떻습니까?\n보물을 받으시겠습니까?"),
+        ];
+        camp.view = if self.battle_dialog(pages) { CampView::UnlockAsk(0) } else { CampView::Field };
+        true
+    }
+
+    /// 보물을 줌: 노인의 해방 대사 ("booky") 뒤 아직 없는 보물을 모두 창고로 (무기·방어구 Lv3, 그 외 1). 자료가 아직이면 false
+    fn unlock_give(&mut self, camp: &mut Camp) -> bool {
+        let Ok(mut pages) = self.tutor_pages("booky") else { return false };
+        let give = self.missing_treasures();
+        self.give_treasures(&give, |e, id| if e.items.get(id as usize * 25 + 17).is_some_and(|&k| k < 0x12) { 3 } else { 1 });
+        self.sounds.push(super::Sound::Effect("SE39.WAV".into()));
+        self.sounds.push(super::Sound::Effect("SE14.WAV".into()));
+        self.log.push(format!("보물 해금 {}개 (적 레벨 +3)", give.len()));
+        pages.push(super::story::Page { person: None, face: None, name: String::new(), lines: vec![format!("보물 {}개를 손에 넣었습니다!", give.len()), "이번 회차는 적이 강해집니다 (적 레벨 +3).".into()] });
+        camp.view = if self.battle_dialog(pages) { CampView::Running } else { CampView::Field };
+        true
+    }
+
+    /// 시험·외부용: 본진에서 놓친 보물 목록 열기
+    pub fn open_missed(&mut self) {
+        if let Some(mut c) = self.camp.take() {
+            c.view = self.missed_view();
+            self.camp = Some(c);
+        }
+    }
+
+    /// 놓친 보물 목록 (이미 지나온 단계에서 주는데 지금 없는 보물)
+    fn missed_view(&mut self) -> CampView {
+        let list = self.missed_treasures();
+        let mut l = ListBox::new("놓친 보물 (지나온 단계)", 380);
+        let mut ids = Vec::new();
+        if list.is_empty() {
+            l.push("놓친 보물이 없습니다", "", false);
+        } else {
+            l.push(format!("모두 받기 ({}개)", list.len()), "", true);
+            for &(id, st) in &list {
+                l.push(item_name(&self.items, id), format!("{st}단계"), true);
+                ids.push(id);
             }
         }
+        CampView::Missed(l, ids)
     }
 
     /// 본진 단추 (원작 FUN_0041c4b2): 이번 본진에서 처음 누르면 조조가 지시하고 담당 장수가 "예!" 한 뒤 그 화면.
@@ -442,7 +542,7 @@ impl<A: Assets> Engine<A> {
         let Some(f) = self.font.as_ref() else { return };
         let hi = if let Scene::Battle(b) = &self.scene { b.col[0] } else { crate::palette::nearest(&self.screen.pal, [208, 176, 112]) };
         let Some(c) = &self.camp else { return };
-        if matches!(c.view, CampView::Running) || self.sortie_ui.is_some() {
+        if matches!(c.view, CampView::Running | CampView::UnlockAsk(_)) || self.sortie_ui.is_some() {
             return;
         }
         // 단추 4개 (원작 창 50×50, 그림 48×48 이 (1,1))
@@ -456,8 +556,8 @@ impl<A: Assets> Engine<A> {
             }
         }
         let box_ = match &c.view {
-            CampView::Menu(l) | CampView::Talk(l, _) | CampView::Items(l, _) => Some(l),
-            CampView::Field | CampView::Running | CampView::Order(_) => None,
+            CampView::Menu(l) | CampView::Talk(l, _) | CampView::Items(l, _) | CampView::Missed(l, _) => Some(l),
+            CampView::Field | CampView::Running | CampView::Order(_) | CampView::UnlockAsk(_) => None,
         };
         if let Some(l) = box_ {
             l.render(scr, f, hi);

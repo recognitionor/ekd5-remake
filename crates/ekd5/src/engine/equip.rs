@@ -72,6 +72,10 @@ pub struct EquipUi {
     pub info: Option<(u8, u8, Option<u8>)>,
     /// 장수 콤보를 펼친 목록
     pick: Option<ListBox>,
+    /// 빈 장비 칸을 누르면 그 칸에 낄 수 있는 창고 아이템 목록 (칸, 목록, 창고 번호)
+    slot_pick: Option<(u8, ListBox, Vec<usize>)>,
+    /// 목록을 손가락으로 위아래로 끌어 넘기기 (누른 x·y, 그때 top, 넘겼나)
+    scroll: Option<(i32, i32, usize, bool)>,
     faces: HashMap<usize, Pic>,
     /// 구입 화면 (원작 대화상자 327): 목록이 창고 대신 그 장의 상점 물건
     pub shop: Option<Shop>,
@@ -167,7 +171,7 @@ impl<A: Assets> Engine<A> {
     /// 장비 열기 (본진 장비 단추·메뉴)
     pub fn open_equip(&mut self) {
         let pids = if self.roster.is_empty() { vec![0] } else { self.roster.clone() };
-        self.equip_ui = Some(EquipUi { pids, cur: 0, sel: None, top: 0, pending: None, drag: None, info: None, pick: None, faces: HashMap::new(), shop: None, hint: self.hints & super::info::HINT_EQUIP == 0 });
+        self.equip_ui = Some(EquipUi { pids, cur: 0, sel: None, top: 0, pending: None, drag: None, info: None, pick: None, slot_pick: None, scroll: None, faces: HashMap::new(), shop: None, hint: self.hints & super::info::HINT_EQUIP == 0 });
     }
 
     /// 구입 열기 (본진 구입 단추·메뉴)
@@ -389,6 +393,31 @@ impl<A: Assets> Engine<A> {
         true
     }
 
+    /// 장비 칸을 누름: 끼고 있으면 벗기, 비어 있으면 그 칸에 낄 수 있는 창고 아이템 목록 (원작에 없는 편의 기능)
+    fn slot_tap(&mut self, ui: &mut EquipUi, p: usize, s: u8) {
+        let o = self.officer(p);
+        if Self::slot_item(&o, s).is_some() {
+            self.unequip_slot(p, s);
+            return;
+        }
+        let title = ["무기", "방어구", "보조"][s.min(2) as usize];
+        let mut l = ListBox::new(&format!("{title} 고르기"), 360);
+        let mut idx = Vec::new();
+        for (i, &(id, lv)) in self.inventory.iter().enumerate() {
+            let t = self.items.get(id as usize * 25 + 17).copied().unwrap_or(0xFF);
+            if item_cat(t) == s && o.can_equip(&self.items, &self.jobs, id) {
+                let lvs = if s < 2 { format!("Lv{lv}  ") } else { String::new() };
+                l.push(item_name(&self.items, id), format!("{lvs}{}", effect_col(&self.items, id, lv)), true);
+                idx.push(i);
+            }
+        }
+        if idx.is_empty() {
+            l.push("낄 수 있는 아이템이 없습니다", "", false);
+        }
+        self.sounds.push(super::Sound::Effect("SE00.WAV".into()));
+        ui.slot_pick = Some((s, l, idx));
+    }
+
     /// 벗기 (원작 FUN_0046df69 / FUN_0046acc9): 창고가 차 있으면 안 됨
     fn unequip_slot(&mut self, p: usize, s: u8) {
         let mut o = self.officer(p);
@@ -548,6 +577,21 @@ impl<A: Assets> Engine<A> {
             self.equip_ui = Some(ui);
             return;
         }
+        // 빈 칸에 낄 아이템 고르기
+        if let Some((slot, mut l, idx)) = ui.slot_pick.take() {
+            match l.update(&inp, inp.pressed & key::DECIDE != 0) {
+                Pick::Row(k) => {
+                    if let Some(&i) = idx.get(k) {
+                        let ok = self.equip_from_store(p, i);
+                        Self::after_equip(&mut ui, slot, ok);
+                    }
+                }
+                Pick::Cancel => {}
+                Pick::None => ui.slot_pick = Some((slot, l, idx)),
+            }
+            self.equip_ui = Some(ui);
+            return;
+        }
         // 처음 안내: 아무 데나 누르면 닫음
         if ui.hint {
             if inp.click || inp.alt || inp.pressed & (key::CANCEL | key::DECIDE) != 0 {
@@ -596,12 +640,17 @@ impl<A: Assets> Engine<A> {
         if inp.click {
             if let Some(m) = inp.mouse {
                 if let Some(h) = Self::equip_hit(&ui, m, n).filter(|h| !(matches!(h, Sel::Slot(_)) && ui.shop.as_ref().is_some_and(|s| s.sell))) {
-                    if ui.sel == Some(h) || inp.hover {
+                    // 빈 장비 칸은 한 번만 눌러도 (뗄 때) 낄 아이템 목록
+                    let empty_slot = matches!(h, Sel::Slot(s) if ui.shop.is_none() && Self::slot_item(&self.officer(p), s).is_none());
+                    if ui.sel == Some(h) || inp.hover || empty_slot {
                         ui.pending = Some(h);
                     }
                     ui.sel = Some(h);
                     if let (Sel::Row(k), None) = (h, &ui.shop) {
                         ui.drag = Some(k);
+                    }
+                    if matches!(h, Sel::Row(_)) {
+                        ui.scroll = Some((m.0, m.1, ui.top, false));
                     }
                 } else if let Some(t) = TABS.iter().position(|&r| inside(m, r)).filter(|_| ui.shop.is_some()) {
                     // 무기상 / 도구상
@@ -639,7 +688,24 @@ impl<A: Assets> Engine<A> {
                     close = true;
                 }
             }
+        } else if !released && ui.scroll.is_some() {
+            // 누른 채 목록 안에서 위아래로 움직이면 넘기기 (오른쪽 장비 칸으로 끌면 예전처럼 끌어다 놓기)
+            if let (Some((sx, sy, st, moved)), Some((mx, my))) = (ui.scroll, inp.mouse) {
+                let (dx, dy) = (mx - sx, my - sy);
+                // 세로로 더 움직이고 목록 안에 있을 때만 넘기기 (옆으로 끌면 장비 칸에 끌어다 놓기)
+                let moved = moved || (mx < LIST.0 + LIST.2 && dy.abs() > 10 && dy.abs() > dx.abs());
+                if moved {
+                    ui.top = (st as i32 - dy / ROW_H).clamp(0, n.saturating_sub(ROWS) as i32) as usize;
+                    ui.sel = None;
+                    ui.pending = None;
+                    ui.drag = None;
+                }
+                ui.scroll = Some((sx, sy, st, moved));
+            }
+        } else if released && ui.scroll.is_some_and(|s| s.3) {
+            ui.scroll = None;
         } else if released && (ui.pending.is_some() || ui.drag.is_some()) {
+            ui.scroll = None;
             // 손을 뗌: 끌어다 칸에 놓기 / 고른 것 다시 누르기
             let over = inp.mouse.and_then(|m| Self::equip_hit(&ui, m, n));
             let mut done = false;
@@ -655,7 +721,7 @@ impl<A: Assets> Engine<A> {
                 match over {
                     Some(Sel::Row(k)) if ui.shop.is_some() => self.shop_pick(&mut ui, p, k),
                     Some(Sel::Row(k)) => Self::after_equip(&mut ui, self.equip_slot_of(k), self.equip_from_store(p, k)),
-                    Some(Sel::Slot(s)) => self.unequip_slot(p, s),
+                    Some(Sel::Slot(s)) => self.slot_tap(&mut ui, p, s),
                     None => {}
                 }
             }
@@ -684,7 +750,7 @@ impl<A: Assets> Engine<A> {
                 match ui.sel {
                     Some(Sel::Row(k)) if ui.shop.is_some() => self.shop_pick(&mut ui, p, k),
                     Some(Sel::Row(k)) => Self::after_equip(&mut ui, self.equip_slot_of(k), self.equip_from_store(p, k)),
-                    Some(Sel::Slot(s)) => self.unequip_slot(p, s),
+                    Some(Sel::Slot(s)) => self.slot_tap(&mut ui, p, s),
                     None => {}
                 }
             }
@@ -1010,6 +1076,10 @@ impl<A: Assets> Engine<A> {
             }
         }
         if let Some(l) = &ui.pick {
+            let hi = nearest(&pal, [208, 176, 112]);
+            l.render(scr, f, hi);
+        }
+        if let Some((_, l, _)) = &ui.slot_pick {
             let hi = nearest(&pal, [208, 176, 112]);
             l.render(scr, f, hi);
         }

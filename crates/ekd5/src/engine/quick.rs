@@ -78,6 +78,9 @@ pub struct QuickSave {
     /// 회차 이어하기 중 (적 레벨 상한 없음)
     #[serde(default)]
     pub carry: bool,
+    /// 보물 해금에 동의한 회차 (적 레벨 +3)
+    #[serde(default)]
+    pub hard: bool,
 }
 
 fn on(flags: &[bool]) -> Vec<usize> {
@@ -172,6 +175,7 @@ impl<A: Assets> Engine<A> {
             },
             camp_snap: if battle.is_some() { self.camp_snap.clone() } else { None },
             carry: self.carry,
+            hard: self.hard,
             battle,
         };
         serde_json::to_string(&q).ok()
@@ -230,6 +234,7 @@ impl<A: Assets> Engine<A> {
             self.camp_snap = q.camp_snap.clone();
         }
         self.carry = q.carry;
+        self.hard = q.hard;
         self.quick = Some(q);
         true
     }

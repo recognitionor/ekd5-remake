@@ -38,6 +38,56 @@ pub fn common_string(endings: u8, book: &[bool], hints: u32) -> String {
     format!("c1;{endings};{};{hints}", ids.join(","))
 }
 
+/// 시나리오에서 보물을 주는 단계 (op3d 아이템 얻기 + op59 전투 보상, 대본에서 뽑음): (아이템, 단계들)
+const TREASURE_STAGES: &[(u8, &[u32])] = &[
+    (0x15, &[75, 94]), // 자웅일대검
+    (0x16, &[53]), // 청공검
+    (0x18, &[3]), // 고정도
+    (0x1A, &[75, 95]), // 사모
+    (0x1B, &[29]), // 방천화극
+    (0x1C, &[17, 69]), // 여포궁
+    (0x1D, &[13, 69]), // 이광궁
+    (0x1E, &[78]), // 유성추
+    (0x1F, &[55, 57]), // 쌍편
+    (0x20, &[37]), // 금화관포
+    (0x21, &[23]), // 파초선
+    (0x22, &[45]), // 오화신염선
+    (0x23, &[81, 107]), // 백우선
+    (0x24, &[43]), // 칠성검
+    (0x25, &[19, 65, 103]), // 성자보검
+    (0x2C, &[61]), // 거울갑옷
+    (0x2D, &[19, 47]), // 황금갑옷
+    (0x2E, &[15, 69, 101]), // 연환갑옷
+    (0x2F, &[11, 53, 83]), // 백은갑옷
+    (0x30, &[55, 57]), // 용린갑옷
+    (0x31, &[9, 21, 69, 103]), // 비룡도복
+    (0x32, &[51]), // 학창
+    (0x33, &[9, 65, 99]), // 칠흑도복
+    (0x34, &[22]), // 봉황깃옷
+    (0x37, &[35, 103]), // 백은방패
+    (0x38, &[39]), // 풍신방패
+    (0x3B, &[23]), // 바람바퀴
+    (0x3C, &[72]), // 조황비전
+    (0x3D, &[7]), // 절영
+    (0x3F, &[75, 94]), // 적로
+    (0x42, &[77, 103]), // 철투구
+    (0x45, &[73, 105]), // 제갈건
+    (0x48, &[27]), // 몰우전
+    (0x49, &[61]), // 손자병법서
+    (0x4B, &[55, 57]), // 청낭서
+    (0x4C, &[1]), // 태평청령서
+    (0x4D, &[55, 57]), // 태평요술서
+    (0x4E, &[50]), // 둔갑천서
+    (0x4F, &[53]), // 육도
+    (0x50, &[53]), // 삼략
+    (0x51, &[33]), // 콩주머니
+    (0x52, &[71, 93]), // 옥새
+    (0x53, &[81, 105]), // 청룡보옥
+    (0x54, &[83, 107]), // 주작보옥
+    (0x55, &[87, 109]), // 현무보옥
+    (0x56, &[85, 111]), // 백호보옥
+];
+
 impl<A: Assets> Engine<A> {
     /// 보물 아이템 (+24 구분)
     pub fn is_treasure(&self, id: u8) -> bool {
@@ -84,45 +134,60 @@ impl<A: Assets> Engine<A> {
         }
     }
 
-    /// 본진 메뉴 "보물 해금": 아직 없는 보물을 모두 (무기·방어구 Lv3, AllTreasure 와 같은 레벨) 창고로.
-    /// 대사는 노인의 보물도감 해방 ("booky") + 결과 알림. 자료가 아직이면 Err
-    pub fn unlock_treasures(&mut self) -> Result<Vec<story::Page>, Pending> {
-        let text = match self.assets.get("TUTOR.TXT") {
-            Asset::Pending => return Err(Pending),
-            Asset::Ready(d) => String::from_utf8_lossy(&d).to_string(),
-            Asset::Missing => String::new(),
-        };
+    /// 창고·합류 장수 장비에 없는 보물
+    pub fn missing_treasures(&self) -> Vec<u8> {
         let mut owned: Vec<u8> = self.inventory.iter().map(|x| x.0).collect();
         for p in &self.roster {
             if let Some(o) = self.officers.get(p) {
                 owned.extend([o.weapon.map(|w| w.0), o.armor.map(|a| a.0), o.acc].into_iter().flatten());
             }
         }
-        let give: Vec<u8> = (0..0x68u8).filter(|&id| self.is_treasure(id) && !owned.contains(&id)).collect();
-        let mut pages = Vec::new();
-        if give.is_empty() {
-            pages.push(story::Page { person: None, face: None, name: String::new(), lines: vec!["보물을 이미 모두 가지고 있습니다.".into()] });
-            return Ok(pages);
-        }
-        for l in text.lines() {
-            let mut it = l.splitn(3, '|');
-            if let (Some("booky"), Some(w), Some(t)) = (it.next(), it.next(), it.next()) {
-                let pid: usize = w.parse().unwrap_or(0x9d);
-                let name = self.persons.get(pid).map(|p| p.name.clone()).unwrap_or_default();
-                let face = (pid < self.persons.len()).then(|| self.face_of(pid));
-                pages.push(story::Page { person: Some(pid), face, name, lines: t.split("\\n").map(|s| s.to_string()).collect() });
-            }
-        }
-        for &id in &give {
-            let k = self.items.get(id as usize * 25 + 17).copied().unwrap_or(0xFF);
-            self.inventory.push((id, if k < 0x12 { 3 } else { 1 }));
+        (0..0x68u8).filter(|&id| self.is_treasure(id) && !owned.contains(&id)).collect()
+    }
+
+    /// 놓친 보물: 이미 지나온 단계에서 시나리오가 주는데 지금 없는 보물 (아이템, 처음 주는 단계).
+    /// 가상 루트 (92~) 에 있으면 사실 루트 단계 (64~91) 는 지나온 것으로 치지 않음
+    pub fn missed_treasures(&self) -> Vec<(u8, u32)> {
+        let n = self.stage;
+        let passed = |s: u32| s < n && !(n >= 92 && (64..92).contains(&s));
+        let missing = self.missing_treasures();
+        TREASURE_STAGES.iter().filter(|(id, _)| missing.contains(id)).filter_map(|&(id, ss)| ss.iter().copied().find(|&s| passed(s)).map(|s| (id, s))).collect()
+    }
+
+    /// 보물을 창고로 (무기·방어구 레벨 lv, 그 외 1). 보물도감도 갱신
+    pub fn give_treasures(&mut self, ids: &[u8], lv: impl Fn(&Self, u8) -> u8) {
+        for &id in ids {
+            let l = lv(self, id);
+            self.inventory.push((id, l));
         }
         self.note_treasures();
-        self.sounds.push(Sound::Effect("SE39.WAV".into()));
-        self.sounds.push(Sound::Effect("SE14.WAV".into()));
-        self.log.push(format!("보물 해금 {}개", give.len()));
-        pages.push(story::Page { person: None, face: None, name: String::new(), lines: vec![format!("보물 {}개를 손에 넣었습니다!", give.len())] });
+    }
+
+    /// 관상가 노인 대사 묶음 (TUTOR.TXT)
+    pub fn tutor_pages(&mut self, key: &str) -> Result<Vec<story::Page>, Pending> {
+        let text = match self.assets.get("TUTOR.TXT") {
+            Asset::Pending => return Err(Pending),
+            Asset::Ready(d) => String::from_utf8_lossy(&d).to_string(),
+            Asset::Missing => String::new(),
+        };
+        let mut pages = Vec::new();
+        for l in text.lines() {
+            let mut it = l.splitn(3, '|');
+            if let (Some(k), Some(w), Some(t)) = (it.next(), it.next(), it.next()) {
+                if k == key {
+                    let pid: usize = w.parse().unwrap_or(0x9d);
+                    pages.push(self.say(pid, &t.replace("\\n", "\n")));
+                }
+            }
+        }
         Ok(pages)
+    }
+
+    /// 한 사람의 대사 쪽
+    pub fn say(&mut self, pid: usize, text: &str) -> story::Page {
+        let name = self.persons.get(pid).map(|p| p.name.clone()).unwrap_or_default();
+        let face = (pid < self.persons.len()).then(|| self.face_of(pid));
+        story::Page { person: Some(pid), face, name, lines: text.split('\n').map(|s| s.to_string()).collect() }
     }
 
     /// op10: 노인 시작. 자료가 아직이면 Err

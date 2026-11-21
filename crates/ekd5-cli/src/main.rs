@@ -346,6 +346,10 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
                     }
                 }
             }
+            // EKD5_UNLOCK_GO 면 받은 뒤 본진이 다시 한가해지면 자동 진행을 이어감 (적 레벨 비교용)
+            if std::env::var("EKD5_UNLOCK_GO").is_ok() && !eng.autoplay && eng.hard && !eng.waiting_text() && eng.camp.as_ref().is_some_and(|c| matches!(c.view, ekd5::engine::camp::CampView::Field)) {
+                eng.autoplay = true;
+            }
         }
         // 시험: EKD5_INFO="틱:탭" — 그 틱에 첫 조조군 부대의 장수 정보 창 (탭 0 능력 1 장비 2 책략 3 열전 4 부대특성, 9 = 안내 보기)
         if let Some((it, tab)) = std::env::var("EKD5_INFO").ok().and_then(|v| { let (a, b) = v.split_once(':')?; Some((a.parse::<u32>().ok()?, b.parse::<u8>().ok()?)) }) {
@@ -363,6 +367,14 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
                     ui.strat_sel = Some(0);
                 }
                 println!("[{t:>6}] 장수 정보 시험 탭 {tab}");
+            }
+        }
+        // 시험: EKD5_MISSED=틱 — 그 틱 뒤 처음 본진이 열리면 자동 진행을 멈추고 놓친 보물 목록
+        if let Some(mt) = std::env::var("EKD5_MISSED").ok().and_then(|v| v.parse::<u32>().ok()) {
+            if t >= mt && eng.autoplay && !eng.waiting_text() && eng.camp.as_ref().is_some_and(|c| matches!(c.view, ekd5::engine::camp::CampView::Field | ekd5::engine::camp::CampView::Menu(_))) {
+                eng.autoplay = false;
+                eng.open_missed();
+                println!("[{t:>6}] 놓친 보물 시험 (단계 {})", eng.stage);
             }
         }
         // 시험: EKD5_EQUIP=틱 — 그 틱 뒤 처음 본진이 열리면 자동 진행을 멈추고 장비 화면 (처음 안내 포함)

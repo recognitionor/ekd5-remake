@@ -41,7 +41,8 @@ EKD5_AUTOPLAY=1 EKD5_CHEAT=1 EKD5_AUTO=6 EKD5_PRESS="20:20" \
 | `EKD5_AUTOPLAY_END=틱`, `EKD5_AUTO_END=틱` | 그 틱부터 사람이 조작하는 상태로 |
 | `EKD5_CARRY=파일` | 회차 이어하기 자료 (EKD5_RESTORE 로 갈림길 저장을 연 뒤) |
 | `EKD5_REGROUP=파일` | 웹이 켤 때 넘기는 자동 저장 (출진 직전 본진) 을 재정비 저장 대신으로 |
-| `EKD5_UNLOCK=틱` | 그 틱 뒤 본진이 열리면 메뉴 "보물 해금"을 실행 |
+| `EKD5_UNLOCK=틱` | 그 틱 뒤 본진이 열리면 메뉴 "보물 해금" (허자장 권유 → 선택지). `EKD5_UNLOCK_GO` 면 받은 뒤 자동 진행 이어감 |
+| `EKD5_MISSED=틱` | 그 틱 뒤 본진이 열리면 "놓친 보물" 목록 |
 | `EKD5_PROMOTE=틱:레벨` | 화면 위쪽 조조군 부대 하나를 그 레벨로 올리고 인수를 씀 (승급 연출 확인) |
 | `EKD5_TAPS=틱:x:y,…` | 그 틱에 화면 좌표를 누름 |
 | `EKD5_ALT=틱:x:y` | 정보 보기 (오른쪽 클릭·길게 누르기) |
