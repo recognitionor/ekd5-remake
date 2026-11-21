@@ -384,13 +384,11 @@ impl<A: Assets> Engine<A> {
     /// 본진 메뉴 "보물 해금" (원작에 없는 편의 기능 — 보물도감을 채운 회차의 관상가 노인 FUN_00436ed3 처럼 허자장이 보물을 줌).
     /// 처음엔 허자장이 "적도 강해진다 (이번 회차 적 레벨 +3)" 를 알리고 동의를 받음. 한 번 동의한 회차는 묻지 않고 줌. 자료가 아직이면 false
     pub fn camp_unlock(&mut self, camp: &mut Camp) -> bool {
-        if self.missing_treasures().is_empty() {
-            let page = super::story::Page { person: None, face: None, name: String::new(), lines: vec!["보물을 이미 모두 가지고 있습니다.".into()] };
+        // 원작 노인처럼 보물 50개를 전부 주므로 (가진 것 상관없이) 한 회차에 한 번만
+        if self.hard {
+            let page = self.say(157, "보물은 이미 모두 드렸습니다.\n부디 천하를 위해 쓰십시오.");
             camp.view = if self.battle_dialog(vec![page]) { CampView::Running } else { CampView::Field };
             return true;
-        }
-        if self.hard {
-            return self.unlock_give(camp);
         }
         let pages = vec![
             self.say(157, "조조님, 보물도감의 진정한 힘으로\n모든 보물을 손에 넣으실 수 있습니다."),
@@ -401,10 +399,12 @@ impl<A: Assets> Engine<A> {
         true
     }
 
-    /// 보물을 줌: 노인의 해방 대사 ("booky") 뒤 아직 없는 보물을 모두 창고로 (무기·방어구 Lv3, 그 외 1). 자료가 아직이면 false
+    /// 보물을 줌: 노인의 해방 대사 ("booky") 뒤 보물을 전부 창고로 (원작 AllTreasure 처럼 가진 것 상관없이, 무기·방어구 Lv3, 그 외 1).
+    /// 창고 (200) 가 차면 들어가는 만큼. 자료가 아직이면 false
     fn unlock_give(&mut self, camp: &mut Camp) -> bool {
         let Ok(mut pages) = self.tutor_pages("booky") else { return false };
-        let give = self.missing_treasures();
+        let room = super::equip::STORE_MAX.saturating_sub(self.inventory.len());
+        let give: Vec<u8> = (0..0x68u8).filter(|&id| self.is_treasure(id)).take(room).collect();
         self.give_treasures(&give, |e, id| if e.items.get(id as usize * 25 + 17).is_some_and(|&k| k < 0x12) { 3 } else { 1 });
         self.sounds.push(super::Sound::Effect("SE39.WAV".into()));
         self.sounds.push(super::Sound::Effect("SE14.WAV".into()));
