@@ -2276,15 +2276,17 @@ impl Battle {
         if hp[&d] > 0 && (self.rand(100) as u32) < Self::ratio_curve(self.val(a, 3), self.val(d, 3)) {
             volley(self, a, d, false, true, &mut hp);
         }
-        // 반격: 혼란이 아니고, 공격자가 청룡언월도(',') 가 아니면. 자웅일대검('(') 은 두 번 (원작 FUN_004066fa)
+        // 반격 (원작 FUN_004066fa): 맞은 쪽 x 가 친 쪽 y 에게 — 둘 다 살아 있고, x 가 혼란이 아니고, y 가 청룡언월도(',') 가 아니고, 사거리 안.
+        // 반격 반격 (자웅일대검·쌍편 '('): 반격을 맞은 쪽이 그 무기를 들었으면 반격에 다시 반격 (원작은 반격 뒤 같은 함수를 한 번 더 —
+        // 두 번째는 맞은 쪽이 '(' 일 때만, 세 번째는 없음). 전에는 '(' 를 든 쪽이 반격을 두 번 하던 것
         let (ax, ay, dx, dy) = (self.units[a].x, self.units[a].y, self.units[d].x, self.units[d].y);
-        let can_counter = |b: &Self, hp: &std::collections::HashMap<usize, i32>| {
-            hp[&d] > 0 && hp[&a] > 0 && b.units[d].status & status::CONFUSE == 0 && b.sp(a, 0x2C).is_none() && b.in_range(d, (dx, dy), (ax, ay))
+        let can_counter = |b: &Self, x: usize, y: usize, (xx, xy): (i32, i32), (yx, yy): (i32, i32), hp: &std::collections::HashMap<usize, i32>| {
+            hp[&x] > 0 && hp[&y] > 0 && b.units[x].status & status::CONFUSE == 0 && b.sp(y, 0x2C).is_none() && b.in_range(x, (xx, xy), (yx, yy))
         };
-        if can_counter(self, &hp) {
+        if can_counter(self, d, a, (dx, dy), (ax, ay), &hp) {
             volley(self, d, a, true, false, &mut hp);
-            if self.sp(d, 0x28).is_some() && can_counter(self, &hp) {
-                volley(self, d, a, true, false, &mut hp);
+            if self.sp(a, 0x28).is_some() && can_counter(self, a, d, (ax, ay), (dx, dy), &hp) {
+                volley(self, a, d, true, false, &mut hp);
             }
         }
     }
