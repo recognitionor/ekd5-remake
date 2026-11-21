@@ -2190,31 +2190,37 @@ impl Battle {
             }
             b.strikes.push_back((x, y, Some(dmg), crit));
         };
-        strike(self, a, d, false, true, false, &mut hp);
-        if hp[&d] > 0 && (self.rand(100) as u32) < Self::ratio_curve(self.val(a, 3), self.val(d, 3)) {
-            // 연속 공격 두 번째도 원작은 같은 타격 함수 (FUN_00406851 고리 → FUN_00406163) 라 회심이 날 수 있음
-            strike(self, a, d, false, true, true, &mut hp);
-        }
-        // 범위 공격: 둘레의 적도 한 번씩
-        let (ax, ay, dx, dy) = (self.units[a].x, self.units[a].y, self.units[d].x, self.units[d].y);
-        let kind = self.splash_kind(a);
-        if kind != 0 {
-            let side = self.units[a].side;
-            for c in Self::area_cells(kind, (dx, dy), ((dx - ax).signum(), (dy - ay).signum())).into_iter().skip(1) {
-                if let Some(t) = self.at(c.0, c.1).filter(|&t| t != d && self.units[t].side.hostile(side)) {
-                    strike(self, a, t, false, false, false, &mut hp);
+        // 원작 FUN_00406851: 공격마다 대상 목록 (주 대상 + 범위 무기의 둘레 적, FUN_0040655c → FUN_004386ce) 을 만들고,
+        // 타격 (FUN_00406163) 마다 목록 전체를 침 — 연속 공격 두 번째도 둘레까지, 반격도 반격하는 쪽 무기 범위로. 회심은 주 대상만
+        let volley = |b: &mut Self, x: usize, y: usize, counter: bool, second: bool, hp: &mut std::collections::HashMap<usize, i32>| {
+            let (xx, xy, yx, yy) = (b.units[x].x, b.units[x].y, b.units[y].x, b.units[y].y);
+            let kind = b.splash_kind(x);
+            let side = b.units[x].side;
+            let mut ts = vec![y];
+            if kind != 0 {
+                for c in Self::area_cells(kind, (yx, yy), ((yx - xx).signum(), (yy - xy).signum())).into_iter().skip(1) {
+                    if let Some(t) = b.at(c.0, c.1).filter(|&t| t != y && b.units[t].side.hostile(side) && hp[&t] > 0) {
+                        ts.push(t);
+                    }
                 }
             }
+            for (k, t) in ts.into_iter().enumerate() {
+                strike(b, x, t, counter, k == 0, second, hp);
+            }
+        };
+        volley(self, a, d, false, false, &mut hp);
+        if hp[&d] > 0 && (self.rand(100) as u32) < Self::ratio_curve(self.val(a, 3), self.val(d, 3)) {
+            volley(self, a, d, false, true, &mut hp);
         }
-        // 반격: 혼란이 아니고, 공격자가 청룡언월도(',') 가 아니면. 자웅일대검('(') 은 두 번
+        // 반격: 혼란이 아니고, 공격자가 청룡언월도(',') 가 아니면. 자웅일대검('(') 은 두 번 (원작 FUN_004066fa)
+        let (ax, ay, dx, dy) = (self.units[a].x, self.units[a].y, self.units[d].x, self.units[d].y);
         let can_counter = |b: &Self, hp: &std::collections::HashMap<usize, i32>| {
             hp[&d] > 0 && hp[&a] > 0 && b.units[d].status & status::CONFUSE == 0 && b.sp(a, 0x2C).is_none() && b.in_range(d, (dx, dy), (ax, ay))
         };
-        // 반격도 원작은 같은 타격 함수 (FUN_004066fa → FUN_00406851) 라 회심이 남 (옥새면 반드시)
         if can_counter(self, &hp) {
-            strike(self, d, a, true, true, false, &mut hp);
+            volley(self, d, a, true, false, &mut hp);
             if self.sp(d, 0x28).is_some() && can_counter(self, &hp) {
-                strike(self, d, a, true, true, false, &mut hp);
+                volley(self, d, a, true, false, &mut hp);
             }
         }
     }
