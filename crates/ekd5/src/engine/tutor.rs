@@ -145,13 +145,28 @@ impl<A: Assets> Engine<A> {
         (0..0x68u8).filter(|&id| self.is_treasure(id) && !owned.contains(&id)).collect()
     }
 
-    /// 놓친 보물: 이미 지나온 단계에서 시나리오가 주는데 지금 없는 보물 (아이템, 처음 주는 단계).
-    /// 가상 루트 (92~) 에 있으면 사실 루트 단계 (64~91) 는 지나온 것으로 치지 않음
-    pub fn missed_treasures(&self) -> Vec<(u8, u32)> {
+    /// 놓친 보물: 가져야 할 개수보다 적게 가진 보물 (아이템, 처음 주는 지나온 단계 — 해금분만 모자라면 None, 모자란 개수).
+    /// 가져야 할 개수 = 지나온 단계에서 시나리오 (op3d·op59) 가 주면 1 + 이번 회차에 보물 해금을 했으면 1 —
+    /// 처음에 해금하고 시나리오로 또 얻은 것과, 중간에 해금한 것이 같아지게. 가상 루트 (92~) 에서는 사실 루트 단계 (64~91) 를 지나온 것으로 치지 않음
+    pub fn missed_treasures(&self) -> Vec<(u8, Option<u32>, usize)> {
         let n = self.stage;
         let passed = |s: u32| s < n && !(n >= 92 && (64..92).contains(&s));
-        let missing = self.missing_treasures();
-        TREASURE_STAGES.iter().filter(|(id, _)| missing.contains(id)).filter_map(|&(id, ss)| ss.iter().copied().find(|&s| passed(s)).map(|s| (id, s))).collect()
+        let mut owned: Vec<u8> = self.inventory.iter().map(|x| x.0).collect();
+        for p in &self.roster {
+            if let Some(o) = self.officers.get(p) {
+                owned.extend([o.weapon.map(|w| w.0), o.armor.map(|a| a.0), o.acc].into_iter().flatten());
+            }
+        }
+        let mut out = Vec::new();
+        for id in (0..0x68u8).filter(|&id| self.is_treasure(id)) {
+            let st = TREASURE_STAGES.iter().find(|t| t.0 == id).and_then(|t| t.1.iter().copied().find(|&s| passed(s)));
+            let want = st.is_some() as usize + self.hard as usize;
+            let have = owned.iter().filter(|&&x| x == id).count();
+            if have < want {
+                out.push((id, st, want - have));
+            }
+        }
+        out
     }
 
     /// 보물을 창고로 (무기·방어구 레벨 lv, 그 외 1). 보물도감도 갱신

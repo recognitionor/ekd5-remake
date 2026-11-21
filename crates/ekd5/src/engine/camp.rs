@@ -347,7 +347,10 @@ impl<A: Assets> Engine<A> {
             CampView::Missed(mut l, ids) => match l.update(&inp, tapped) {
                 Pick::Cancel => camp.view = CampView::Field,
                 Pick::Row(k) => {
-                    let take: Vec<u8> = if k == 0 { ids.clone() } else { ids.get(k - 1).copied().into_iter().collect() };
+                    // 모자란 개수만큼 (고르는 때 다시 셈)
+                    let short: std::collections::HashMap<u8, usize> = self.missed_treasures().into_iter().map(|x| (x.0, x.2)).collect();
+                    let pick: Vec<u8> = if k == 0 { ids.clone() } else { ids.get(k - 1).copied().into_iter().collect() };
+                    let take: Vec<u8> = pick.iter().flat_map(|id| std::iter::repeat(*id).take(short.get(id).copied().unwrap_or(0))).collect();
                     if take.is_empty() {
                         camp.view = CampView::Missed(l, ids);
                     } else {
@@ -425,14 +428,17 @@ impl<A: Assets> Engine<A> {
     /// 놓친 보물 목록 (이미 지나온 단계에서 주는데 지금 없는 보물)
     fn missed_view(&mut self) -> CampView {
         let list = self.missed_treasures();
-        let mut l = ListBox::new("놓친 보물 (지나온 단계)", 380);
+        let mut l = ListBox::new("놓친 보물 (지나온 단계·보물 해금)", 400);
         let mut ids = Vec::new();
         if list.is_empty() {
             l.push("놓친 보물이 없습니다", "", false);
         } else {
-            l.push(format!("모두 받기 ({}개)", list.len()), "", true);
-            for &(id, st) in &list {
-                l.push(item_name(&self.items, id), format!("{st}단계"), true);
+            let total: usize = list.iter().map(|x| x.2).sum();
+            l.push(format!("모두 받기 ({total}개)"), "", true);
+            for &(id, st, k) in &list {
+                let name = if k > 1 { format!("{} ×{k}", item_name(&self.items, id)) } else { item_name(&self.items, id) };
+                l.push(name, st.map_or("보물 해금".to_string(), |s| format!("{s}단계")), true);
+                // 줄마다 모자란 개수만큼 (같은 아이템이 여러 번)
                 ids.push(id);
             }
         }
