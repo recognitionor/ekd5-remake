@@ -11,6 +11,7 @@ use crate::palette::{self, Palette};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+#[derive(Clone, Debug)]
 pub struct Page {
     pub person: Option<usize>,
     pub face: Option<u16>,

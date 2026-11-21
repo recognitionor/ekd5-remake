@@ -45,6 +45,8 @@ pub enum CampView {
     Running,
     /// 보물 해금: 0 허자장 권유 대사 중 → 선택지, 1 선택 기다림 → 답
     UnlockAsk(u8),
+    /// 대사를 띄우려고 얼굴 그림 등을 받는 중 (받으면 대사, 그다음 true = 보물 해금 선택지 / false = 대화 끝나면 본진)
+    Saying(Vec<super::story::Page>, bool),
     /// 놓친 보물 목록 (첫 줄 = 모두 받기) + 줄마다 아이템
     Missed(ListBox, Vec<u8>),
 }
@@ -174,6 +176,15 @@ impl<A: Assets> Engine<A> {
             camp.view = CampView::Field;
             self.camp_action(k);
         }
+        // 얼굴 그림을 받는 동안 기다렸다가 대사 (전에는 첫 누름에 대사 없이 닫혀 두 번 눌러야 했음)
+        if let CampView::Saying(pages, ask) = &camp.view {
+            let (pages, ask) = (pages.clone(), *ask);
+            if self.wait == super::Wait::None && self.battle_dialog(pages) {
+                camp.view = if ask { CampView::UnlockAsk(0) } else { CampView::Running };
+            }
+            self.camp = Some(camp);
+            return false;
+        }
         // 보물 해금: 권유 대사 → 선택지 → 받기 / 거절
         if let CampView::UnlockAsk(step) = camp.view {
             if self.wait != super::Wait::None {
@@ -194,7 +205,7 @@ impl<A: Assets> Engine<A> {
                 }
             } else {
                 let pages = vec![self.say(0, "아니, 마음은 고맙지만\n현재의 상태로 충분하다고 생각하오."), self.say(157, "그렇습니까…….\n마음이 바뀌시면 언제든 불러 주십시오.")];
-                camp.view = if self.battle_dialog(pages) { CampView::Running } else { CampView::Field };
+                camp.view = CampView::Saying(pages, false);
             }
             self.camp = Some(camp);
             return false;
@@ -366,12 +377,12 @@ impl<A: Assets> Engine<A> {
                         };
                         self.log.push(format!("놓친 보물 {}개", take.len()));
                         let page = super::story::Page { person: None, face: None, name: String::new(), lines: vec![msg] };
-                        camp.view = if self.battle_dialog(vec![page]) { CampView::Running } else { CampView::Field };
+                        camp.view = CampView::Saying(vec![page], false);
                     }
                 }
                 Pick::None => camp.view = CampView::Missed(l, ids),
             },
-            CampView::Running | CampView::Order(_) | CampView::UnlockAsk(_) => {}
+            CampView::Running | CampView::Order(_) | CampView::UnlockAsk(_) | CampView::Saying(..) => {}
         }
         self.camp = Some(camp);
         true
@@ -390,7 +401,7 @@ impl<A: Assets> Engine<A> {
         // 원작 노인처럼 보물 50개를 전부 주므로 (가진 것 상관없이) 한 회차에 한 번만
         if self.hard {
             let page = self.say(157, "보물은 이미 모두 드렸습니다.\n부디 천하를 위해 쓰십시오.");
-            camp.view = if self.battle_dialog(vec![page]) { CampView::Running } else { CampView::Field };
+            camp.view = CampView::Saying(vec![page], false);
             return true;
         }
         let pages = vec![
@@ -398,7 +409,7 @@ impl<A: Assets> Engine<A> {
             self.say(157, "다만 보물의 힘이 커지는 만큼\n적들 또한 강해질 것입니다.\n(엔딩까지 모든 전투에서 적 레벨 +3, 되돌릴 수 없음)"),
             self.say(157, "조조님, 어떻습니까?\n보물을 받으시겠습니까?"),
         ];
-        camp.view = if self.battle_dialog(pages) { CampView::UnlockAsk(0) } else { CampView::Field };
+        camp.view = CampView::Saying(pages, true);
         true
     }
 
@@ -413,7 +424,7 @@ impl<A: Assets> Engine<A> {
         self.sounds.push(super::Sound::Effect("SE14.WAV".into()));
         self.log.push(format!("보물 해금 {}개 (적 레벨 +3)", give.len()));
         pages.push(super::story::Page { person: None, face: None, name: String::new(), lines: vec![format!("보물 {}개를 손에 넣었습니다!", give.len()), "엔딩까지 모든 전투의 적이 강해집니다 (적 레벨 +3).".into()] });
-        camp.view = if self.battle_dialog(pages) { CampView::Running } else { CampView::Field };
+        camp.view = CampView::Saying(pages, false);
         true
     }
 
@@ -548,7 +559,7 @@ impl<A: Assets> Engine<A> {
         let Some(f) = self.font.as_ref() else { return };
         let hi = if let Scene::Battle(b) = &self.scene { b.col[0] } else { crate::palette::nearest(&self.screen.pal, [208, 176, 112]) };
         let Some(c) = &self.camp else { return };
-        if matches!(c.view, CampView::Running | CampView::UnlockAsk(_)) || self.sortie_ui.is_some() {
+        if matches!(c.view, CampView::Running | CampView::UnlockAsk(_) | CampView::Saying(..)) || self.sortie_ui.is_some() {
             return;
         }
         // 단추 4개 (원작 창 50×50, 그림 48×48 이 (1,1))
@@ -563,7 +574,7 @@ impl<A: Assets> Engine<A> {
         }
         let box_ = match &c.view {
             CampView::Menu(l) | CampView::Talk(l, _) | CampView::Items(l, _) | CampView::Missed(l, _) => Some(l),
-            CampView::Field | CampView::Running | CampView::Order(_) | CampView::UnlockAsk(_) => None,
+            CampView::Field | CampView::Running | CampView::Order(_) | CampView::UnlockAsk(_) | CampView::Saying(..) => None,
         };
         if let Some(l) = box_ {
             l.render(scr, f, hi);
