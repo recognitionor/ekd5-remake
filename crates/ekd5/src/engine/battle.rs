@@ -1197,6 +1197,13 @@ impl Battle {
         k == 10 || Self::range_offsets(k).contains(&(cell.0 - from.0, cell.1 - from.1))
     }
 
+    /// 사건 조건용 "u 가 v 를 칠 수 있는 자리" (원작 FUN_0045d2a1): 활·궁기병·포차 계열 (병종 2·4·5) 은 바로 옆 (범위 1) 만, 그 밖은 공격 범위
+    pub fn event_reach(&self, u: usize, v: usize) -> bool {
+        let k = if matches!(self.group(u), 2 | 4 | 5) { 1 } else { self.range_kind(u) };
+        let (d0, d1) = (self.units[v].x - self.units[u].x, self.units[v].y - self.units[u].y);
+        k == 10 || Self::range_offsets(k).contains(&(d0, d1))
+    }
+
     fn targets_from(&self, ui: usize, from: (i32, i32)) -> Vec<usize> {
         let side = self.units[ui].side;
         self.attack_cells(ui, from).into_iter().filter_map(|(x, y)| self.at(x, y)).filter(|&t| self.units[t].side.hostile(side)).collect()

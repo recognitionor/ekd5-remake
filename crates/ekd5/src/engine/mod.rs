@@ -286,7 +286,8 @@ pub struct Engine<A: Assets> {
     /// 사건 처리 뒤 돌아갈 전투 단계
     resume: Option<battle::Phase>,
     /// 실행할 사건 본문들 (뒤에서부터)
-    event_queue: Vec<usize>,
+    /// 아직 조건을 안 본 사건 블록 (번호, 조건 위치) — 뒤에서부터 꺼냄
+    event_queue: Vec<(usize, usize)>,
     /// 승패 직전 사건 검사를 했는지
     end_checked: bool,
     /// 시험용: 아군도 컴퓨터가 둠
@@ -2801,9 +2802,15 @@ impl<A: Assets> Engine<A> {
     /// 전투 사건 조건 (원작 op3f/25/2e/36/40/42/43)
     fn battle_cond(&mut self, op: u16, args: &[Arg]) -> bool {
         let a = |i: usize| args.get(i).map_or(0, |a| a.i());
+        // 사건 진행 중 (Phase::Script) 이면 하던 차례로 (앞 사건 뒤 다음 블록 조건을 볼 때)
+        let resume = self.resume.clone();
         let Some(b) = self.battle() else { return false };
         // 차례 번호 (원작 +0x10: FUN_00450dd9 조조군 0, FUN_004508a8 우군 1·적군 2 — 차례를 시작하며 정하고 바로 사건 검사 FUN_0044e658)
-        let phase_no = match &b.phase {
+        let cur = match (&b.phase, &resume) {
+            (battle::Phase::Script, Some(p)) => p.clone(),
+            (p, _) => p.clone(),
+        };
+        let phase_no = match &cur {
             battle::Phase::Ai { side: battle::Side::Ally, .. } | battle::Phase::TurnBanner { side: battle::Side::Ally, .. } => 1,
             battle::Phase::Ai { side: battle::Side::Enemy, .. } | battle::Phase::TurnBanner { side: battle::Side::Enemy, .. } => 2,
             _ => 0,
@@ -2857,15 +2864,28 @@ impl<A: Assets> Engine<A> {
                 hit.is_some()
             }
             // 이웃 (인물 a, 인물 b)
+            // 원작 FUN_00413e24 → FUN_0045cfc3: 인물 a 의 둘레 8칸. b 가 인물이면 거기 있고, 마지막 인자가 1 이면 그것으로 참,
+            // 0 (FFFF) 이면 서로 칠 수 있는 자리여야 (FUN_0045d2a1). b 가 0x400~0x402 면 둘레 8칸에 그런 부대가 있으면 참
             0x2E => {
-                let m = |u: &battle::Unit, w: i32| match w {
-                    0x400 => true,
-                    0x401 => u.side != battle::Side::Enemy,
-                    0x402 => u.side == battle::Side::Enemy,
-                    p => u.person == p as usize,
-                };
-                let live: Vec<&battle::Unit> = b.units.iter().filter(|u| u.visible && u.hp > 0).collect();
-                live.iter().any(|u| m(u, a(0)) && live.iter().any(|v| m(v, a(1)) && (u.x - v.x).abs() + (u.y - v.y).abs() == 1))
+                let (pa, pb, adj_only) = (a(0), a(1), a(2) == 1);
+                if pa == 0xFFFF || pb == 0xFFFF {
+                    return false;
+                }
+                let live = |i: usize| b.units[i].visible && b.units[i].hp > 0;
+                let Some(ua) = (0..b.units.len()).find(|&i| live(i) && b.units[i].person == pa as usize) else { return false };
+                let near = |i: usize| i != ua && (b.units[i].x - b.units[ua].x).abs() <= 1 && (b.units[i].y - b.units[ua].y).abs() <= 1;
+                if pb < 0x200 {
+                    (0..b.units.len()).any(|v| live(v) && near(v) && b.units[v].person == pb as usize && (adj_only || (b.event_reach(ua, v) && b.event_reach(v, ua))))
+                } else {
+                    (0..b.units.len()).any(|v| {
+                        live(v) && near(v) && match pb {
+                            0x400 => true,
+                            0x401 => b.units[v].side != battle::Side::Enemy,
+                            0x402 => b.units[v].side == battle::Side::Enemy,
+                            _ => false,
+                        }
+                    })
+                }
             }
             // 능력 비교: 7 = HP (0 이면 퇴각)
             0x36 => {
@@ -2913,42 +2933,19 @@ impl<A: Assets> Engine<A> {
 
     /// 절 1 사건 검사: 머리 조건이 맞는 블록들을 차례로 실행하도록 줄 세움. 하나라도 있으면 true
     fn check_events(&mut self) -> bool {
-        let Some(mut vm) = self.vm.take() else { return false };
-        let mut found = Vec::new();
-        if vm.sections() > 1 && !vm.running {
-            if let Ok(blocks) = vm.blocks(1) {
-                for (bi, (start, _)) in blocks.into_iter().enumerate() {
-                    vm.pc = start;
-                    let mut ok = true;
-                    loop {
-                        match vm.fetch() {
-                            Ok((0, _)) => break,
-                            Ok((op, args)) => ok &= self.cond(op, &args),
-                            Err(_) => {
-                                ok = false;
-                                break;
-                            }
-                        }
-                    }
-                    if ok || self.force_block == Some(bi) {
-                        if self.force_block == Some(bi) {
-                            self.force_block = None;
-                        }
-                        if self.autoplay {
-                            self.log.push(format!("사건 블록 {bi}"));
-                        }
-                        found.push(vm.pc);
-                    }
-                }
-            }
-        }
-        self.vm = Some(vm);
-        if found.is_empty() {
+        // 원작 FUN_0044e658 → FUN_0041a5f6: 절 1 의 블록을 차례로 — 조건을 보고 맞으면 그 본문을 끝까지 실행한 뒤 다음 블록의 조건을 봄
+        // (앞 사건이 켠 깃발이 뒤 사건 조건에 바로 반영). 여기서는 검사할 블록 목록만 만들고 next_event 가 하나씩 조건을 봄
+        let Some(vm) = self.vm.as_ref() else { return false };
+        if vm.sections() <= 1 || vm.running {
             return false;
         }
-        self.event_queue = found;
-        self.event_queue.reverse();
-        self.next_event();
+        let Ok(blocks) = vm.blocks(1) else { return false };
+        let mut q: Vec<(usize, usize)> = blocks.into_iter().enumerate().map(|(bi, (start, _))| (bi, start)).collect();
+        q.reverse();
+        self.event_queue = q;
+        if !self.next_event() {
+            return false;
+        }
         if let Some(b) = self.battle() {
             let p = std::mem::replace(&mut b.phase, battle::Phase::Script);
             if self.resume.is_none() {
@@ -2958,19 +2955,50 @@ impl<A: Assets> Engine<A> {
         true
     }
 
-    /// 줄 선 사건 본문 하나 시작. 없으면 false
-    fn next_event(&mut self) -> bool {
-        let Some(body) = self.event_queue.pop() else { return false };
-        let Some(vm) = self.vm.as_mut() else { return false };
-        vm.section = 1;
-        vm.ends.clear();
-        vm.pc = body;
-        if vm.enter_body(true).is_ok() {
-            vm.running = true;
-            true
-        } else {
-            false
+    /// 블록의 조건을 지금 상태로 봄. 맞으면 본문 위치
+    fn eval_block(&mut self, bi: usize, start: usize) -> Option<usize> {
+        let mut vm = self.vm.take()?;
+        vm.pc = start;
+        let mut ok = true;
+        loop {
+            match vm.fetch() {
+                Ok((0, _)) => break,
+                Ok((op, args)) => ok &= self.cond(op, &args),
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
+            }
         }
+        let body = vm.pc;
+        self.vm = Some(vm);
+        if ok || self.force_block == Some(bi) {
+            if self.force_block == Some(bi) {
+                self.force_block = None;
+            }
+            if self.autoplay {
+                self.log.push(format!("사건 블록 {bi}"));
+            }
+            Some(body)
+        } else {
+            None
+        }
+    }
+
+    fn next_event(&mut self) -> bool {
+        // 남은 블록 가운데 지금 조건이 맞는 첫 블록의 본문으로
+        while let Some((bi, start)) = self.event_queue.pop() {
+            let Some(body) = self.eval_block(bi, start) else { continue };
+            let Some(vm) = self.vm.as_mut() else { return false };
+            vm.section = 1;
+            vm.ends.clear();
+            vm.pc = body;
+            if vm.enter_body(true).is_ok() {
+                vm.running = true;
+                return true;
+            }
+        }
+        false
     }
 
     /// 전투 진행 (스크립트가 쉬는 동안)
