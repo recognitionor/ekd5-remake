@@ -10,7 +10,18 @@
   const status = document.getElementById("status");
   const canvas = document.getElementById("screen");
   const ctx = canvas.getContext("2d");
-  const img = ctx.createImageData(640, 480);
+  // 선명하게: 640×480 원본을 화면 실제 화소 이상이 되도록 정수배 (가장 가까운 화소) 로 키운 뒤, 브라우저가 부드럽게 줄임 (sharp bilinear).
+  // 정수배가 아닌 배율을 화소 그대로 늘리면 획 굵기가 들쭉날쭉해 글자가 뭉개져 보임
+  const base = document.createElement("canvas"); base.width = 640; base.height = 480;
+  const bctx = base.getContext("2d");
+  const img = bctx.createImageData(640, 480);
+  let scaleK = 0;
+  function fitCanvas() {
+    const r = canvas.getBoundingClientRect();
+    const need = Math.max(r.width, r.height) * (window.devicePixelRatio || 1) / 640;
+    const k = Math.max(1, Math.min(4, Math.ceil(need - 0.05)));
+    if (k !== scaleK) { scaleK = k; canvas.width = 640 * k; canvas.height = 480 * k; }
+  }
   const setStatus = (t) => { status.textContent = t; };
 
   const { instance } = await WebAssembly.instantiateStreaming(fetch("ekd5_web.wasm"), {});
@@ -545,7 +556,10 @@
       acc += Math.min(250, now - last);
       while (acc >= TICK_MS / speed) { step(); acc -= TICK_MS / speed; }
       const p = w.frame();
-      img.data.set(mem().subarray(p, p + 640 * 480 * 4)); ctx.putImageData(img, 0, 0);
+      img.data.set(mem().subarray(p, p + 640 * 480 * 4)); bctx.putImageData(img, 0, 0);
+      fitCanvas();
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(base, 0, 0, canvas.width, canvas.height);
       // 브라우저는 첫 터치 전엔 소리를 못 냄 → 그동안 작은 안내만
       setStatus(loading > 0 ? "불러오는 중…" : "");
       soundHint.style.display = audioOk ? "none" : "block";

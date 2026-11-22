@@ -165,7 +165,7 @@ impl<A: Assets> Engine<A> {
         }
     }
 
-    fn imsg_text(&self, k: usize) -> String {
+    pub(super) fn imsg_text(&self, k: usize) -> String {
         self.imsg
             .as_ref()
             .and_then(|m| m.get(k * 216..k * 216 + 216))

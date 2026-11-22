@@ -259,6 +259,10 @@ pub struct Engine<A: Assets> {
     pub equip_ui: Option<equip::EquipUi>,
     /// 아이템·책략·열전 설명 (IMSG.E5, 216바이트 기록)
     pub imsg: Option<Rc<Vec<u8>>>,
+    /// 전투 이름 그림을 띄울 전투 번호 (IMSG 250+번호, 원작 FUN_0044bfc3 → FUN_0044f0xx)
+    battle_title: Option<usize>,
+    /// 전투 이름을 띄우는 동안 (틱, 원래 밝기)
+    title_t: Option<(u32, u8)>,
     /// 출진 화면 정렬 (원작 전역 DAT_00498c30 / DAT_00498c3c)
     sortie_sort: (u8, u8),
     sortie_rule: Option<camp::SortieRule>,
@@ -382,6 +386,8 @@ impl<A: Assets> Engine<A> {
             hard: false,
             equip_ui: None,
             imsg: None,
+            battle_title: None,
+            title_t: None,
             sortie_sort: (1, 2),
             sortie_rule: None,
             sortie_max: 0,
@@ -832,6 +838,10 @@ impl<A: Assets> Engine<A> {
                 if !self.load_battle_map() {
                     return;
                 }
+                // 전투 이름 (원작: 전투를 읽을 때 맵 아래 영역 가운데에 "사수관 전투" 같은 이름을 64px 세 겹 글자로 — 0x18 (+2), 0x15 (+1), 맨 위)
+                if !self.battle_title_step() {
+                    return;
+                }
                 if let Scene::Battle(b) = &mut self.scene {
                     if let Some(t) = b.intro {
                         b.intro = if t >= 30 { None } else { Some(t + 1) };
@@ -1004,6 +1014,7 @@ impl<A: Assets> Engine<A> {
                         b.strategies = self.strategies.clone();
                         b.inventory = self.inventory.clone();
                         self.scene = Scene::Battle(Box::new(b));
+                        self.battle_title = Some((n / 2) as usize);
                     } else if !matches!(self.scene, Scene::Story(_)) {
                         self.scene = Scene::Story(Box::default());
                     }
@@ -1382,38 +1393,9 @@ impl<A: Assets> Engine<A> {
                         }
                     }
                 }
-                let roster = match &self.sortie_chosen {
-                    Some(c) => c.clone(),
-                    None if self.roster.is_empty() => vec![0],
-                    None => self.roster.clone(),
-                };
-                let offs: Vec<crate::officer::Officer> = roster.iter().map(|&p| self.officer(p)).collect();
+                self.place_sortie();
                 if let Some(b) = self.battle() {
                     if !b.started {
-                        // 출진 (원작은 출진 화면에서 고름): 출진 칸이 둘 이상 정해져 있으면 합류 순서대로 자동 배치
-                        if b.slots.get(1).is_some_and(|&s| s != (0, 0)) {
-                            for (k, &pid) in roster.iter().enumerate() {
-                                let Some(&(x, y)) = b.slots.get(k) else { break };
-                                if k > 0 && (x, y) == (0, 0) {
-                                    break;
-                                }
-                                if !b.sortie.contains(&pid) {
-                                    b.sortie.push(pid);
-                                }
-                                if b.unit_of(pid).is_none() {
-                                    let mut u = b.make_unit(offs[k].clone(), battle::Side::Player, x, y);
-                                    u.dir = b.slot_dir.get(k).copied().unwrap_or(0);
-                                    b.units.push(u);
-                                    let ui = b.units.len() - 1;
-                                    // 나중에 등장하는 칸은 숨겨 둠, 나머지는 빈 칸에 (원작 FUN_00444c58)
-                                    if b.slot_hidden.get(k).copied().unwrap_or(false) {
-                                        b.units[ui].visible = false;
-                                    } else {
-                                        b.place_at(ui, x, y);
-                                    }
-                                }
-                            }
-                        }
                         b.started = true;
                         b.phase = battle::Phase::TurnBanner { t: 0, side: battle::Side::Player };
                         b.ui = Story::default();
@@ -1625,7 +1607,14 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x12 => self.start_choice(&args),
-            0x1C => self.wait = Wait::Fade(16),
+            0x1C => {
+                // 전투 도입이 밝아질 때 출진 장수를 이미 맵 위에 (출진 화면을 아직 안 거쳤으면 절 0 끝에서)
+                let early = vm.section == 0 && self.battle().is_some_and(|b| !b.started && (b.slots.get(1).map_or(true, |&s| s == (0, 0))));
+                if early || (vm.section == 0 && self.sortie_chosen.is_some() && self.battle().is_some_and(|b| !b.started)) {
+                    self.place_sortie();
+                }
+                self.wait = Wait::Fade(16);
+            }
             0x1D => self.wait = Wait::Fade(0),
             0x16 | 0x19 => {
                 // 해설 창 (원작 FUN_0042fa65(글, 0xffff): 가운데 352×144). 19 = 전투 승패 조건
@@ -2801,6 +2790,90 @@ impl<A: Assets> Engine<A> {
     }
 
     /// 전투 사건 조건 (원작 op3f/25/2e/36/40/42/43)
+    /// 출진 장수를 출진 칸에 놓음 (원작: 본진에서 고른 출진 장수가 전투 대본의 op4b 칸에 — 도입 대화 (op1c 밝아짐) 때 이미 맵 위에 있음.
+    /// 예: 사수관 도입에서 하후돈이 조조를 돌아봄 op4f [1, 0]). 이미 있는 장수는 건너뜀
+    fn place_sortie(&mut self) {
+        let roster = match &self.sortie_chosen {
+            Some(c) => c.clone(),
+            None if self.roster.is_empty() => vec![0],
+            None => self.roster.clone(),
+        };
+        let offs: Vec<crate::officer::Officer> = roster.iter().map(|&p| self.officer(p)).collect();
+        let Some(b) = self.battle() else { return };
+        if b.started {
+            return;
+        }
+        // 출진 (원작은 출진 화면에서 고름): 출진 칸이 둘 이상 정해져 있으면 합류 순서대로 자동 배치
+        if b.slots.get(1).is_some_and(|&s| s != (0, 0)) {
+            for (k, &pid) in roster.iter().enumerate() {
+                let Some(&(x, y)) = b.slots.get(k) else { break };
+                if k > 0 && (x, y) == (0, 0) {
+                    break;
+                }
+                if !b.sortie.contains(&pid) {
+                    b.sortie.push(pid);
+                }
+                if b.unit_of(pid).is_none() {
+                    let mut u = b.make_unit(offs[k].clone(), battle::Side::Player, x, y);
+                    u.dir = b.slot_dir.get(k).copied().unwrap_or(0);
+                    b.units.push(u);
+                    let ui = b.units.len() - 1;
+                    // 나중에 등장하는 칸은 숨겨 둠, 나머지는 빈 칸에 (원작 FUN_00444c58)
+                    if b.slot_hidden.get(k).copied().unwrap_or(false) {
+                        b.units[ui].visible = false;
+                    } else {
+                        b.place_at(ui, x, y);
+                    }
+                }
+            }
+        }
+    }
+
+    /// 전투 이름 띄우기. 띄우는 중이면 false (대본은 멈춤)
+    fn battle_title_step(&mut self) -> bool {
+        const HOLD: u32 = 45;
+        if let Some(idx) = self.battle_title {
+            if self.imsg.is_none() {
+                match self.assets.get("IMSG.E5") {
+                    Asset::Pending => return false,
+                    Asset::Ready(d) => self.imsg = Some(d),
+                    Asset::Missing => {}
+                }
+            }
+            let name = self.imsg_text(250 + idx);
+            if name.is_empty() || std::env::var("EKD5_NOTITLE").is_ok() {
+                self.battle_title = None;
+                return true;
+            }
+            let m = match self.text_mask(&name, 64) {
+                Ok(m) => m,
+                Err(Pending) => return false,
+            };
+            self.battle_title = None;
+            if let Some(b) = self.battle() {
+                b.title_mask = Some(m);
+            }
+            self.title_t = Some((0, self.screen.level));
+            self.screen.level = 16;
+            if self.autoplay {
+                self.log.push(format!("전투 이름 {name}"));
+            }
+        }
+        let Some((t, lv)) = self.title_t else { return true };
+        if t >= HOLD {
+            self.title_t = None;
+            self.screen.level = lv;
+            if let Some(b) = self.battle() {
+                b.title_mask = None;
+            }
+            return true;
+        }
+        // 마지막 8틱은 어두워짐
+        self.screen.level = if t + 8 >= HOLD { ((HOLD - t) * 2).min(16) as u8 } else { 16 };
+        self.title_t = Some((t + 1, lv));
+        false
+    }
+
     fn battle_cond(&mut self, op: u16, args: &[Arg]) -> bool {
         let a = |i: usize| args.get(i).map_or(0, |a| a.i());
         // 사건 진행 중 (Phase::Script) 이면 하던 차례로 (앞 사건 뒤 다음 블록 조건을 볼 때)

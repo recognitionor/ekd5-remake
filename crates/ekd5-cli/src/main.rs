@@ -369,6 +369,15 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
                 println!("[{t:>6}] 장수 정보 시험 탭 {tab}");
             }
         }
+        // 시험: EKD5_UNITS=틱 — 그 틱에 전투 부대 목록 (진영·인물·자리·보임)
+        if std::env::var("EKD5_UNITS").ok().and_then(|v| v.parse::<u32>().ok()) == Some(t) {
+            if let ekd5::engine::Scene::Battle(b) = &eng.scene {
+                println!("[{t:>6}] 부대 {} 시작 {} 카메라 {:?}", b.units.len(), b.started, b.cam);
+                for (i, u) in b.units.iter().enumerate() {
+                    println!("    {i} {:?} 인물 {} @{},{} 보임 {} hp {}", u.side, u.person, u.x, u.y, u.visible, u.hp);
+                }
+            }
+        }
         // 시험: EKD5_REWARD=1 — 전투마다 첫 턴에 "전투 보상" 창의 줄들을 찍음 (진행은 그대로). =단계 번호면 그 전투에서 창을 열고 자동 진행을 멈춤
         if std::env::var("EKD5_REWARD").is_ok() {
             static SEEN: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());

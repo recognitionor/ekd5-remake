@@ -24,7 +24,7 @@
   #app { position: fixed; inset: 0; box-sizing: border-box; display: flex; align-items: center; justify-content: center;
     padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
   /* 비율 유지: 높이를 꽉 쓰고 남는 폭은 양옆 (왼쪽 사실·가상 게이지 · 오른쪽 버튼) */
-  #screen { image-rendering: pixelated; background: #000; touch-action: none; display: block;
+  #screen { image-rendering: auto; background: #000; touch-action: none; display: block;
     width: min(calc(var(--vw) - var(--bar) - var(--side)), calc(var(--vh) * 4 / 3));
     height: min(var(--vh), calc((var(--vw) - var(--bar) - var(--side)) * 3 / 4)); }
   /* 꽉 채우기: 비율을 늘여 남는 곳 없이 */

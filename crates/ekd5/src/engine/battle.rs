@@ -314,6 +314,8 @@ pub struct Battle {
     /// 전투 시작 연출 진행 틱 (원작 op5a FUN_0044db19: 가장자리부터 열고 "작전개시")
     pub intro: Option<u32>,
     pub intro_mask: Option<super::duel::Mask>,
+    /// 전투 이름 글자 (있으면 맵 대신 검은 화면에 이름만)
+    pub title_mask: Option<super::duel::Mask>,
     /// 차례 알림 큰 글자 (진영, 턴)
     pub banner: Option<(super::duel::Mask, Option<super::duel::Mask>)>,
     /// 책략 연출 (원작 MEFF/MCALL)
@@ -568,6 +570,7 @@ impl Battle {
             duel: None,
             intro: None,
             intro_mask: None,
+            title_mask: None,
             banner: None,
             fx: None,
             fx_req: None,
@@ -3933,6 +3936,20 @@ impl Battle {
     pub fn render(&mut self, scr: &mut Screen, font: Option<&Font>, tick: u32) {
         self.pal_cache = scr.pal;
         scr.clear(0);
+        if let Some(m) = &self.title_mask {
+            // 원작 FUN_0044f0xx: 위 0x38 줄 아래 영역 (0,56)-(640,480) 가운데, 64px 글자 세 겹 (0x18 +2, 0x15 +1, 맨 위)
+            let (x, y) = (320 - m.w / 2, 268 - m.h / 2);
+            for (k, c) in [(2, 0x18u8), (1, 0x15), (0, 0x12)] {
+                for yy in 0..m.h {
+                    for xx in 0..m.w {
+                        if m.px[(yy * m.w + xx) as usize] != 0 {
+                            scr.fill(x + xx + k, y + yy + k, 1, 1, c);
+                        }
+                    }
+                }
+            }
+            return;
+        }
         if let Some(m) = &self.map {
             scr.blit_rect(m, self.cam.0, self.cam.1, 640, 480, 0, 0, None);
         }
