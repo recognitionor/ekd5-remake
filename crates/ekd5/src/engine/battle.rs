@@ -158,7 +158,7 @@ pub enum Phase {
     /// 인수 승급 연출 (원작 FUN_0041fa2b): 돌기 → 밝아짐 → 새 병과로 어두워짐 → 알림
     Promote { unit: usize, target: usize, t: u32 },
     Ai { side: Side, idx: usize, stage: u8 },
-    /// 원작 전투 메뉴 (0 메뉴, 1 장수 일람, 2 소유 아이템, 3 지형 정보, 4 승리 조건) — 목록과 줄별 부대
+    /// 원작 전투 메뉴 (0 메뉴, 1 장수 일람, 2 소유 아이템, 3 지형 정보, 4 승리 조건, 5 전투 보상) — 목록과 줄별 부대
     Sys { kind: u8, list: Box<super::ui::ListBox>, units: Vec<usize> },
     TurnBanner { t: u32, side: Side },
     Over { won: bool, t: u32 },
@@ -369,6 +369,8 @@ pub struct Battle {
     pub terrain_names: Rc<Vec<String>>,
     /// 메뉴 열기 요청 (웹 버튼)
     pub open_menu: bool,
+    /// 메뉴에서 "전투 보상" 을 고름 → 엔진이 창을 열어 줌
+    pub want_rewards: bool,
     /// 마지막 화면 팔레트 (아이콘 색 맞춤용)
     pub pal_cache: crate::palette::Palette,
     /// 직업 이름 (JOBS.TXT)
@@ -597,6 +599,7 @@ impl Battle {
             victory_text: String::new(),
             terrain_names: Rc::new(Vec::new()),
             open_menu: false,
+            want_rewards: false,
             pal_cache: [[0; 3]; 256],
             job_names: Rc::new(Vec::new()),
             atk_exp: None,
@@ -2651,7 +2654,12 @@ impl Battle {
                             1 => self.sys_items(),
                             2 => self.sys_terrain(),
                             3 => self.sys_victory(),
+                            // 전투 보상 (리메이크 추가): 스크립트를 읽어야 하니 엔진이 창을 만듦 (reward.rs)
                             4 => {
+                                self.want_rewards = true;
+                                Phase::PlayerIdle
+                            }
+                            5 => {
                                 // 미실행 부대 검색: 다음 행동 안 한 조조군 부대로
                                 let list: Vec<usize> = self.alive(Side::Player).filter(|&i| !self.units[i].acted).collect();
                                 let cur = self.at(self.cursor.0, self.cursor.1);
@@ -2664,7 +2672,7 @@ impl Battle {
                                 }
                                 Phase::PlayerIdle
                             }
-                            5 => {
+                            6 => {
                                 self.end_player_turn();
                                 return true;
                             }
@@ -2680,6 +2688,18 @@ impl Battle {
                             self.info_unit = Some((i, 90));
                         }
                         self.phase = Phase::PlayerIdle;
+                    }
+                    super::ui::Pick::Row(k) if kind == 5 => {
+                        // 전투 보상: 칸 조건이면 그 칸으로
+                        match units.get(k) {
+                            Some(&c) if c != usize::MAX => {
+                                let (x, y) = ((c >> 8) as i32, (c & 0xFF) as i32);
+                                self.cursor = (x, y);
+                                self.focus(x, y);
+                                self.phase = Phase::PlayerIdle;
+                            }
+                            _ => self.phase = Phase::Sys { kind, list, units },
+                        }
                     }
                     _ => self.phase = Phase::Sys { kind, list, units },
                 }
@@ -4561,7 +4581,7 @@ impl Battle {
     fn sys_menu(&self) -> Phase {
         let mut l = super::ui::ListBox::new("메뉴", 240);
         l.y = 80;
-        for t in ["장수 일람", "소유 아이템 일람", "지형 정보 일람", "승리 조건", "미실행 부대 검색", "턴 종료"] {
+        for t in ["장수 일람", "소유 아이템 일람", "지형 정보 일람", "승리 조건", "전투 보상", "미실행 부대 검색", "턴 종료"] {
             l.push(t, "", true);
         }
         Phase::Sys { kind: 0, list: Box::new(l), units: Vec::new() }

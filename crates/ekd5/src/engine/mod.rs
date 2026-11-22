@@ -10,6 +10,7 @@ pub mod fx;
 pub mod icons;
 pub mod info;
 pub mod quick;
+pub mod reward;
 pub mod tutor;
 pub mod screen;
 pub mod sortie;
@@ -3252,6 +3253,13 @@ impl<A: Assets> Engine<A> {
                 b.phase = battle::Phase::Over { won, t: t + 1 };
             }
             _ => check = b.update_player(&inp),
+        }
+        if self.battle().is_some_and(|b| std::mem::take(&mut b.want_rewards)) {
+            if let Some(p) = self.reward_view() {
+                if let Some(b) = self.battle() {
+                    b.phase = p;
+                }
+            }
         }
         if self.force_block.is_some() && matches!(self.battle().map(|b| &b.phase), Some(battle::Phase::PlayerIdle)) {
             check = true;

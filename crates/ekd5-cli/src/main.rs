@@ -369,6 +369,36 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
                 println!("[{t:>6}] 장수 정보 시험 탭 {tab}");
             }
         }
+        // 시험: EKD5_REWARD=1 — 전투마다 첫 턴에 "전투 보상" 창의 줄들을 찍음 (진행은 그대로). =단계 번호면 그 전투에서 창을 열고 자동 진행을 멈춤
+        if std::env::var("EKD5_REWARD").is_ok() {
+            static SEEN: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+            let st = eng.stage as u32;
+            let fresh = matches!(&eng.scene, ekd5::engine::Scene::Battle(b) if b.started && b.turn == 1) && !SEEN.lock().unwrap().contains(&st);
+            if fresh {
+                SEEN.lock().unwrap().push(st);
+                if let Some(p) = eng.reward_view() {
+                    if let ekd5::engine::battle::Phase::Sys { list, .. } = &p {
+                        println!("[{t:>6}] 전투 보상 (단계 {st})");
+                        for r in &list.rows {
+                            println!("    {} {}", r.0, r.1);
+                        }
+                    }
+                }
+            }
+            // 그 단계면 조조군 차례가 될 때 창을 열고 멈춤
+            if std::env::var("EKD5_REWARD").ok().and_then(|v| v.parse::<u32>().ok()) == Some(st) && eng.autoplay {
+                let mine = matches!(&eng.scene, ekd5::engine::Scene::Battle(b) if matches!(b.phase, ekd5::engine::battle::Phase::Ai { side: ekd5::engine::battle::Side::Player, idx: 0, stage: 0 } | ekd5::engine::battle::Phase::PlayerIdle));
+                if mine && !eng.vm.as_ref().is_some_and(|v| v.running) {
+                    if let Some(p) = eng.reward_view() {
+                        eng.autoplay = false;
+                        if let ekd5::engine::Scene::Battle(b) = &mut eng.scene {
+                            b.phase = p;
+                        }
+                        println!("[{t:>6}] 전투 보상 창 열림");
+                    }
+                }
+            }
+        }
         // 시험: EKD5_MISSED=틱 — 그 틱 뒤 처음 본진이 열리면 자동 진행을 멈추고 놓친 보물 목록
         if let Some(mt) = std::env::var("EKD5_MISSED").ok().and_then(|v| v.parse::<u32>().ok()) {
             if t >= mt && eng.autoplay && !eng.waiting_text() && eng.camp.as_ref().is_some_and(|c| matches!(c.view, ekd5::engine::camp::CampView::Field | ekd5::engine::camp::CampView::Menu(_))) {
