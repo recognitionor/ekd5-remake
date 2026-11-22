@@ -2802,10 +2802,11 @@ impl<A: Assets> Engine<A> {
     fn battle_cond(&mut self, op: u16, args: &[Arg]) -> bool {
         let a = |i: usize| args.get(i).map_or(0, |a| a.i());
         let Some(b) = self.battle() else { return false };
+        // 차례 번호 (원작 +0x10: FUN_00450dd9 조조군 0, FUN_004508a8 우군 1·적군 2 — 차례를 시작하며 정하고 바로 사건 검사 FUN_0044e658)
         let phase_no = match &b.phase {
-            battle::Phase::Ai { side: battle::Side::Ally, .. } | battle::Phase::TurnBanner { side: battle::Side::Ally, .. } => 2,
-            battle::Phase::Ai { side: battle::Side::Enemy, .. } | battle::Phase::TurnBanner { side: battle::Side::Enemy, .. } => 3,
-            _ => 1,
+            battle::Phase::Ai { side: battle::Side::Ally, .. } | battle::Phase::TurnBanner { side: battle::Side::Ally, .. } => 1,
+            battle::Phase::Ai { side: battle::Side::Enemy, .. } | battle::Phase::TurnBanner { side: battle::Side::Enemy, .. } => 2,
+            _ => 0,
         };
         match op {
             // 턴 비교 (0: 이상, 1: 미만, 2: 같음)
@@ -2819,6 +2820,10 @@ impl<A: Assets> Engine<A> {
             // 맞은 부대는 사건 부대로 기억 (원작 0x4c0568 → op3d 의 0x401)
             0x25 => {
                 let (w, x, y) = (a(0), a(1), a(2));
+                // 시험(치트) 자동 진행 전용: "적이 그 칸에 들어옴" 은 무시 (요새 방어 패배 등 — 자동 진행은 칸을 지킬 줄 모름. 원작에는 없음)
+                if b.cheat && w == 0x402 {
+                    return false;
+                }
                 let hit = b.units.iter().position(|u| {
                     u.visible && u.hp > 0 && u.x == x && u.y == y && match w {
                         0x400 => true,
@@ -2835,6 +2840,9 @@ impl<A: Assets> Engine<A> {
             // 사각형 안 (부대, x1, y1, x2, y2)
             0x26 => {
                 let (w, x1, y1, x2, y2) = (a(0), a(1), a(2), a(3), a(4));
+                if b.cheat && w == 0x402 {
+                    return false;
+                }
                 let hit = b.units.iter().position(|u| {
                     u.visible && u.hp > 0 && (x1..=x2).contains(&u.x) && (y1..=y2).contains(&u.y) && match w {
                         0x400 => true,
@@ -3133,7 +3141,8 @@ impl<A: Assets> Engine<A> {
                 let end = match side {
                     battle::Side::Player => 45,
                     battle::Side::Enemy => 30,
-                    battle::Side::Ally => 1,
+                    // 표시는 없지만 t == 1 의 사건 검사가 우군 차례인 채로 되게 2
+                    battle::Side::Ally => 2,
                 };
                 // 차례 표시가 끝날 무렵 상태 회복 처리 (연출이 있으면 재생)
                 if t + 1 == end {
