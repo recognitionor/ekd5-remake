@@ -208,6 +208,8 @@ fn extract(src: &Path, dst: &Path) {
 fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
     fs::create_dir_all(&out).unwrap();
     let mut eng = Engine::new(DirAssets::new(data));
+    // 시험: EKD5_HIRES=1 — 선명한 글자 모드 (스크린샷마다 글자 목록 tNNNNN.txt 를 같이 씀, 비트맵에서는 지워짐)
+    eng.screen.hires = std::env::var("EKD5_HIRES").is_ok();
     eng.autoplay = std::env::var("EKD5_AUTOPLAY").is_ok();
     eng.cheat = std::env::var("EKD5_CHEAT").is_ok();
     eng.minimap_on = std::env::var("EKD5_MINIMAP").is_ok();
@@ -591,6 +593,9 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
         if t % every == 0 && t >= shot_from {
             let rgba = eng.render().to_vec();
             write_png(&out.join(format!("t{t:05}.png")), 640, 480, &rgba);
+            if eng.screen.hires {
+                let _ = fs::write(out.join(format!("t{t:05}.txt")), &eng.screen.text_out);
+            }
         }
     }
 }

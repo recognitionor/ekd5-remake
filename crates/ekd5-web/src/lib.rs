@@ -126,6 +126,22 @@ pub extern "C" fn frame() -> *const u8 {
     with(|app| app.engine.render().as_ptr())
 }
 
+/// 선명한 글자 켜기 (frame 뒤 text_ptr/text_len 으로 글자 목록)
+#[no_mangle]
+pub extern "C" fn set_hires(on: i32) {
+    with(|app| app.engine.screen.hires = on != 0)
+}
+
+#[no_mangle]
+pub extern "C" fn text_ptr() -> *const u8 {
+    with(|app| app.engine.screen.text_out.as_ptr())
+}
+
+#[no_mangle]
+pub extern "C" fn text_len() -> usize {
+    with(|app| app.engine.screen.text_out.len())
+}
+
 /// 회차 공통 기록 (엔딩·보물도감) 불러오기
 /// # Safety
 /// 유효한 UTF-8 포인터

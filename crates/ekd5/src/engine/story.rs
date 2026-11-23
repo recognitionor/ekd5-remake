@@ -573,17 +573,20 @@ pub fn draw_text_big(scr: &mut Screen, f: &Font, x: i32, y: i32, s: &str, k: i32
 
 pub fn draw_text(scr: &mut Screen, f: &Font, x: i32, y: i32, s: &str, col: u8) {
     let (b, _, _) = encoding_rs::EUC_KR.encode(s);
+    let shadow = col != TEXT && col != NAME;
     let mut cx = x;
     for c in font::codes(&b) {
         if let Some((w, rows)) = f.glyph(c) {
+            let ch = if c >= 0x100 { encoding_rs::EUC_KR.decode(&[(c >> 8) as u8, c as u8]).0.chars().next().unwrap_or(' ') } else { c as u8 as char };
+            let id = if ch == ' ' || ch == '\u{3000}' { None } else { scr.text_begin(cx, y, w, ch, col, shadow.then_some(31)) };
             for (r, bits) in rows.iter().enumerate() {
                 for bx in 0..w {
                     if bits & (0x8000 >> bx) != 0 {
                         let (px, py) = (cx + bx, y + r as i32);
-                        if col != TEXT && col != NAME {
-                            scr.fill(px + 1, py + 1, 1, 1, 31);
+                        if shadow {
+                            scr.text_px(id, px + 1, py + 1, 31);
                         }
-                        scr.fill(px, py, 1, 1, col);
+                        scr.text_px(id, px, py, col);
                     }
                 }
             }

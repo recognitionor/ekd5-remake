@@ -16,6 +16,40 @@
   const bctx = base.getContext("2d");
   const img = bctx.createImageData(640, 480);
   let scaleK = 0;
+  // 선명한 글자: 엔진이 가려지지 않은 글자를 비트맵에서 지우고 (x, y, 칸 폭, 색, 그림자, 글자) 목록으로 넘김 → 실제 화소 크기로 글꼴을 그림.
+  // 칸 (한글 16×14, 반각 8×16) 가운데에 맞추고, 넓으면 가로로 줄임. 그림자는 원작처럼 오른쪽 아래 1화소
+  const FONT_FAM = '"Apple SD Gothic Neo","Noto Sans KR","Noto Sans CJK KR","Malgun Gothic","Nanum Gothic",sans-serif';
+  const widthCache = new Map();
+  function drawText() {
+    if (!w.text_len) return;
+    const n = w.text_len();
+    if (!n) return;
+    const p = w.text_ptr();
+    const b = mem().subarray(p, p + n);
+    const dv = new DataView(b.buffer, b.byteOffset, n);
+    const k = canvas.width / 640;
+    const size = Math.round(16 * k);
+    ctx.save();
+    ctx.font = `600 ${size}px ${FONT_FAM}`;
+    ctx.textBaseline = "middle"; ctx.textAlign = "center";
+    for (let o = 0; o + 16 <= n; o += 16) {
+      const x = dv.getInt16(o, true), y = dv.getInt16(o + 2, true), cw = b[o + 4];
+      const ch = String.fromCodePoint(dv.getUint32(o + 12, true));
+      let m = widthCache.get(ch + size);
+      if (m === undefined) { m = ctx.measureText(ch).width; widthCache.set(ch + size, m); }
+      const cellW = cw * k, cx = (x + cw / 2) * k, cy = (y + 7.5) * k;
+      const sx = m > cellW ? cellW / m : 1;
+      const put = (dx, col) => {
+        ctx.fillStyle = col;
+        if (sx < 1) { ctx.setTransform(sx, 0, 0, 1, cx + dx, cy + dx); ctx.fillText(ch, 0, 0); ctx.setTransform(1, 0, 0, 1, 0, 0); }
+        else ctx.fillText(ch, cx + dx, cy + dx);
+      };
+      if (b[o + 8]) put(Math.max(1, k * 0.6), `rgb(${b[o + 9]},${b[o + 10]},${b[o + 11]})`);
+      put(0, `rgb(${b[o + 5]},${b[o + 6]},${b[o + 7]})`);
+    }
+    ctx.restore();
+    if (widthCache.size > 4000) widthCache.clear();
+  }
   function fitCanvas() {
     const r = canvas.getBoundingClientRect();
     const need = Math.max(r.width, r.height) * (window.devicePixelRatio || 1) / 640;
@@ -246,6 +280,13 @@
   applyFit();
   fitBtn.addEventListener("click", (e) => { e.preventDefault(); fill = !fill; applyFit(); try { localStorage.setItem("ekd5-fill", fill ? "1" : "0"); } catch (_) {} });
   // 화면 방향: 자동 (폰 방향대로) / 세로 고정 / 가로 고정. 폰이 고정을 못 하면 (아이폰 등) 앱을 90도 돌려 그림
+  // 글자: 선명 (기본, 고해상도 글꼴) / 원작 (비트맵 그대로)
+  const fontBtn = document.getElementById("fontBtn");
+  let hires = true;
+  try { hires = localStorage.getItem("ekd5-font") !== "orig"; } catch (_) {}
+  const applyFont = () => { w.set_hires(hires ? 1 : 0); fontBtn.textContent = "글자: " + (hires ? "선명하게" : "원작 그대로"); };
+  applyFont();
+  fontBtn.addEventListener("click", (e) => { e.preventDefault(); hires = !hires; applyFont(); try { localStorage.setItem("ekd5-font", hires ? "new" : "orig"); } catch (_) {} });
   const orientBtn = document.getElementById("orient");
   let orient = "auto";
   try { orient = localStorage.getItem("ekd5-orient") || "auto"; } catch (_) {}
@@ -560,6 +601,7 @@
       fitCanvas();
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(base, 0, 0, canvas.width, canvas.height);
+      drawText();
       // 브라우저는 첫 터치 전엔 소리를 못 냄 → 그동안 작은 안내만
       setStatus(loading > 0 ? "불러오는 중…" : "");
       soundHint.style.display = audioOk ? "none" : "block";
