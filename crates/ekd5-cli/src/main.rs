@@ -595,6 +595,7 @@ fn shots(data: PathBuf, out: PathBuf, ticks: u32, every: u32) {
             write_png(&out.join(format!("t{t:05}.png")), 640, 480, &rgba);
             if eng.screen.hires {
                 let _ = fs::write(out.join(format!("t{t:05}.txt")), &eng.screen.text_out);
+                let _ = fs::write(out.join(format!("t{t:05}.big")), &eng.screen.big_out);
             }
         }
     }

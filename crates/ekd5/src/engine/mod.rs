@@ -3678,12 +3678,15 @@ impl<A: Assets> Engine<A> {
 
     /// 큰 글자 모양 (웹이 원작 굴림체 굵게로 그려 줌 "@txt/높이/글", 없으면 비트맵 글꼴)
     fn text_mask(&mut self, text: &str, h: i32) -> Result<duel::Mask, Pending> {
-        let fb = |e: &Self| e.font.as_ref().map(|f| duel::fallback_mask(f, text, h)).unwrap_or(duel::Mask { w: 0, h: 0, px: Vec::new() });
-        match self.assets.get(&format!("@txt/{h}/{text}")) {
-            Asset::Pending => Err(Pending),
-            Asset::Ready(d) => Ok(duel::parse_mask(&d).unwrap_or_else(|| fb(self))),
-            Asset::Missing => Ok(fb(self)),
-        }
+        let fb = |e: &Self| e.font.as_ref().map(|f| duel::fallback_mask(f, text, h)).unwrap_or_default();
+        let mut m = match self.assets.get(&format!("@txt/{h}/{text}")) {
+            Asset::Pending => return Err(Pending),
+            Asset::Ready(d) => duel::parse_mask(&d).unwrap_or_else(|| fb(self)),
+            Asset::Missing => fb(self),
+        };
+        m.text = text.to_string();
+        m.size = h;
+        Ok(m)
     }
 
     /// 일기토 준비 (원작 FUN_0044b778): 두 장수의 그림·얼굴·이름, 배경 LOGO.E5[5]. 받는 중이면 Err

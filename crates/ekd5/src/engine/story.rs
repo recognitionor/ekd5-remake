@@ -336,16 +336,7 @@ impl Story {
         scr.clear(0);
         if let Some(m) = &self.big_card {
             // 큰 글자 층 (원작 FUN_004212a8 2·1 칸 밀어 0x18·0x15, 위 0x12) — 화면 위 40 아래 가운데
-            let (x, y) = (320 - m.w / 2, (40 + 480) / 2 - m.h / 2);
-            for (k, c) in [(2, 0x18u8), (1, 0x15), (0, 0x12)] {
-                for yy in 0..m.h {
-                    for xx in 0..m.w {
-                        if m.px[(yy * m.w + xx) as usize] != 0 {
-                            scr.fill(x + xx + k, y + yy + k, 1, 1, c);
-                        }
-                    }
-                }
-            }
+            scr.big_text(m, 320 - m.w / 2, (40 + 480) / 2 - m.h / 2, &[(2, 0x18), (1, 0x15), (0, 0x12)]);
             return;
         }
         if let Some(bg) = &self.bg {

@@ -3938,16 +3938,7 @@ impl Battle {
         scr.clear(0);
         if let Some(m) = &self.title_mask {
             // 원작 FUN_0044f0xx: 위 0x38 줄 아래 영역 (0,56)-(640,480) 가운데, 64px 글자 세 겹 (0x18 +2, 0x15 +1, 맨 위)
-            let (x, y) = (320 - m.w / 2, 268 - m.h / 2);
-            for (k, c) in [(2, 0x18u8), (1, 0x15), (0, 0x12)] {
-                for yy in 0..m.h {
-                    for xx in 0..m.w {
-                        if m.px[(yy * m.w + xx) as usize] != 0 {
-                            scr.fill(x + xx + k, y + yy + k, 1, 1, c);
-                        }
-                    }
-                }
-            }
+            scr.big_text(m, 320 - m.w / 2, 268 - m.h / 2, &[(2, 0x18), (1, 0x15), (0, 0x12)]);
             return;
         }
         if let Some(m) = &self.map {
@@ -4443,16 +4434,7 @@ impl Battle {
                 }
                 if let Some((m1, m2)) = &self.banner {
                     let draw = |scr: &mut Screen, m: &super::duel::Mask, y: i32, layers: [(i32, u8); 3]| {
-                        let x = 320 - m.w / 2;
-                        for (k, c) in layers {
-                            for yy in 0..m.h {
-                                for xx in 0..m.w {
-                                    if m.px[(yy * m.w + xx) as usize] != 0 {
-                                        scr.fill(x + xx + k, y + yy + k, 1, 1, c);
-                                    }
-                                }
-                            }
-                        }
+                        scr.big_text(m, 320 - m.w / 2, y, &layers);
                     };
                     draw(scr, m1, 240 - m1.h / 2, if enemy { [(2, 0x3a), (1, 0x35), (0, 0x12)] } else { [(2, 0x2a), (1, 0x24), (0, 0x12)] });
                     if let (Some(m2), true) = (m2, *t >= 15) {
@@ -4506,16 +4488,7 @@ impl Battle {
                 scr.glaze.push((i as u32, scr.px[i], 0x1f));
             }
             if let Some(m) = &self.intro_mask {
-                let (x, y) = (320 - m.w / 2, 240 - m.h / 2);
-                for (k, c) in [(2, 0x18u8), (1, 0x15), (0, 0x12)] {
-                    for yy in 0..m.h {
-                        for xx in 0..m.w {
-                            if m.px[(yy * m.w + xx) as usize] != 0 {
-                                scr.fill(x + xx + k, y + yy + k, 1, 1, c);
-                            }
-                        }
-                    }
-                }
+                scr.big_text(m, 320 - m.w / 2, 240 - m.h / 2, &[(2, 0x18), (1, 0x15), (0, 0x12)]);
             }
         }
         // 피해·회복 창

@@ -20,6 +20,45 @@
   // 칸 (한글 16×14, 반각 8×16) 가운데에 맞추고, 넓으면 가로로 줄임. 그림자는 원작처럼 오른쪽 아래 1화소
   const FONT_FAM = '"Apple SD Gothic Neo","Noto Sans KR","Noto Sans CJK KR","Malgun Gothic","Nanum Gothic",sans-serif';
   const widthCache = new Map();
+  // 큰 글자 (전투 이름·작전개시·턴 표시·일기토 이름 등): 원작은 굴림체 굵게를 0/1 모양으로 찍어 확대하면 계단이 짐 → 실제 화소 크기로 층마다 그림.
+  // 배치는 textMask 와 같게 (반각 h/2, 전각 h 칸 가운데, 넓으면 가로로 줄임)
+  function drawBig() {
+    if (!w.big_len) return;
+    const n = w.big_len();
+    if (!n) return;
+    const p = w.big_ptr();
+    const lines = dec.decode(mem().slice(p, p + n)).split("\n");
+    const k = canvas.width / 640;
+    ctx.save();
+    ctx.textBaseline = "middle"; ctx.textAlign = "center";
+    for (const ln of lines) {
+      if (!ln) continue;
+      const [xs, ys, ws, hs, sz, ls, text] = ln.split("\t");
+      const x = +xs, y = +ys, mw = +ws, mh = +hs, h = +sz || mh;
+      const chars = [...text];
+      const cells = chars.map((ch) => (ch.charCodeAt(0) < 0x80 ? h / 2 : h));
+      const total = cells.reduce((a, b) => a + b, 0) || 1;
+      const fx = mw / total;
+      ctx.font = `800 ${Math.round(h * k * 0.94)}px ${FONT_FAM}`;
+      const layers = ls.split(";").map((t) => t.split(",").map(Number));
+      for (const [off, r, g, bl] of layers) {
+        ctx.fillStyle = `rgb(${r},${g},${bl})`;
+        let cx = x + off;
+        chars.forEach((ch, i) => {
+          const cw = cells[i] * fx;
+          if (ch !== " ") {
+            const m = ctx.measureText(ch).width, lim = cw * k * 0.98;
+            const sx = m > lim ? lim / m : 1;
+            ctx.setTransform(sx, 0, 0, 1, (cx + cw / 2) * k, (y + off + mh / 2 + h * 0.04) * k);
+            ctx.fillText(ch, 0, 0);
+          }
+          cx += cw;
+        });
+      }
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+    }
+    ctx.restore();
+  }
   function drawText() {
     if (!w.text_len) return;
     const n = w.text_len();
@@ -602,6 +641,7 @@
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(base, 0, 0, canvas.width, canvas.height);
       drawText();
+      drawBig();
       // 브라우저는 첫 터치 전엔 소리를 못 냄 → 그동안 작은 안내만
       setStatus(loading > 0 ? "불러오는 중…" : "");
       soundHint.style.display = audioOk ? "none" : "block";

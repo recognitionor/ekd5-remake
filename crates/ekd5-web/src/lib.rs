@@ -138,6 +138,16 @@ pub extern "C" fn text_ptr() -> *const u8 {
 }
 
 #[no_mangle]
+pub extern "C" fn big_ptr() -> *const u8 {
+    with(|app| app.engine.screen.big_out.as_ptr())
+}
+
+#[no_mangle]
+pub extern "C" fn big_len() -> usize {
+    with(|app| app.engine.screen.big_out.len())
+}
+
+#[no_mangle]
 pub extern "C" fn text_len() -> usize {
     with(|app| app.engine.screen.text_out.len())
 }

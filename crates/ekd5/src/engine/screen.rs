@@ -39,6 +39,10 @@ pub struct Screen {
     tidx: Vec<u16>,
     /// 넘길 글자: 16바이트씩 (x i16, y i16, 칸 폭 u8, 글자색 rgb, 그림자 있음 u8, 그림자 rgb, 유니코드 u32)
     pub text_out: Vec<u8>,
+    /// 큰 글자 (x, y, 폭, 높이, 글자 높이, 층 (밀기, 색), 글)
+    bigs: Vec<(i32, i32, i32, i32, i32, Vec<(i32, u8)>, String)>,
+    /// 넘길 큰 글자: 줄마다 "x\ty\t폭\t높이\t글자높이\t밀기,r,g,b;…\t글"
+    pub big_out: String,
 }
 
 struct TextChar {
@@ -54,7 +58,7 @@ struct TextChar {
 
 impl Default for Screen {
     fn default() -> Self {
-        Self { px: vec![0; W * H], pal: [[0; 3]; 256], level: 16, rgba: vec![0; W * H * 4], window_tex: None, glaze: Vec::new(), hires: false, chars: Vec::new(), tmark: vec![0; W * H], tidx: vec![0; W * H], text_out: Vec::new() }
+        Self { px: vec![0; W * H], pal: [[0; 3]; 256], level: 16, rgba: vec![0; W * H * 4], window_tex: None, glaze: Vec::new(), hires: false, chars: Vec::new(), tmark: vec![0; W * H], tidx: vec![0; W * H], text_out: Vec::new(), bigs: Vec::new(), big_out: String::new() }
     }
 }
 
@@ -98,6 +102,23 @@ impl Screen {
     }
 
     /// RGBA로 변환
+    /// 큰 글자 (호스트가 그린 모양 Mask) 를 층마다 (밀기, 색) 로. 선명한 글자면 웹이 그리도록 넘김
+    pub fn big_text(&mut self, m: &super::duel::Mask, x: i32, y: i32, layers: &[(i32, u8)]) {
+        if self.hires && !m.text.is_empty() {
+            self.bigs.push((x, y, m.w, m.h, m.size, layers.to_vec(), m.text.clone()));
+            return;
+        }
+        for &(k, c) in layers {
+            for yy in 0..m.h {
+                for xx in 0..m.w {
+                    if m.px[(yy * m.w + xx) as usize] != 0 {
+                        self.fill(x + xx + k, y + yy + k, 1, 1, c);
+                    }
+                }
+            }
+        }
+    }
+
     /// 글자 하나 시작 (draw_text). 기록 번호
     pub fn text_begin(&mut self, x: i32, y: i32, w: i32, ch: char, col: u8, shadow: Option<u8>) -> Option<usize> {
         if !self.hires {
@@ -131,6 +152,18 @@ impl Screen {
     /// 가려지지 않은 글자를 비트맵에서 지우고 text_out 에 (나중 글자부터 보고, 넘길 때는 그린 차례로)
     fn take_text(&mut self) {
         self.text_out.clear();
+        self.big_out.clear();
+        let l = self.level.min(16) as u32;
+        for (x, y, w, h, size, layers, text) in std::mem::take(&mut self.bigs) {
+            let ls: Vec<String> = layers
+                .iter()
+                .map(|&(k, c)| {
+                    let p = self.pal[c as usize];
+                    format!("{k},{},{},{}", p[0] as u32 * l / 16, p[1] as u32 * l / 16, p[2] as u32 * l / 16)
+                })
+                .collect();
+            self.big_out.push_str(&format!("{x}\t{y}\t{w}\t{h}\t{size}\t{}\t{}\n", ls.join(";"), text.replace(['\t', '\n'], " ")));
+        }
         let chars = std::mem::take(&mut self.chars);
         if chars.is_empty() {
             return;

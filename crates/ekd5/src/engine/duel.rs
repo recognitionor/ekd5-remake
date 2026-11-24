@@ -31,11 +31,14 @@ pub struct Sprites {
 }
 
 /// 큰 글자 모양 (호스트가 원작 굴림체 굵게로 그려 줌, 없으면 비트맵 글꼴을 키움): 1 = 글자
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Mask {
     pub w: i32,
     pub h: i32,
     pub px: Vec<u8>,
+    /// 글과 높이 (선명한 글자: 웹이 이것으로 다시 그림)
+    pub text: String,
+    pub size: i32,
 }
 
 pub struct Fighter {
@@ -921,21 +924,9 @@ impl Duel {
 
     // ---------- 그리기 ----------
 
-    fn draw_mask(scr: &mut Screen, m: &Mask, x: i32, y: i32, c: u8) {
-        for yy in 0..m.h {
-            for xx in 0..m.w {
-                if m.px[(yy * m.w + xx) as usize] != 0 {
-                    scr.fill(x + xx, y + yy, 1, 1, c);
-                }
-            }
-        }
-    }
-
     /// 큰 글자 층 (원작 FUN_004212a8: 글자를 (k,k) 만큼 밀어 색 c 로)
     fn layered(scr: &mut Screen, m: &Mask, x: i32, y: i32, layers: &[(i32, u8)]) {
-        for &(k, c) in layers {
-            Self::draw_mask(scr, m, x + k, y + k, c);
-        }
+        scr.big_text(m, x, y, layers);
     }
 
     pub fn render(&self, scr: &mut Screen, f: &Font, mark: &[u8]) {
@@ -1078,7 +1069,7 @@ pub fn fallback_mask(f: &Font, text: &str, h: i32) -> Mask {
             }
         }
     }
-    Mask { w: w0 * k, h: h0 * k, px }
+    Mask { w: w0 * k, h: h0 * k, px, ..Default::default() }
 }
 
 /// 호스트가 그린 글자 모양 ("@txt/높이/글" 자료: 폭 u16, 높이 u16, 칸마다 0/1)
@@ -1086,5 +1077,5 @@ pub fn parse_mask(d: &[u8]) -> Option<Mask> {
     let w = u16::from_le_bytes([*d.first()?, *d.get(1)?]) as i32;
     let h = u16::from_le_bytes([*d.get(2)?, *d.get(3)?]) as i32;
     let px = d.get(4..4 + (w * h) as usize)?.to_vec();
-    Some(Mask { w, h, px })
+    Some(Mask { w, h, px, ..Default::default() })
 }
