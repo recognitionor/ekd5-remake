@@ -107,6 +107,9 @@ pub struct Unit {
     /// 제3 세력 (원작 편 3: 적군 목록 인자 1 — 움직임·공격은 적군과 같고, 진영 조건 2 = 적군만 / 3 = 제3 세력만 / 5 = 둘 다로 갈림)
     #[serde(default)]
     pub third: bool,
+    /// 스크립트 이동 뒤 바라볼 방향 (원작 FUN_0045b467 인자 4)
+    #[serde(default)]
+    pub end_dir: Option<u8>,
 }
 
 impl Unit {
@@ -385,6 +388,8 @@ pub struct Battle {
     /// 이번 차례 AI 행동 순서 (원작 FUN_0044fad1)
     ai_order: Vec<usize>,
     ai_order_side: Option<Side>,
+    /// 차례 도중 등장·증원·AI 변경·회귀가 있으면 행동 순서를 다시 매김 (원작 +0x504 / DAT_004be984)
+    pub ai_dirty: bool,
     cast_t: u32,
     /// 시험 기록용
     pub cast_log: Vec<String>,
@@ -609,6 +614,7 @@ impl Battle {
             strike_exp: Vec::new(),
             ai_order: Vec::new(),
             ai_order_side: None,
+            ai_dirty: false,
             ai_plan: None,
             cast_t: 0,
             cast_log: Vec::new(),
@@ -761,6 +767,7 @@ impl Battle {
             leave: None,
             appear: None,
             third: false,
+            end_dir: None,
             motion: None,
             off,
         }
@@ -924,36 +931,35 @@ impl Battle {
         Some(if self.sp(u, 0x22).is_some() { 1 } else { c })
     }
 
+    /// 부대 이동력 (원작 FUN_004418b0: 직업 + 이동 장비 보정, 이동 상태 <3 이면 −1, ≥4 이면 +2, 마비면 0)
+    fn unit_mp(&self, ui: usize) -> i32 {
+        let u = &self.units[ui];
+        if u.status & status::PARALYZE != 0 {
+            return 0;
+        }
+        let m = self.job_byte(u.job, 0) as i32 + u.off.equip_bonus(&self.items, 7) as i32;
+        match u.mv_state {
+            0..=2 => (m - 1).max(0),
+            3 => m,
+            _ => m + 2,
+        }
+    }
+
     /// 이동 비용 지도 (원작 FUN_0043a4a8 → 버퍼 +0x12c0): 출발 칸 0, 칸마다 지형 소모 이동력의 합이 가장 작은 값.
-    /// 보통 이동은 이동력 안에서, 적이 있는 칸은 못 지나고, 적 옆 칸(ZOC)에서는 멈춤 (원작 FUN_00439ef9, 적토마 '!' 예외).
-    /// 스크립트 이동은 이동력·부대·ZOC 상관없이 지형만 봄. 못 가는 칸 = i32::MAX
-    fn cost_map(&self, ui: usize, script: bool) -> Vec<i32> {
+    /// block_foes = true 이면 적이 있는 칸은 못 지나고 적 옆 칸(ZOC)에서는 멈춤 (원작 FUN_00439ef9, 적토마 '!' 예외). 못 가는 칸 = i32::MAX
+    fn cost_map_with(&self, ui: usize, mp: i32, block_foes: bool) -> Vec<i32> {
         let u = &self.units[ui];
         let mut best = vec![i32::MAX; (self.cols * self.rows).max(0) as usize];
         if u.x < 0 || u.y < 0 || u.x >= self.cols || u.y >= self.rows {
             return best;
         }
-        // 이동력 = 직업 + 이동 장비 (바람바퀴 등, 능력 종류 7)
-        let mp = if script {
-            i32::MAX / 4
-        } else if u.status & status::PARALYZE != 0 {
-            0
-        } else {
-            // 이동 상태 (원작 FUN_004418b0): 3 미만 −1, 4 이상 +2
-            let m = self.job_byte(u.job, 0) as i32 + u.off.equip_bonus(&self.items, 7) as i32;
-            match u.mv_state {
-                0..=2 => (m - 1).max(0),
-                3 => m,
-                _ => m + 2,
-            }
-        };
         let start = (u.x, u.y);
         let mut q = VecDeque::new();
         best[(u.y * self.cols + u.x) as usize] = 0;
         q.push_back((u.x, u.y));
         while let Some((x, y)) = q.pop_front() {
             let c = best[(y * self.cols + x) as usize];
-            if !script && (x, y) != start && self.zoc(ui, x, y) {
+            if block_foes && (x, y) != start && self.zoc(ui, x, y) {
                 continue;
             }
             for (dx, dy) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
@@ -962,7 +968,7 @@ impl Battle {
                     continue;
                 }
                 let Some(cost) = self.move_cost_of(ui, nx, ny) else { continue };
-                if !script {
+                if block_foes {
                     if let Some(o) = self.at(nx, ny) {
                         if self.units[o].side.hostile(u.side) {
                             continue;
@@ -977,6 +983,14 @@ impl Battle {
             }
         }
         best
+    }
+
+    fn cost_map(&self, ui: usize, script: bool) -> Vec<i32> {
+        if script {
+            self.cost_map_with(ui, i32::MAX / 4, false)
+        } else {
+            self.cost_map_with(ui, self.unit_mp(ui), true)
+        }
     }
 
     /// 이동 가능한 칸들 (적이 막음)
@@ -1021,9 +1035,8 @@ impl Battle {
         d
     }
 
-    /// 경로 (BFS, 이동 비용 무시한 칸 경로)
-    /// 이동 경로 (원작 FUN_00439fce): 도착 칸에서 거꾸로, 위·오른쪽·아래·왼쪽 중 비용 지도 값이 가장 작은 (같으면 앞 순서) 칸으로
-    /// 한 칸씩 되짚어 출발 칸까지 → 뒤집음. 늘 상하좌우 한 칸씩, 이동력을 가장 적게 쓰는 길.
+    /// 이동 경로 (원작 FUN_0043ce0c + FUN_00439fce): 도착 칸에서 거꾸로, 위·오른쪽·아래·왼쪽 중 비용 지도 값이 가장 작은 (같으면 앞 순서) 칸으로
+    /// 한 칸씩 되짚어 출발 칸까지 → 뒤집음. 스크립트 이동(비트 0x80)도 먼저 적·ZOC 를 피해 가고, 막혔을 때만 적·ZOC 무시 지형 경로로 감.
     /// 길이 없으면 (스크립트 이동이 지형에 막힌 경우) 가로 먼저 그다음 세로로 한 칸씩 (대각선으로 미끄러지지 않게)
     fn route(&self, ui: usize, to: (i32, i32), script: bool) -> VecDeque<(i32, i32)> {
         let u = &self.units[ui];
@@ -1032,9 +1045,18 @@ impl Battle {
         if to == start {
             return path;
         }
-        let best = self.cost_map(ui, script);
         let idx = |x: i32, y: i32| (y * self.cols + x) as usize;
         let inb = |x: i32, y: i32| x >= 0 && y >= 0 && x < self.cols && y < self.rows;
+        let (best, check_zoc) = if script {
+            let b1 = self.cost_map_with(ui, 0xFE, true);
+            if inb(to.0, to.1) && b1[idx(to.0, to.1)] != i32::MAX {
+                (b1, true)
+            } else {
+                (self.cost_map_with(ui, i32::MAX / 4, false), false)
+            }
+        } else {
+            (self.cost_map_with(ui, self.unit_mp(ui), true), true)
+        };
         if inb(to.0, to.1) && best[idx(to.0, to.1)] != i32::MAX {
             let mut c = to;
             while c != start {
@@ -1043,6 +1065,9 @@ impl Battle {
                 for (dx, dy) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
                     let n = (c.0 + dx, c.1 + dy);
                     if !inb(n.0, n.1) {
+                        continue;
+                    }
+                    if check_zoc && n != start && self.zoc(ui, n.0, n.1) {
                         continue;
                     }
                     let v = best[idx(n.0, n.1)];
@@ -1787,10 +1812,11 @@ impl Battle {
                     fail
                 }
             }
-            // 회귀: 행동을 마친 부대가 한 번 더 (FUN_00406a10(부대, 6))
+            // 회귀: 행동을 마친 부대가 한 번 더 (FUN_00406a10(부대, 6), 원작 DAT_004be984 = 1)
             Effect::ReAct => {
                 if roll(self, sid) {
                     self.units[t].acted = false;
+                    self.ai_dirty = true;
                     fx = strategy::result_fx(eff);
                     "재행동".to_string()
                 } else {
@@ -2054,7 +2080,14 @@ impl Battle {
     }
 
     pub fn start_side(&mut self, side: Side) {
-        let idx: Vec<usize> = self.alive(side).collect();
+        // 원작 FUN_00450dd9: 조조군 차례 시작 때 0..0x22 (조조군 + 우군) 를 함께 회복 처리, 적군은 적군 차례 시작 때 (FUN_004508a8)
+        let idx: Vec<usize> = self
+            .units
+            .iter()
+            .enumerate()
+            .filter(|(_, u)| u.visible && u.hp > 0 && (u.side == side || (side == Side::Player && u.side == Side::Ally)))
+            .map(|(i, _)| i)
+            .collect();
         for i in idx {
             // 상태이상 회복 (원작 FUN_0043e8e6): 확률 = 기본 사기 (태평청령서 0x14 면 100).
             // 포박·봉책·독은 그 확률, 혼란은 max(10, 사기−15) (100 이면 확실)
@@ -2064,7 +2097,7 @@ impl Battle {
             let (x, y) = (self.units[i].x, self.units[i].y);
             let band = self.units[i].status != 0
                 && (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (dx, dy))).filter(|&d| d != (0, 0)).any(|(dx, dy)| {
-                    self.at(x + dx, y + dy).is_some_and(|o| self.units[o].side == side && self.units[o].job < 0x27 && self.units[o].job / 3 == 12)
+                    self.at(x + dx, y + dy).is_some_and(|o| !self.units[o].side.hostile(self.units[i].side) && self.units[o].job < 0x27 && self.units[o].job / 3 == 12)
                 });
             if band {
                 cleared = self.units[i].status;
@@ -2433,9 +2466,13 @@ impl Battle {
     pub fn animate(&mut self) -> bool {
         let mut idle = true;
         let mut stepped = Vec::new();
+        let mut cam_step: Option<((i32, i32), (i32, i32))> = None;
         for (i, u) in self.units.iter_mut().enumerate() {
             if let Some(&(nx, ny)) = u.path.front() {
                 idle = false;
+                if u.visible && (u.px - (u.x * CELL) as f32).abs() < 0.1 && (u.py - (u.y * CELL) as f32).abs() < 0.1 && cam_step.is_none() {
+                    cam_step = Some(((u.x, u.y), (nx, ny)));
+                }
                 let (tx, ty) = ((nx * CELL) as f32, (ny * CELL) as f32);
                 let (dx, dy) = (tx - u.px, ty - u.py);
                 u.dir = if dx.abs() > dy.abs() { if dx < 0.0 { 2 } else { 3 } } else if dy < 0.0 { 1 } else { 0 };
@@ -2448,12 +2485,35 @@ impl Battle {
                     u.x = nx;
                     u.y = ny;
                     u.path.pop_front();
+                    if u.path.is_empty() {
+                        if let Some(d) = u.end_dir.take() {
+                            u.dir = d;
+                        }
+                    }
                     if u.visible {
                         stepped.push(i);
                     }
                 } else {
                     u.px += dx.signum() * sp.min(dx.abs());
                     u.py += dy.signum() * sp.min(dy.abs());
+                }
+            }
+        }
+        // 원작 FUN_00444170: 부대가 화면 가장자리 1칸 안쪽으로 걸어 들어가면 한 칸씩 화면도 함께 밀어 따라감
+        if let Some(((ox, oy), (nx, ny))) = cam_step {
+            let (mw, mh) = (self.cols * CELL, self.rows * CELL);
+            if nx * CELL < self.cam.0 || nx * CELL + CELL > self.cam.0 + 640 || ny * CELL < self.cam.1 + TOP_BAR || ny * CELL + CELL > self.cam.1 + 480 {
+                self.focus(nx, ny);
+            } else {
+                if ny < oy && ny > 0 && (ny - 1) * CELL < self.cam.1 + TOP_BAR {
+                    self.cam.1 = (self.cam.1 - CELL).max(-TOP_BAR);
+                } else if ny > oy && ny + 1 < self.rows && (ny + 2) * CELL > self.cam.1 + 480 {
+                    self.cam.1 = (self.cam.1 + CELL).min((mh - 480).max(-TOP_BAR));
+                }
+                if nx < ox && nx > 0 && (nx - 1) * CELL < self.cam.0 {
+                    self.cam.0 = (self.cam.0 - CELL).max(0);
+                } else if nx > ox && nx + 1 < self.cols && (nx + 2) * CELL > self.cam.0 + 640 {
+                    self.cam.0 = (self.cam.0 + CELL).min((mw - 640).max(0));
                 }
             }
         }
@@ -2513,10 +2573,18 @@ impl Battle {
         idle
     }
 
-    pub fn walk_to(&mut self, ui: usize, x: i32, y: i32) {
+    pub fn walk_to(&mut self, ui: usize, x: i32, y: i32, end_dir: Option<u8>) {
         // 도착 칸에 다른 부대가 있으면 가장 가까운 빈 칸으로 (원작 FUN_0045b467 → FUN_004411b0)
         let (x, y) = if (self.units[ui].x, self.units[ui].y) == (x, y) { (x, y) } else { self.free_cell(ui, x, y) };
         let p = self.route(ui, (x, y), true);
+        if p.is_empty() {
+            if let Some(d) = end_dir {
+                self.units[ui].dir = d;
+            }
+            self.units[ui].end_dir = None;
+        } else {
+            self.units[ui].end_dir = end_dir;
+        }
         self.units[ui].path = p;
     }
 
@@ -3692,23 +3760,194 @@ impl Battle {
         sc.clamp(0, 255)
     }
 
+    /// 목표 칸에서 부대 u 까지의 역방향 이동 비용 지도 (원작 FUN_0043a4a8 표지 2: 적 칸 막힘, block_zoc 이면 적 ZOC 에서 확장 멈춤, 상한 0xFE)
+    fn rev_cost_map(&self, u: usize, goal: (i32, i32), block_zoc: bool) -> Vec<i32> {
+        let n = (self.cols * self.rows).max(0) as usize;
+        let mut d = vec![0xFF; n];
+        if goal.0 < 0 || goal.1 < 0 || goal.0 >= self.cols || goal.1 >= self.rows {
+            return d;
+        }
+        let start = (self.units[u].x, self.units[u].y);
+        if goal == start {
+            d[(goal.1 * self.cols + goal.0) as usize] = 0;
+            return d;
+        }
+        if self.move_cost_of(u, goal.0, goal.1).is_none() {
+            return d;
+        }
+        let side = self.units[u].side;
+        let mut q = VecDeque::new();
+        d[(goal.1 * self.cols + goal.0) as usize] = 0;
+        q.push_back(goal);
+        while let Some((x, y)) = q.pop_front() {
+            let c = d[(y * self.cols + x) as usize];
+            if block_zoc && (x, y) != goal && self.zoc(u, x, y) {
+                continue;
+            }
+            for (dx, dy) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
+                let (nx, ny) = (x + dx, y + dy);
+                if nx < 0 || ny < 0 || nx >= self.cols || ny >= self.rows {
+                    continue;
+                }
+                let Some(step) = self.move_cost_of(u, nx, ny) else { continue };
+                if let Some(o) = self.at(nx, ny) {
+                    if self.units[o].side.hostile(side) {
+                        continue;
+                    }
+                }
+                let nc = c + step;
+                let ni = (ny * self.cols + nx) as usize;
+                if nc < 0xFF && nc < d[ni] {
+                    d[ni] = nc;
+                    q.push_back((nx, ny));
+                }
+            }
+        }
+        d
+    }
+
+    /// 목표 주변 점수 번지기 (원작 FUN_0043a318): 빈 칸이면 +val, val ≥ 11 이면 둘레 −10, < 11 이면 −1 (9 이상만, 경·중포차 0x0f·0x10 은 번지지 않음)
+    fn add_goal_score(&self, base: &mut [i32], u: usize, pos: (i32, i32), val: i32) {
+        if val < 9 || pos.0 < 0 || pos.1 < 0 || pos.0 >= self.cols || pos.1 >= self.rows {
+            return;
+        }
+        let i = (pos.1 * self.cols + pos.0) as usize;
+        let start = (self.units[u].x, self.units[u].y);
+        if self.move_cost(self.units[u].job, pos.0, pos.1).is_some() && base[i] == 0 && (!self.occupied(pos.0, pos.1) || pos == start) {
+            base[i] += val;
+        }
+        if (0x0F..=0x10).contains(&self.units[u].job) {
+            return;
+        }
+        let next_val = if val < 11 { val - 1 } else { val - 10 };
+        if next_val >= 9 {
+            for (dx, dy) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
+                self.add_goal_score(base, u, (pos.0 + dx, pos.1 + dy), next_val);
+            }
+        }
+    }
+
+    /// 목표 칸 쪽으로 이번 턴 이동력만큼 짚어 가 끝 칸에 점수를 줌 (원작 FUN_0043a4a8 표지 2 + FUN_00439fce 표지 1).
+    /// 먼저 ZOC 포함 경로를 찾고, 막혔으면 ZOC 무시 경로를 찾음. 적·지형에 완전히 막혀 못 가면 false
+    fn ai_approach_goal(&self, base: &mut [i32], u: usize, goal: (i32, i32), mp: i32) -> bool {
+        let start = (self.units[u].x, self.units[u].y);
+        let si = (start.1 * self.cols + start.0) as usize;
+        let mut rev = self.rev_cost_map(u, goal, true);
+        if rev[si] >= 0xFF {
+            rev = self.rev_cost_map(u, goal, false);
+        }
+        if rev[si] >= 0xFF {
+            return false;
+        }
+        let mut cur = start;
+        let mut rem = mp;
+        while cur != goal {
+            let mut best_rc = rev[(cur.1 * self.cols + cur.0) as usize];
+            let mut next = None;
+            for (dx, dy) in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
+                let n = (cur.0 + dx, cur.1 + dy);
+                if n.0 < 0 || n.1 < 0 || n.0 >= self.cols || n.1 >= self.rows {
+                    continue;
+                }
+                if n != goal && self.zoc(u, n.0, n.1) {
+                    continue;
+                }
+                let rc = rev[(n.1 * self.cols + n.0) as usize];
+                if rc < best_rc {
+                    if let Some(sc) = self.move_cost_of(u, n.0, n.1) {
+                        if sc <= rem {
+                            best_rc = rc;
+                            next = Some((n, sc));
+                        }
+                    }
+                }
+            }
+            match next {
+                Some((n, sc)) => {
+                    cur = n;
+                    rem -= sc;
+                }
+                None => {
+                    // 멈춘 칸에 다른 부대가 서 있으면 20 (둘레 4칸 +10, 그 둘레 +9) 으로 무리지어 전진 (원작 FUN_00439fce:333-338)
+                    let v = if self.occupied(cur.0, cur.1) { 20 } else { 10 };
+                    self.add_goal_score(base, u, cur, v);
+                    break;
+                }
+            }
+        }
+        true
+    }
+
+    /// 모드 1: 이동 범위 밖일 때 칠 수 있는 칸이 가장 가까운 적을 찾아 다가감 (원작 FUN_0043c8b9 + FUN_0043c37a)
+    fn ai_mode1_approach(&self, base: &mut [i32], u: usize, mp: i32, attackable: bool) {
+        if attackable {
+            return;
+        }
+        let side = self.units[u].side;
+        let cols = self.cols;
+        let n = (self.cols * self.rows).max(0) as usize;
+        let mut atk_foe: Vec<Option<usize>> = vec![None; n];
+        for e in 0..self.units.len() {
+            if self.units[e].visible && self.units[e].hp > 0 && self.units[e].side.hostile(side) {
+                let ep = (self.units[e].x, self.units[e].y);
+                for c in self.attack_cells(u, ep) {
+                    if c.0 >= 0 && c.1 >= 0 && c.0 < self.cols && c.1 < self.rows {
+                        let slot = &mut atk_foe[(c.1 * cols + c.0) as usize];
+                        if slot.is_none() {
+                            *slot = Some(e);
+                        }
+                    }
+                }
+            }
+        }
+        let dist = self.cost_map_with(u, 0xFE, true);
+        let mut order: Vec<(i32, i32, i32)> = Vec::new();
+        for y in 0..self.rows {
+            for x in 0..self.cols {
+                let c = dist[(y * cols + x) as usize];
+                if c < i32::MAX && atk_foe[(y * cols + x) as usize].is_some() {
+                    order.push((c, y, x));
+                }
+            }
+        }
+        order.sort_unstable();
+        let mut picked = order.first().and_then(|&(_, y, x)| atk_foe[(y * cols + x) as usize]);
+        // 시험 자동 진행(조조군)에서 성문 등에 막혔을 때만 지형 거리 최소 적으로 보조 진행
+        if picked.is_none() && side == Side::Player {
+            let start = (self.units[u].x, self.units[u].y);
+            let df = self.dist_field(self.units[u].job, start);
+            picked = (0..self.units.len())
+                .filter(|&o| self.units[o].visible && self.units[o].hp > 0 && self.units[o].side.hostile(side))
+                .min_by_key(|&o| df[(self.units[o].y * cols + self.units[o].x) as usize]);
+        }
+        if let Some(e) = picked {
+            let ep = (self.units[e].x, self.units[e].y);
+            if !self.ai_approach_goal(base, u, ep, mp) && side == Side::Player {
+                let reach: std::collections::HashSet<(i32, i32)> = self.reachable(u).into_iter().collect();
+                if let Some(&best_c) = reach.iter().min_by_key(|&&c| (c.0 - ep.0).abs() + (c.1 - ep.1).abs()) {
+                    self.add_goal_score(base, u, best_c, 10);
+                }
+            }
+        }
+    }
+
     /// 한 부대의 행동 정하기 (원작 FUN_0043ce0c → FUN_0043a4a8 표지 4 → FUN_0043c619). 반환: (갈 칸, 할 일)
-    /// 칸 점수 = 바탕 (다가가기 끝 칸 +10·둘레 +9, 대상 둘레 +20, 부상이면 회복 지형 +50) + max(공격, 책략) + 회복 지형 8 (+제자리·공격 없음 1).
-    /// 이동 비용 순으로 보고 더 큰 점수만 바꿈 (같으면 가까운 칸)
+    /// 칸 점수 = 바탕 (다가가기 끝 칸 +10·둘레 +9 / 막힌 끝 칸은 둘레 +10·그 둘레 +9, 사거리 안 대상 +20→둘레 +10·+9, 부상 회복 지형 +50)
+    /// + max(공격, 책략) + 지형 점수(회복 지형 8, 그 외 지형효과/10−10) (+제자리·물리공격 없음 1). 이동 비용 순으로 더 큰 점수만 바꿈
     fn ai_decide(&mut self, u: usize) -> ((i32, i32), Option<AiPlan>) {
         let start = (self.units[u].x, self.units[u].y);
         let side = self.units[u].side;
-        if self.units[u].status & status::CONFUSE != 0 {
+        if self.units[u].status & status::CONFUSE != 0 || self.units[u].ai >= 7 {
             return (start, None);
         }
         let mut mode = self.ai_mode(u);
+        let mp = self.unit_mp(u);
         let cols = self.cols;
         let idx = |c: (i32, i32)| (c.1 * cols + c.0) as usize;
         let cost = self.cost_map(u, false);
         let mut cells: Vec<(i32, i32)> = if mode == 2 { vec![start] } else { self.reachable(u) };
         cells.sort_by_key(|&c| (cost[idx(c)], c.1, c.0));
         let mut base = vec![0i32; (self.cols * self.rows).max(0) as usize];
-        let foes = |b: &Self| -> Vec<usize> { (0..b.units.len()).filter(|&o| b.units[o].visible && b.units[o].hp > 0 && b.units[o].side.hostile(side)).collect() };
         let attackable = cells.iter().any(|&c| !self.targets_from(u, c).is_empty());
         // 시험 자동 진행 (조조군): 목표 구역, 다친 조조는 싸우지 않음
         let zone_goal = if side == Side::Player {
@@ -3717,8 +3956,14 @@ impl Battle {
             None
         };
         let cao_rest = side == Side::Player && self.units[u].person == 0 && (self.units[u].hp * 2 < self.units[u].max_hp || zone_goal.is_some());
-        // 부상 후퇴 (원작 DAT_004bd39c&1): 모드 2·4 빼고, 회복 지형 +50, 대장(조조군 쪽은 조조, 적은 첫 적 부대) 쪽으로
-        let leader = if side == Side::Enemy { self.units.iter().position(|o| o.side == Side::Enemy) } else { self.units.iter().position(|o| o.person == 0 && o.side == Side::Player) };
+        // 따라가는 대상 장수의 목표 칸 (원작 DAT_004bd3b0: 대장의 도착 예정 칸은 부하가 밟아 막지 않게 0점 처리)
+        let mut forbidden_cell: Option<(i32, i32)> = None;
+        // 부상 후퇴 (원작 DAT_004bd39c&1, FUN_0043ce0c:728-767): 모드 2·4 및 첫 적 부대 제외, 회복 지형 +50, 대장 쪽으로
+        let leader = if side == Side::Enemy {
+            self.units.iter().position(|o| o.side == Side::Enemy)
+        } else {
+            self.units.iter().position(|o| o.person == 0 && o.side == Side::Player)
+        };
         let retreat = side != Side::Player && self.injured(u) && !matches!(mode, 2 | 4) && leader != Some(u);
         if retreat {
             for &c in &cells {
@@ -3726,61 +3971,60 @@ impl Battle {
                     base[idx(c)] += 50;
                 }
             }
-        }
-        // 다가갈 곳
-        let mut goal: Option<((i32, i32), bool)> = None;
-        if retreat {
             match leader.filter(|&l| self.units[l].visible && self.units[l].hp > 0) {
-                Some(l) => goal = Some(((self.units[l].x, self.units[l].y), true)),
-                None => mode = 1,
+                Some(l) => {
+                    let lp = (self.units[l].x, self.units[l].y);
+                    self.add_goal_score(&mut base, u, lp, 10);
+                    if !self.ai_approach_goal(&mut base, u, lp, mp) {
+                        self.ai_mode1_approach(&mut base, u, mp, attackable);
+                    }
+                }
+                None => {
+                    mode = 1;
+                    self.ai_mode1_approach(&mut base, u, mp, attackable);
+                }
             }
-        }
-        if goal.is_none() {
+        } else {
             match mode {
                 0 | 4 => {
-                    let tgt = self.units[u].ai_person.and_then(|p| self.units.iter().find(|o| o.person == p && o.visible && o.hp > 0)).map(|o| ((o.x, o.y), true));
-                    goal = tgt.or(self.units[u].ai_target.map(|p| (p, false)));
+                    let tp_unit = self.units[u].ai_person.and_then(|p| self.units.iter().position(|o| o.person == p && o.visible && o.hp > 0));
+                    if let Some(tu) = tp_unit {
+                        if matches!(self.ai_mode(tu), 0 | 4) {
+                            forbidden_cell = self.units[tu].ai_target;
+                        }
+                    }
+                    let goal = tp_unit.map(|tu| (self.units[tu].x, self.units[tu].y)).or(self.units[u].ai_target);
+                    if let Some(g) = goal {
+                        let tp_in_range = tp_unit.is_some_and(|tu| cells.iter().any(|&c| self.targets_from(u, c).contains(&tu)));
+                        if tp_in_range {
+                            self.add_goal_score(&mut base, u, g, 20);
+                        } else {
+                            self.add_goal_score(&mut base, u, g, 10);
+                            if !self.ai_approach_goal(&mut base, u, g, mp) {
+                                // 대상 장수·지점까지 적이나 성문에 막혀 갈 수 없으면 눈앞의 적부터 공격 (원작 FUN_0043ce0c:672)
+                                self.ai_mode1_approach(&mut base, u, mp, attackable);
+                            }
+                        }
+                    } else {
+                        self.ai_mode1_approach(&mut base, u, mp, attackable);
+                    }
                 }
                 1 => {
                     if let Some(z) = zone_goal {
-                        goal = Some((z, false));
-                    } else if !attackable {
-                        // 가장 가까운 적 (지형을 따라 잰 거리)
-                        let df = self.dist_field(self.units[u].job, start);
-                        goal = foes(self).into_iter().map(|o| (self.units[o].x, self.units[o].y)).min_by_key(|&p| df[idx(p)]).map(|p| (p, true));
+                        self.add_goal_score(&mut base, u, z, 10);
+                        if !self.ai_approach_goal(&mut base, u, z, mp) {
+                            let reach: std::collections::HashSet<(i32, i32)> = cells.iter().copied().collect();
+                            if let Some(&best_c) = reach.iter().min_by_key(|&&c| (c.0 - z.0).abs() + (c.1 - z.1).abs()) {
+                                self.add_goal_score(&mut base, u, best_c, 10);
+                            }
+                        }
+                    } else {
+                        self.ai_mode1_approach(&mut base, u, mp, attackable);
                     }
                 }
                 // 3: 칠 적이 이동 범위 안에 없으면 제자리 (행동 없음)
                 3 if !attackable => return (start, None),
                 _ => {}
-            }
-        }
-        if let Some((g, is_unit)) = goal {
-            let reach: std::collections::HashSet<(i32, i32)> = cells.iter().copied().collect();
-            let near: Vec<(i32, i32)> = [(0, -1), (1, 0), (0, 1), (-1, 0)].iter().map(|d| (g.0 + d.0, g.1 + d.1)).collect();
-            if is_unit && near.iter().any(|c| reach.contains(c)) {
-                for c in &near {
-                    if reach.contains(c) {
-                        base[idx(*c)] += 20;
-                    }
-                }
-            } else if reach.contains(&g) && !is_unit {
-                base[idx(g)] += 20;
-            } else {
-                // 이번 이동으로 갈 수 있는 칸 가운데 목표에 가장 가까운 칸 = 경로 끝.
-                // 길이 막혀 있으면 (석병 미로 등) 막힘을 무시하고 직선거리로 (원작 FUN_0043a4a8 두 번째 찾기)
-                let df = self.dist_field(self.units[u].job, g);
-                let blocked = cells.iter().all(|&c| df[idx(c)] >= i32::MAX / 2);
-                let key = |c: (i32, i32)| if blocked { (c.0 - g.0).abs() + (c.1 - g.1).abs() } else { df[idx(c)] };
-                if let Some(&e) = cells.iter().min_by_key(|&&c| (key(c), cost[idx(c)])) {
-                    base[idx(e)] += 10;
-                    for d in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
-                        let c = (e.0 + d.0, e.1 + d.1);
-                        if reach.contains(&c) {
-                            base[idx(c)] += 9;
-                        }
-                    }
-                }
             }
         }
         let fight = mode != 4 && !cao_rest;
@@ -3820,14 +4064,23 @@ impl Battle {
             }
             let (act, plan) = if stg.0 > atk.0 { (stg.0, stg.1.map(|(s, x)| AiPlan::Strat(s, x))) } else { (atk.0, atk.1.map(AiPlan::Attack)) };
             let mut sc = base[idx(c)] + act;
+            // 지형 점수 (원작 FUN_0043c5af): 회복 지형 0x12..=0x16 은 +8, 그 외는 max(0, 지형효과/10 − 10)
             if (0x12..=0x16).contains(&self.terr(c.0, c.1)) {
                 sc += 8;
+            } else {
+                let eff = self.terrain_bonus(self.units[u].job, c.0, c.1) / 10;
+                if eff > 10 {
+                    sc += eff - 10;
+                }
             }
-            if c == start && act == 0 {
+            if c == start && atk.0 == 0 {
                 sc += 1;
             }
+            if forbidden_cell == Some(c) {
+                sc = 0;
+            }
             let sc = sc.min(255);
-            if best.as_ref().is_none_or(|b| sc > b.0) {
+            if sc > 0 && best.as_ref().is_none_or(|b| sc > b.0) {
                 best = Some((sc, c, plan));
             }
         }
@@ -3837,22 +4090,34 @@ impl Battle {
         }
     }
 
+    pub fn reset_ai_order(&mut self) {
+        self.ai_order_side = None;
+        self.ai_dirty = false;
+    }
+
     pub fn update_ai(&mut self) -> (bool, bool) {
-        let Phase::Ai { side, idx, stage } = self.phase.clone() else { return (false, false) };
-        // 행동 순서는 차례 처음에 한 번 (원작 FUN_0044fad1)
-        if idx == 0 && stage == 0 && self.ai_order_side != Some(side) {
+        let Phase::Ai { side, mut idx, stage } = self.phase.clone() else { return (false, false) };
+        // 행동 순서는 차례 처음에 매기고, 도중에 등장·증원·AI 변경·회귀가 있으면 다시 매김 (원작 FUN_004508a8 → FUN_0044fad1)
+        if stage == 0 && (self.ai_order_side != Some(side) || self.ai_dirty) {
             self.ai_order = self.ai_order(side);
             self.ai_order_side = Some(side);
+            self.ai_dirty = false;
+            idx = 0;
+            self.phase = Phase::Ai { side, idx, stage: 0 };
+        }
+        if stage == 0 {
+            while let Some(&u) = self.ai_order.get(idx) {
+                if self.units[u].visible && self.units[u].hp > 0 && self.units[u].side == side && !self.units[u].acted && self.units[u].ai != 7 {
+                    break;
+                }
+                idx += 1;
+            }
+            self.phase = Phase::Ai { side, idx, stage: 0 };
         }
         let Some(&u) = self.ai_order.get(idx) else {
             self.ai_order_side = None;
             return (false, true);
         };
-        // 공격 중 반격으로 쓰러져도 그 공격 연출 (반격·HP 창) 은 끝까지 — 건너뛰기는 행동을 시작하기 전에만
-        if stage == 0 && !(self.units[u].visible && self.units[u].hp > 0 && self.units[u].side == side) {
-            self.phase = Phase::Ai { side, idx: idx + 1, stage: 0 };
-            return (false, false);
-        }
         match stage {
             0 => {
                 let (dest, plan) = self.ai_decide(u);

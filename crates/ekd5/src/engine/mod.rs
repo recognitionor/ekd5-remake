@@ -1569,29 +1569,45 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x32 => {
-                // 이동 (종류, 인물, ?, x, y, 방향). 다음 명령도 이동이면 함께, 아니면 다 걸을 때까지 대기 (원작 FUN_004156d3)
+                // 이동 (종류, 인물, 출진번호, x, y, 방향). 이야기는 연속 op32 를 동시에, 전투는 한 부대씩 끝까지 걷고 방향 전환 (원작 FUN_004156d3 / FUN_0045b467)
                 match &mut self.scene {
-                    Scene::Story(st) => st.walk(a(1) as usize, a(3), a(4), a(5)),
+                    Scene::Story(st) => {
+                        st.walk(a(1) as usize, a(3), a(4), a(5));
+                        if vm.peek_op() != 0x32 {
+                            self.wait = Wait::Moves;
+                        }
+                    }
                     Scene::Battle(b) => {
-                        // 방식 0 = 인물, 1 = 출진 번호 (원작 FUN_004156d3: 맵 위에 있을 때만)
+                        // 방식 0 = 인물, 1 = 출진 번호 (원작 FUN_004156d3 / FUN_0045b467: 퇴각 상태 3 이면 좌표만, 맵 위 상태 2 면 출발 칸 비추고 이동)
                         let pid = if a(0) == 1 { b.sortie.get(a(2) as usize).copied() } else { Some(a(1) as usize) };
-                        if let Some(u) = pid.and_then(|p| b.unit_of(p)).filter(|&u| a(0) != 1 || (b.units[u].visible && b.units[u].hp > 0)) {
-                            b.walk_to(u, a(3), a(4));
-                            let (x, y) = (a(3), a(4));
-                            if x * battle::CELL < b.cam.0 || x * battle::CELL > b.cam.0 + 592 || y * battle::CELL < b.cam.1 || y * battle::CELL > b.cam.1 + 432 {
-                                b.focus(x, y);
+                        if let Some(u) = pid.and_then(|p| b.unit_of(p)) {
+                            if b.units[u].gone && a(0) != 1 {
+                                b.units[u].x = a(3);
+                                b.units[u].y = a(4);
+                                b.units[u].px = (a(3) * battle::CELL) as f32;
+                                b.units[u].py = (a(4) * battle::CELL) as f32;
+                            } else if b.units[u].visible && !b.units[u].gone {
+                                let (sx, sy) = (b.units[u].x, b.units[u].y);
+                                if sx * battle::CELL < b.cam.0 || sx * battle::CELL > b.cam.0 + 592 || sy * battle::CELL < b.cam.1 + battle::TOP_BAR || sy * battle::CELL > b.cam.1 + 432 {
+                                    b.focus(sx, sy);
+                                }
+                                b.walk_to(u, a(3), a(4), battle::orig_dir(a(5)));
+                                self.wait = Wait::Moves;
                             }
                         }
                     }
                     _ => {}
                 }
-                if vm.peek_op() != 0x32 {
-                    self.wait = Wait::Moves;
-                }
             }
             0x33 => {
+                // 이야기 인물 자세·방향 (원작 FUN_004158c8 → FUN_0042b257: 인자 1 자세, 인자 2 방향, FFFF 는 그대로)
                 if let Scene::Story(st) = &mut self.scene {
-                    st.turn(a(0) as usize, a(2));
+                    if a(1) != 0xFFFF && a(1) >= 0 {
+                        st.pose(a(0) as usize, a(1));
+                    }
+                    if a(2) != 0xFFFF && a(2) >= 0 {
+                        st.turn(a(0) as usize, a(2));
+                    }
                 }
             }
             0x34 => {
@@ -2504,15 +2520,18 @@ impl<A: Assets> Engine<A> {
                     if matches!(u.ai, 3 | 5) {
                         u.ai_person = Some(if op == 0x46 { r[8].i() } else { r[9].i() } as usize);
                     }
-                    b.units.retain(|o| o.person != pid as usize);
+                    if op == 0x47 {
+                        b.list47.push(pid as usize);
+                    }
+                    // 원작 FUN_00458059 는 같은 인물이 목록에 거듭 있으면 (S_13 손건 40) 첫 칸을 씀 — 앞 기록을 지우지 않음
+                    if b.unit_of(pid as usize).is_some() {
+                        continue;
+                    }
                     b.units.push(u);
                     // 처음부터 보이는 부대는 빈 칸에 (원작 FUN_00444c58 → FUN_004411b0)
                     let k = b.units.len() - 1;
                     if b.units[k].visible {
                         b.place_at(k, x, y);
-                    }
-                    if op == 0x47 {
-                        b.list47.push(pid as usize);
                     }
                 }
             }
@@ -2555,10 +2574,11 @@ impl<A: Assets> Engine<A> {
                                 b.units.len() - 1
                             }),
                         };
-                        if let Some(u) = u.filter(|&u| !b.units[u].visible && b.units[u].hp > 0) {
+                        if let Some(u) = u.filter(|&u| !b.units[u].visible && !b.units[u].gone && b.units[u].hp > 0) {
                             b.place_at(u, x, y);
                             b.units[u].visible = true;
                             b.units[u].fade = 16;
+                            b.ai_dirty = true;
                             b.focus(x, y);
                             self.sounds.push(Sound::Effect("SE15.WAV".into()));
                             self.wait = Wait::Ticks(6);
@@ -2567,26 +2587,48 @@ impl<A: Assets> Engine<A> {
                 } else if let Some(u) = b.unit_of(a(1) as usize) {
                     // 숨어 있던 부대가 제자리에 나타남 — 그 칸이 차 있으면 가까운 빈 칸 (원작 FUN_004590ce → FUN_00444c58).
                     // 원작은 숨어 있던 (상태 1) 부대만, 화면 이동 + SE15 (특수 부대는 솟아오름) + 4단위 대기
-                    if !b.units[u].visible && b.units[u].hp > 0 {
+                    if !b.units[u].visible && !b.units[u].gone && b.units[u].hp > 0 {
                         let (x, y) = (b.units[u].x, b.units[u].y);
                         b.place_at(u, x, y);
                         b.units[u].visible = true;
                         b.units[u].fade = 16;
+                        b.ai_dirty = true;
                         let w = b.appear_fx(u);
                         self.wait = Wait::Ticks(w);
                     }
                 }
             }
             0x55 => {
-                // 증원 등장 (원작 FUN_00417d2c → FUN_0045b181): 0 = 인물, 1 = 적 목록 번호. 숨어 있던 부대만 (x, y) 에 나타남
-                let pid = if a(0) == 1 { b.list47.get(a(2) as usize).copied() } else { Some(a(1) as usize) };
+                // 증원·재등장 (원작 FUN_00417d2c → FUN_0045b181 → FUN_004448a1):
+                // 방식 0/FFFF = 인물, 1 = 출진 번호(0..14). 퇴각·퇴장한 부대(상태 3 = gone)만 HP·MP·상태를 초기화해 (x, y) 에 다시 놓음
+                let mode = if a(0) == 0xFFFF { 0 } else { a(0) };
+                let pid = if mode == 1 {
+                    (a(2) >= 0 && (a(2) as usize) < 15).then(|| b.sortie.get(a(2) as usize).copied()).flatten()
+                } else {
+                    Some(a(1) as usize)
+                };
                 if let Some(u) = pid.and_then(|p| b.unit_of(p)) {
-                    if !b.units[u].visible && b.units[u].hp > 0 {
+                    if b.units[u].gone {
+                        let max_hp = b.units[u].off.hp_max(&b.items) as i32;
+                        let max_mp = b.units[u].off.mp_max(&b.items) as i32;
+                        let un = &mut b.units[u];
+                        un.max_hp = max_hp;
+                        un.hp = max_hp;
+                        un.mp = max_mp;
+                        un.state = [3; 5];
+                        un.mv_state = 3;
+                        un.status = 0;
+                        un.acted = false;
+                        un.gone = false;
+                        un.leave = None;
+                        un.pose = None;
+                        un.motion = None;
+                        un.end_dir = None;
+                        un.fade = 16;
+                        un.dir = battle::orig_dir(a(5)).unwrap_or(0);
                         b.place_at(u, a(3), a(4));
                         b.units[u].visible = true;
-                        if let Some(d) = battle::orig_dir(a(5)) {
-                            b.units[u].dir = d;
-                        }
+                        b.ai_dirty = true;
                         let w = b.appear_fx(u);
                         self.wait = Wait::Ticks(w);
                     }
@@ -2594,7 +2636,7 @@ impl<A: Assets> Engine<A> {
             }
             0x4D => {
                 // 부대 상태 바꾸기 (원작 FUN_004174fe → FUN_0045ca55 / FUN_0045cdde):
-                // 0 방식(0 인물, 1 목록 번호, 2 영역), 1 인물, 2 목록 번호, 3..6 x1 y1 x2 y2, 7 진영,
+                // 0 방식(0 인물, 1 출진 번호, 2 영역), 1 인물, 2 출진 번호, 3..6 x1 y1 x2 y2, 7 진영,
                 // 8 능력 종류(0..4, FFFF 없음), 9 정도(0 내림·1 보통·2 올림), 10 상태이상 비트(0x80 = 풀기), 11 HP 깎기, 12 MP 깎기
                 let (mode, x1, y1, x2, y2, side) = (a(0), a(3), a(4), a(5), a(6), a(7));
                 let pick: Vec<usize> = (0..b.units.len())
@@ -2604,11 +2646,12 @@ impl<A: Assets> Engine<A> {
                             return false;
                         }
                         match mode {
-                            1 => b.list47.get(a(2) as usize) == Some(&u.person),
+                            1 => a(2) >= 0 && b.sortie.get(a(2) as usize) == Some(&u.person),
                             2 => {
                                 let in_side = u.in_camp(side);
                                 in_side && (x1..=x2).contains(&u.x) && (y1..=y2).contains(&u.y)
                             }
+                            _ if (0x400..=0x402).contains(&a(1)) => b.event_unit == Some(i),
                             _ => u.person == a(1) as usize,
                         }
                     })
@@ -2675,6 +2718,7 @@ impl<A: Assets> Engine<A> {
                         u.ai_target = matches!(ai, 4 | 6).then_some((tx, ty));
                         u.ai_person = matches!(ai, 3 | 5).then_some(tp as usize);
                     }
+                    b.ai_dirty = true;
                 }
             }
             0x31 | 0x53 => {
@@ -3223,31 +3267,19 @@ impl<A: Assets> Engine<A> {
                     for u in b.units.iter_mut() {
                         u.motion = None;
                     }
-                    // 차례 시작: 그 진영 부대가 없으면 건너뜀
-                    let has = b.alive(side).next().is_some();
-                    if !has && side != battle::Side::Player {
-                        b.phase = match side {
-                            battle::Side::Ally => battle::Phase::TurnBanner { t: 0, side: battle::Side::Enemy },
-                            _ => {
-                                b.turn += 1;
-                                battle::Phase::TurnBanner { t: 0, side: battle::Side::Player }
-                            }
-                        };
-                        return;
-                    }
                 }
                 if t == 1 {
                     check = true;
                 }
-                // 차례 표시 길이 (원작 FUN_0044cc86): 아군 10+20 단위, 적군 20 단위, 우군은 표시 없음
+                // 차례 표시 길이 (원작 FUN_0044cc86 / FUN_004508a8): 아군 10+20 단위, 적군 20 단위, 우군은 표시 없으나 사건 검사는 반드시 실행 (S_41 마초 복병 등)
+                let has = b.alive(side).next().is_some();
                 let end = match side {
                     battle::Side::Player => 45,
-                    battle::Side::Enemy => 30,
-                    // 표시는 없지만 t == 1 의 사건 검사가 우군 차례인 채로 되게 2
-                    battle::Side::Ally => 2,
+                    battle::Side::Enemy if has => 30,
+                    battle::Side::Enemy | battle::Side::Ally => 2,
                 };
-                // 차례 표시가 끝날 무렵 상태 회복 처리 (연출이 있으면 재생)
-                if t + 1 == end {
+                // 차례 표시가 끝날 무렵 상태 회복 처리 (원작 FUN_00450dd9 / FUN_004508a8: 우군은 조조군 차례 시작 때 0..0x22 로 함께 처리)
+                if t + 1 == end && side != battle::Side::Ally {
                     b.start_side(side);
                     if b.next_status_fx() {
                         b.phase = battle::Phase::TurnBanner { side, t: t + 1 };
@@ -3266,6 +3298,7 @@ impl<A: Assets> Engine<A> {
                         let t = b.turn;
                         if self.autoplay {
                             if let Some(b) = self.battle() {
+                                b.reset_ai_order();
                                 b.phase = battle::Phase::Ai { side: battle::Side::Player, idx: 0, stage: 0 };
                             }
                         }
@@ -3287,6 +3320,7 @@ impl<A: Assets> Engine<A> {
                         for u in b.units.iter_mut().filter(|u| u.side == side) {
                             u.acted = false;
                         }
+                        b.reset_ai_order();
                         b.phase = battle::Phase::Ai { side, idx: 0, stage: 0 };
                     }
                 } else if let battle::Phase::TurnBanner { t: tt, .. } = &mut b.phase {

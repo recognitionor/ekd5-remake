@@ -187,27 +187,32 @@ impl Story {
                 imgs
             }
         };
+        let d = if (0..4).contains(&dir) { dir } else { 0 };
         self.actors.retain(|a| a.id != id);
-        self.actors.push(Actor { id, x: x as f32, y: y as f32, dir: dir & 3, pose: pose.clamp(0, 19), target: None, end_dir: dir & 3, step: 0, sprite, images });
+        self.actors.push(Actor { id, x: x as f32, y: y as f32, dir: d, pose: pose.clamp(0, 19), target: None, end_dir: d, step: 0, sprite, images });
         Ok(())
     }
 
     pub fn walk(&mut self, id: usize, x: i32, y: i32, dir: i32) {
         if let Some(a) = self.actors.iter_mut().find(|a| a.id == id) {
             a.target = Some((x as f32, y as f32));
-            a.end_dir = dir & 3;
+            a.end_dir = if (0..4).contains(&dir) { dir } else { 0 };
             a.pose = 0;
         }
     }
 
     pub fn turn(&mut self, id: usize, dir: i32) {
         if let Some(a) = self.actors.iter_mut().find(|a| a.id == id) {
-            a.dir = dir & 3;
+            a.target = None;
+            if (0..4).contains(&dir) {
+                a.dir = dir;
+            }
         }
     }
 
     pub fn pose(&mut self, id: usize, pose: i32) {
         if let Some(a) = self.actors.iter_mut().find(|a| a.id == id) {
+            a.target = None;
             a.pose = pose.clamp(0, 19);
         }
     }
