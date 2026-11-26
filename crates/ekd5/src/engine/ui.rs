@@ -49,7 +49,8 @@ impl ListBox {
     }
 
     fn height(&self) -> i32 {
-        self.rows.len().min(self.visible) as i32 * ROW + 40 + if self.footer.is_empty() { 0 } else { 22 }
+        let more = if !self.footer.is_empty() { 24 } else if self.rows.len() > self.visible { 14 } else { 0 };
+        self.rows.len().min(self.visible) as i32 * ROW + 40 + more
     }
 
     pub fn update(&mut self, inp: &Input, tapped: bool) -> Pick {

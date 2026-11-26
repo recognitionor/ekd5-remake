@@ -567,28 +567,78 @@ pub fn draw_text_big(scr: &mut Screen, f: &Font, x: i32, y: i32, s: &str, k: i32
     }
 }
 
-pub fn draw_text(scr: &mut Screen, f: &Font, x: i32, y: i32, s: &str, col: u8) {
-    let (b, _, _) = encoding_rs::EUC_KR.encode(s);
-    let shadow = col != TEXT && col != NAME;
+/// 글자 폭 (영숫자 8, 전각·한글 16)
+pub fn text_width(s: &str) -> i32 {
+    s.chars()
+        .map(|c| match c {
+            '−' | '\n' | '\r' | '\t' => 8,
+            c if c.is_ascii() => 8,
+            _ => 16,
+        })
+        .sum()
+}
+
+fn draw_text_fx(scr: &mut Screen, f: &Font, x: i32, y: i32, s: &str, col: u8, fx: Option<(u8, u8)>) {
     let mut cx = x;
-    for c in font::codes(&b) {
-        if let Some((w, rows)) = f.glyph(c) {
-            let ch = if c >= 0x100 { encoding_rs::EUC_KR.decode(&[(c >> 8) as u8, c as u8]).0.chars().next().unwrap_or(' ') } else { c as u8 as char };
-            let id = if ch == ' ' || ch == '\u{3000}' { None } else { scr.text_begin(cx, y, w, ch, col, shadow.then_some(31)) };
-            for (r, bits) in rows.iter().enumerate() {
-                for bx in 0..w {
-                    if bits & (0x8000 >> bx) != 0 {
-                        let (px, py) = (cx + bx, y + r as i32);
-                        if shadow {
-                            scr.text_px(id, px + 1, py + 1, 31);
+    for raw in s.chars() {
+        let ch = match raw {
+            '−' => '-',
+            '\n' | '\r' | '\t' => ' ',
+            c => c,
+        };
+        if ch == ' ' || ch == '\u{3000}' {
+            cx += if ch == ' ' { 8 } else { 16 };
+            continue;
+        }
+        let code = if ch.is_ascii() {
+            Some(ch as u16)
+        } else {
+            let mut buf = [0u8; 4];
+            let (b, _, had_err) = encoding_rs::EUC_KR.encode(ch.encode_utf8(&mut buf));
+            if !had_err && b.len() == 2 {
+                Some(((b[0] as u16) << 8) | b[1] as u16)
+            } else {
+                None
+            }
+        };
+        let Some((w, rows)) = code.and_then(|c| f.glyph(c)) else {
+            cx += if ch.is_ascii() { 8 } else { 16 };
+            continue;
+        };
+        let id = scr.text_begin(cx, y, w, ch, col, fx);
+        if let Some((2, edge)) = fx {
+            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                for (r, bits) in rows.iter().enumerate() {
+                    for bx in 0..w {
+                        if bits & (0x8000 >> bx) != 0 {
+                            scr.text_px(id, cx + bx + dx, y + r as i32 + dy, edge);
                         }
-                        scr.text_px(id, px, py, col);
                     }
                 }
             }
-            cx += w;
-        } else {
-            cx += if c >= 0x100 { 16 } else { 8 };
         }
+        for (r, bits) in rows.iter().enumerate() {
+            for bx in 0..w {
+                if bits & (0x8000 >> bx) != 0 {
+                    let (px, py) = (cx + bx, y + r as i32);
+                    if let Some((1, scol)) = fx {
+                        scr.text_px(id, px + 1, py + 1, scol);
+                    }
+                    scr.text_px(id, px, py, col);
+                }
+            }
+        }
+        cx += w;
     }
+}
+
+pub fn draw_text(scr: &mut Screen, f: &Font, x: i32, y: i32, s: &str, col: u8) {
+    // 어두운 맵·상단 제목 띠 위 밝은 글자색만 그림자 사용 (밝은 대화상자 위 회색·파랑·빨강·남색 글자에 검은 그림자가 겹치지 않게)
+    let shadow = matches!(col, 0x12 | 251 | 0x45);
+    draw_text_fx(scr, f, x, y, s, col, shadow.then_some((1, 31)));
+}
+
+/// 외곽선 글자 (원작 FUN_004110a1(1): 단일 글자로 기록해 선명한 글자 모드에서도 겹쳐 번지지 않게 함)
+pub fn draw_text_outlined(scr: &mut Screen, f: &Font, x: i32, y: i32, s: &str, col: u8, edge: u8) {
+    draw_text_fx(scr, f, x, y, s, col, Some((2, edge)));
 }

@@ -229,21 +229,40 @@ pub(super) fn has_batchim(s: &str) -> bool {
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum TurnStep {
+    Poison(usize),
+    Recover(usize),
+}
+
 #[derive(Clone, Debug)]
 pub struct DmgWin {
     pub u: usize,
     pub hp: (i32, i32),
     pub mp: (i32, i32),
     pub ex: (i32, i32),
+    pub wex: (i32, i32),
+    pub aex: (i32, i32),
     pub t: u32,
+    pub slow: bool,
+    pub note: Option<String>,
 }
 
 impl DmgWin {
-    /// 지금 보이는 값 (원작: 2틱마다 1/5씩)
+    pub fn new(u: usize, hp: (i32, i32), mp: (i32, i32), ex: (i32, i32)) -> Self {
+        Self { u, hp, mp, ex, wex: (0, 0), aex: (0, 0), t: 0, slow: false, note: None }
+    }
+
+    /// 지금 보이는 값 (원작: 2틱마다 1/5씩, 턴 시작 회복은 천천히 채움)
     fn at(&self, v: (i32, i32)) -> i32 {
-        // 원작 FUN_00452964: 5번 × 1단위 (1.5틱) 에 걸쳐 줄어듦
-        let k = (self.t * 2 / 3).min(5) as i32;
-        v.0 + (v.1 - v.0) * k / 5
+        if self.slow {
+            let k = self.t.min(18) as i32;
+            v.0 + (v.1 - v.0) * k / 18
+        } else {
+            // 원작 FUN_00452964: 5번 × 1단위 (1.5틱) 에 걸쳐 줄어듦
+            let k = (self.t * 2 / 3).min(5) as i32;
+            v.0 + (v.1 - v.0) * k / 5
+        }
     }
 }
 
@@ -366,6 +385,9 @@ pub struct Battle {
     cast_nums: Vec<(usize, i32)>,
     /// 차례로 재생할 상태 변화 연출 (MEFF 번호, 중심) — 원작 FUN_0045ca55 → FUN_0044080f
     pub fx_queue: VecDeque<(u8, Vec<(i32, i32)>, Option<FxEffect>)>,
+    /// 턴 시작 때 한 장수씩 화면을 맞춰 보여 줄 독·지형·아이템 회복 및 경험치 순서 (원작 FUN_0044ffb8 / FUN_0043eeed)
+    pub turn_steps: VecDeque<TurnStep>,
+    pub turn_hold: u32,
     /// 지금 재생 중인 연출이 끝나면 적용할 변화
     pub fx_after: Option<FxEffect>,
     /// 중간 저장에서 되살릴 지형·겹침
@@ -605,6 +627,8 @@ impl Battle {
             dmg_queue: VecDeque::new(),
             cast_nums: Vec::new(),
             fx_queue: VecDeque::new(),
+            turn_steps: VecDeque::new(),
+            turn_hold: 0,
             fx_after: None,
             restore_terrain: None,
             victory_text: String::new(),
@@ -1984,7 +2008,7 @@ impl Battle {
         let caster_win = (self.units[u].side == Side::Player && (self.units[u].off.exp, self.units[u].off.level) != (ex0, lv0)).then(|| {
             let un = &self.units[u];
             let to = if un.off.level > lv0 { 100 } else { un.off.exp as i32 };
-            DmgWin { u, hp: (un.hp, un.hp), mp: (un.mp, un.mp), ex: (ex0 as i32, to), t: 0 }
+            self.make_dmg_win(u, (un.hp, un.hp), (un.mp, un.mp), (ex0 as i32, to))
         });
         // 맞는 순간 대상 칸에 양 (HP 변화, 없으면 MP 변화)
         self.cast_nums = (0..self.units.len())
@@ -2001,7 +2025,9 @@ impl Battle {
         if !changed.is_empty() {
             for i in changed {
                 let un = &self.units[i];
-                self.dmg_queue.push_back(DmgWin { u: i, hp: (before[i].0, un.hp.max(0)), mp: (before[i].1, un.mp), ex: (un.off.exp as i32, un.off.exp as i32), t: 0 });
+                let ex = un.off.exp.min(100) as i32;
+                let w = self.make_dmg_win(i, (before[i].0, un.hp.max(0)), (before[i].1, un.mp), (ex, ex));
+                self.dmg_queue.push_back(w);
             }
             self.dmg_queue.extend(caster_win.clone());
             // 창은 연출이 끝난 뒤 (원작: 연출 → FUN_00452964)
@@ -2082,6 +2108,13 @@ impl Battle {
         if up { upn } else { down }
     }
 
+    pub fn make_dmg_win(&self, u: usize, hp: (i32, i32), mp: (i32, i32), ex: (i32, i32)) -> DmgWin {
+        let un = &self.units[u];
+        let we = un.off.gear_exp[0].min(100) as i32;
+        let ae = un.off.gear_exp[1].min(100) as i32;
+        DmgWin { u, hp, mp, ex, wex: (we, we), aex: (ae, ae), t: 0, slow: false, note: None }
+    }
+
     pub fn start_side(&mut self, side: Side) {
         // 원작 FUN_00450dd9: 조조군 차례 시작 때 0..0x22 (조조군 + 우군) 를 함께 회복 처리, 적군은 적군 차례 시작 때 (FUN_004508a8)
         let idx: Vec<usize> = self
@@ -2091,7 +2124,10 @@ impl Battle {
             .filter(|(_, u)| u.visible && u.hp > 0 && (u.side == side || (side == Side::Player && u.side == Side::Ally)))
             .map(|(i, _)| i)
             .collect();
-        for i in idx {
+        self.turn_steps.clear();
+        self.turn_hold = 0;
+        let mut poisoned = Vec::new();
+        for &i in &idx {
             // 상태이상 회복 (원작 FUN_0043e8e6): 확률 = 기본 사기 (태평청령서 0x14 면 100).
             // 포박·봉책·독은 그 확률, 혼란은 max(10, 사기−15) (100 이면 확실)
             let cure = if self.sp(i, 0x14).is_some() { 100 } else { self.units[i].off.base[4] as i32 };
@@ -2120,13 +2156,8 @@ impl Battle {
                     self.queue_effect(Some(44), FxEffect { u: i, set: 0, clear: bit, stat: None });
                 }
             }
-            // 독 피해 (원작 FUN_0044ffb8): 최대 HP/10 (최소 1), 1 은 남김
-            let un = &mut self.units[i];
-            if un.status & !cleared & status::POISON != 0 && un.hp > 1 {
-                let d = (un.max_hp / 10).max(1).min(un.hp - 1);
-                un.hp -= d;
-                let (x, y) = (un.x, un.y);
-                self.popup = Some((x * CELL + 4 - self.cam.0, y * CELL - 8 - self.cam.1, format!("독 -{d}"), 30));
+            if self.units[i].status & !cleared & status::POISON != 0 && self.units[i].hp > 1 {
+                poisoned.push(i);
             }
             // 능력 상태 복귀 (원작 FUN_0043ea85, 이동 포함 6가지): 0·1 → 한 칸 오름, 5 이상 → 한 칸 내림,
             // 4 → 사기에 따른 확률(사기 51 미만 60−사기 %, 그 외 10 %)로 보통, 2 → 기본 사기 % (태평청령서면 100 — FUN_0043e848(부대, 1)) 로 보통
@@ -2145,48 +2176,162 @@ impl Battle {
                     _ => {}
                 }
             }
-            // 지형 회복 (원작 FUN_0043eeed / FUN_0043f1c1): 지형 0x12 25 %, 0x13·0x14·0x16 20 %, 0x15 15 %
-            let (x, y) = (self.units[i].x, self.units[i].y);
-            let pct = match self.terr(x, y) {
-                0x12 => 25,
-                0x13 | 0x14 | 0x16 => 20,
-                0x15 => 15,
-                _ => 0,
-            };
-            let max_hp = self.units[i].max_hp;
-            let mut heal = max_hp * pct / 100;
-            // 청낭서(0x12): 최대 HP / 특수치, 태평요술서(0x13): MP + 특수치
-            if let Some(v) = self.sp(i, 0x12).filter(|&v| v > 0) {
-                heal += max_hp / v as i32;
+        }
+        // 원작 FUN_00450dd9 / FUN_004508a8 순서: 독 피해(FUN_0044ffb8) 먼저, 그다음 지형·아이템 회복·경험치(FUN_0043eeed)를 한 장수씩 포커스해 표시
+        for i in poisoned {
+            self.turn_steps.push_back(TurnStep::Poison(i));
+        }
+        for i in idx {
+            self.turn_steps.push_back(TurnStep::Recover(i));
+        }
+    }
+
+    /// 턴 시작 독·지형·아이템 회복 및 경험치를 한 장수씩 포커스해 보여 줌 (진행 중이면 true)
+    pub fn step_turn_events(&mut self) -> bool {
+        if self.dmg_win.is_some() {
+            if self.dmg_win.as_ref().is_some_and(|w| w.t < self.turn_hold) {
+                return true;
             }
-            let mp = self.sp(i, 0x13).map_or(0, |v| v as i32);
-            // 손자병법서(0x15)·육도(0x16)·삼략(0x17): 기본치×특수치/10 만큼 경험치·무기·방어구 경험치 (조조군만)
-            if self.units[i].side == Side::Player {
-                let items = self.items.clone();
-                let base = self.units[i].off.gear_base(&items);
-                if let Some(v) = self.sp(i, 0x15) {
-                    let jobs = self.jobs.clone();
-                    self.units[i].off.gain_exp(&jobs, base * v as u32 / 10);
+            self.dmg_win = None;
+        }
+        if self.run_levelup() {
+            return true;
+        }
+        while let Some(step) = self.turn_steps.pop_front() {
+            match step {
+                TurnStep::Poison(i) => {
+                    let Some(un) = self.units.get(i) else { continue };
+                    if !un.visible || un.hp <= 1 || un.status & status::POISON == 0 {
+                        continue;
+                    }
+                    let (x, y, hp0, max_hp, side) = (un.x, un.y, un.hp, un.max_hp, un.side);
+                    let d = (max_hp / 10).max(1).min(hp0 - 1);
+                    self.units[i].hp -= d;
+                    self.cursor = (x, y);
+                    self.focus(x, y);
+                    let mp = self.units[i].mp;
+                    let ex = self.units[i].off.exp.min(100) as i32;
+                    let mut w = self.make_dmg_win(i, (hp0, hp0 - d), (mp, mp), (ex, ex));
+                    w.slow = true;
+                    w.note = Some(format!("독 -{d}"));
+                    self.dmg_win = Some(w);
+                    self.turn_hold = if self.cheat { 6 } else if side == Side::Enemy { 36 } else { 54 };
+                    return true;
                 }
-                // 원작 FUN_0043eeed: 셋 다 기본치 (맹덕신서 보정, 최소 10) × 특수치 / 10
-                if let Some(v) = self.sp(i, 0x16) {
-                    self.gear_exp(i, 0, base * v as u32 / 10);
+                TurnStep::Recover(i) => {
+                    let Some(un) = self.units.get(i) else { continue };
+                    if !un.visible || un.hp <= 0 {
+                        continue;
+                    }
+                    let (x, y) = (un.x, un.y);
+                    // 지형 회복 (원작 FUN_0043eeed / FUN_0043f1c1): 지형 0x12 25 %, 0x13·0x14·0x16 20 %, 0x15 15 %
+                    let pct = match self.terr(x, y) {
+                        0x12 => 25,
+                        0x13 | 0x14 | 0x16 => 20,
+                        0x15 => 15,
+                        _ => 0,
+                    };
+                    let max_hp = self.units[i].max_hp;
+                    let mut heal = max_hp * pct / 100;
+                    // 청낭서(0x12): 최대 HP / 특수치, 태평요술서(0x13): MP + 특수치
+                    if let Some(v) = self.sp(i, 0x12).filter(|&v| v > 0) {
+                        heal += max_hp / v as i32;
+                    }
+                    let mp_add = self.sp(i, 0x13).map_or(0, |v| v as i32);
+                    let items = self.items.clone();
+                    let un = &self.units[i];
+                    let heal = heal.min(un.max_hp - un.hp).max(0);
+                    let mp_add = mp_add.min(un.off.mp_max(&items) as i32 - un.mp).max(0);
+                    // 손자병법서(0x15)·육도(0x16)·삼략(0x17): 기본치×특수치/10 만큼 경험치·무기·방어구 경험치 (조조군만, 원작 FUN_0043eeed / FUN_00452016)
+                    let mut exp_gain = 0u32;
+                    let (mut wk, mut ak) = (0u32, 0u32);
+                    let (mut wexp_gain, mut aexp_gain) = (0u32, 0u32);
+                    if un.side == Side::Player {
+                        let base = un.off.gear_base(&items);
+                        if un.level < 50 && un.off.exp != 0xFF {
+                            if let Some(v) = self.sp(i, 0x15) {
+                                exp_gain = base * v as u32 / 10;
+                            }
+                        }
+                        if let Some((wid, wlv)) = un.off.weapon {
+                            if wlv < Officer::gear_max(&items, wid) && un.off.gear_exp[0] != 0xFF {
+                                if let Some(v) = self.sp(i, 0x16) {
+                                    wk = v as u32;
+                                    wexp_gain = base * wk / 10;
+                                }
+                            }
+                        }
+                        if let Some((aid, alv)) = un.off.armor {
+                            if alv < Officer::gear_max(&items, aid) && un.off.gear_exp[1] != 0xFF {
+                                if let Some(v) = self.sp(i, 0x17) {
+                                    ak = v as u32;
+                                    aexp_gain = base * ak / 10;
+                                }
+                            }
+                        }
+                    }
+                    if heal == 0 && mp_add == 0 && exp_gain == 0 && wexp_gain == 0 && aexp_gain == 0 {
+                        continue;
+                    }
+                    let (hp0, mp0, side) = (un.hp, un.mp, un.side);
+                    let (ex0, lv0) = (un.off.exp.min(100) as i32, un.off.level);
+                    let (wex0, wlv0) = (un.off.gear_exp[0].min(100) as i32, un.off.weapon.map(|w| w.1));
+                    let (aex0, alv0) = (un.off.gear_exp[1].min(100) as i32, un.off.armor.map(|a| a.1));
+                    self.units[i].hp += heal;
+                    self.units[i].mp += mp_add;
+                    if exp_gain > 0 {
+                        let jobs = self.jobs.clone();
+                        let ups = self.units[i].off.gain_exp(&jobs, exp_gain);
+                        if ups > 0 {
+                            let lv = self.units[i].off.level as i32;
+                            self.levelups.push_back((i, lv));
+                        }
+                    }
+                    if wk > 0 {
+                        self.gear_exp(i, 0, wk);
+                    }
+                    if ak > 0 {
+                        self.gear_exp(i, 1, ak);
+                    }
+                    self.cursor = (x, y);
+                    self.focus(x, y);
+                    let un = &self.units[i];
+                    let ex1 = if un.off.level > lv0 || un.off.exp == 0xFF { 100 } else { un.off.exp as i32 };
+                    let wex1 = if un.off.weapon.map(|w| w.1) > wlv0 || un.off.gear_exp[0] == 0xFF { 100 } else { un.off.gear_exp[0] as i32 };
+                    let aex1 = if un.off.armor.map(|a| a.1) > alv0 || un.off.gear_exp[1] == 0xFF { 100 } else { un.off.gear_exp[1] as i32 };
+                    let mut parts = Vec::new();
+                    if heal > 0 {
+                        parts.push(format!("HP+{heal}"));
+                    }
+                    if mp_add > 0 {
+                        parts.push(format!("MP+{mp_add}"));
+                    }
+                    if exp_gain > 0 {
+                        parts.push(format!("EXP+{exp_gain}"));
+                    }
+                    if wexp_gain > 0 {
+                        parts.push(format!("무기EXP+{wexp_gain}"));
+                    }
+                    if aexp_gain > 0 {
+                        parts.push(format!("방어구EXP+{aexp_gain}"));
+                    }
+                    self.dmg_win = Some(DmgWin {
+                        u: i,
+                        hp: (hp0, un.hp),
+                        mp: (mp0, un.mp),
+                        ex: (ex0, ex1),
+                        wex: (wex0, wex1),
+                        aex: (aex0, aex1),
+                        t: 0,
+                        slow: true,
+                        note: Some(parts.join(" ")),
+                    });
+                    self.turn_hold = if self.cheat { 6 } else if side == Side::Enemy { 36 } else { 54 };
+                    return true;
                 }
-                if let Some(v) = self.sp(i, 0x17) {
-                    self.gear_exp(i, 1, base * v as u32 / 10);
-                }
-            }
-            let items = self.items.clone();
-            let un = &mut self.units[i];
-            let heal = heal.min(un.max_hp - un.hp).max(0);
-            let mp = mp.min(un.off.mp_max(&items) as i32 - un.mp).max(0);
-            un.hp += heal;
-            un.mp += mp;
-            if heal > 0 || mp > 0 {
-                let t = if heal > 0 { format!("+{heal}") } else { format!("MP+{mp}") };
-                self.popup = Some((x * CELL + 4 - self.cam.0, y * CELL - 8 - self.cam.1, t, 30));
             }
         }
+        false
     }
 
     /// 지형 표 행 = 병종 (원작 FUN_00407bc0)
@@ -2978,11 +3123,12 @@ impl Battle {
                     return false;
                 }
                 if t == 47 {
-                    let before = (self.units[target].hp, self.units[target].mp);
+                    let before = (self.units[target].hp, self.units[target].mp, self.units[target].off.exp.min(100) as i32, self.units[target].off.level);
                     let msg = self.use_tool(inv, target);
                     let un = &self.units[target];
-                    if (un.hp, un.mp) != before {
-                        self.dmg_win = Some(DmgWin { u: target, hp: (before.0, un.hp), mp: (before.1, un.mp), ex: (un.off.exp as i32, un.off.exp as i32), t: 0 });
+                    let ex_to = if un.off.level > before.3 || un.off.exp == 0xFF { 100 } else { un.off.exp as i32 };
+                    if (un.hp, un.mp, ex_to) != (before.0, before.1, before.2) {
+                        self.dmg_win = Some(self.make_dmg_win(target, (before.0, un.hp), (before.1, un.mp), (before.2, ex_to)));
                     } else {
                         let (tx, ty) = (un.x, un.y);
                         self.popup = Some((tx * CELL + 4 - self.cam.0, ty * CELL - 8 - self.cam.1, msg, 30));
@@ -2990,6 +3136,9 @@ impl Battle {
                 }
                 if t >= 47 + 40 {
                     self.dmg_win = None;
+                    if self.run_levelup() {
+                        return false;
+                    }
                     self.tool_pic = None;
                     self.units[unit].acted = true;
                     self.phase = Phase::PlayerIdle;
@@ -3166,9 +3315,11 @@ impl Battle {
                 format!("{}+{v}", ["공격", "방어", "정신", "순발", "사기"][k])
             }
             0x4B => {
-                un.off.gain_exp(&jobs, v as u32);
-                un.level = un.off.level as i32;
-                un.max_hp = un.off.hp_max(&items) as i32;
+                let ups = un.off.gain_exp(&jobs, v as u32);
+                if ups > 0 {
+                    let lv = un.off.level as i32;
+                    self.levelups.push_back((t, lv));
+                }
                 format!("경험+{v}")
             }
             _ => String::new(),
@@ -3330,7 +3481,7 @@ impl Battle {
                 // 맞은 부대 창 (값이 줄어드는 게이지)
                 if dmg.is_some() {
                     let un = &self.units[y];
-                    self.dmg_win = Some(DmgWin { u: y, hp: (before.0, un.hp.max(0)), mp: (before.1, un.mp), ex: (before.2, un.off.exp as i32), t: 0 });
+                    self.dmg_win = Some(self.make_dmg_win(y, (before.0, un.hp.max(0)), (before.1, un.mp), (before.2.min(100), un.off.exp.min(100) as i32)));
                     let _ = text;
                 } else {
                     self.popup = Some((vx * CELL + 8 - self.cam.0, vy * CELL - 8 - self.cam.1, text, 24));
@@ -3405,10 +3556,10 @@ impl Battle {
             self.levelups.push_back((x, lv));
         }
         let o = &self.units[x].off;
-        let to = if o.level > lv0 { 100 } else { o.exp as i32 };
-        if to != ex0 as i32 {
+        let to = if o.level > lv0 { 100 } else { o.exp.min(100) as i32 };
+        if to != ex0.min(100) as i32 {
             let un = &self.units[x];
-            self.dmg_win = Some(DmgWin { u: x, hp: (un.hp, un.hp), mp: (un.mp, un.mp), ex: (ex0 as i32, to), t: 0 });
+            self.dmg_win = Some(self.make_dmg_win(x, (un.hp, un.hp), (un.mp, un.mp), (ex0.min(100) as i32, to)));
             self.strikes.push_front((x, x, Some(-1), false));
             self.strike_t = 21;
         }
@@ -3432,7 +3583,7 @@ impl Battle {
             un.hp += un.max_hp - old_max;
             un.level = lv;
             let un = &self.units[u];
-            let name = self.names.get(un.person).cloned().unwrap_or_default();
+            let name = self.unit_display_name(un.person);
             // 원작 "%s%s 레벨 %u%s 되었다!" / "책략「%s」%s 배웠다!"
             let mut msgs = VecDeque::new();
             msgs.push_back(format!("{name}{} 레벨 {lv}{} 되었다!", if has_batchim(&name) { "은" } else { "는" }, if has_batchim(&lv.to_string()) { "이" } else { "가" }));
@@ -4563,9 +4714,9 @@ impl Battle {
             let x = if list.len() == 1 { sx + 4 + (blink & 1) as i32 * 24 } else if k & 1 == 0 { sx + 28 } else { sx + 4 };
             self.mark_pic(scr, list[k], 16, 16, x, sy);
         }
-        // 커서
+        // 커서 (턴 시작 회복 대상 장수는 깜빡이지 않고 계속 강조)
         let (cx, cy) = (self.cursor.0 * CELL - self.cam.0, self.cursor.1 * CELL - self.cam.1);
-        if (tick / 8) % 2 == 0 {
+        if (tick / 8) % 2 == 0 || self.dmg_win.as_ref().is_some_and(|w| w.slow) {
             scr.fill(cx, cy, 48, 2, 18);
             scr.fill(cx, cy + 46, 48, 2, 18);
             scr.fill(cx, cy, 2, 48, 18);
@@ -4598,10 +4749,7 @@ impl Battle {
             if let Some(un) = self.units.get(u) {
                 let s: String = v.to_string().chars().map(|c| char::from_u32(0xFF10 + c.to_digit(10).unwrap_or(0)).unwrap_or(c)).collect();
                 let (x, y) = (un.px as i32 - self.cam.0, un.py as i32 - self.cam.1);
-                for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                    draw_text(scr, f, x + dx, y + dy, &s, 0x18);
-                }
-                draw_text(scr, f, x, y, &s, if mp { 0x45 } else { 0x12 });
+                story::draw_text_outlined(scr, f, x, y, &s, if mp { 0x45 } else { 0x12 }, 0x18);
             }
         }
         if let Some((x, y, s, _)) = &self.popup {
@@ -4628,7 +4776,9 @@ impl Battle {
             super::sortie::rect(scr, wx - 1, wy - 1, ww + 2, wh + 2, 0x18);
         }
         if !self.objective.is_empty() {
-            draw_text(scr, f, 200, 4, &self.objective, story::NAME);
+            let ow = story::text_width(&self.objective);
+            let ox = (WEATHER_WIN.0 - 8 - ow).min(200).max(144);
+            draw_text(scr, f, ox, 4, &self.objective, story::NAME);
         }
         if matches!(self.phase, Phase::PlayerIdle | Phase::Selected { .. } | Phase::Peek { .. } | Phase::Sys { .. }) {
             draw_text(scr, f, 568, 4, "[메뉴]", story::NAME);
@@ -4688,11 +4838,13 @@ impl Battle {
             }
         }
         if let Some((m, _)) = &self.message {
-            frame_box(scr, 180, 440, 280, 32);
-            draw_text(scr, f, 196, 448, m, story::TEXT);
+            let mw = (story::text_width(m) + 32).max(220).min(620);
+            let mx = 320 - mw / 2;
+            frame_box(scr, mx, 440, mw, 32);
+            draw_text(scr, f, mx + 16, 448, m, story::TEXT);
         }
         match &self.phase {
-            Phase::TurnBanner { side, t } if *side != Side::Ally => {
+            Phase::TurnBanner { side, t } if *side != Side::Ally && self.banner.is_some() => {
                 // 원작 FUN_0044cc86: 맵을 바둑판으로 덮음 (아군 0x2d / 적군 0x3f), 가운데 큰 글자
                 // 층 (2, 0x2a·0x3a) (1, 0x24·0x35) 위 0x12. 아군은 10단위 뒤 아래에 "제 n턴" (2, 0x1f) (1, 0x18)
                 let enemy = *side == Side::Enemy;
@@ -4776,7 +4928,7 @@ impl Battle {
                 let m = if g.slot == 0 { "무기 레벨 업!" } else { "방어구 레벨 업!" };
                 let x = 320 - 96;
                 story::frame_box(scr, x, 240 - 48, 192, 48);
-                draw_text(scr, f, x + 96 - m.chars().count() as i32 * 8, 240 - 32, m, 0xAC);
+                draw_text(scr, f, x + 96 - story::text_width(m) / 2, 240 - 32, m, 0xAC);
             } else if g.t >= g.win_at() {
                 let (wx, wy) = (320 - 0x80, 240 - 0x30);
                 story::frame_box(scr, wx, wy, 256, 96);
@@ -4788,14 +4940,14 @@ impl Battle {
                 let name = crate::officer::item_name(&self.items, g.id);
                 draw_text(scr, f, col(9), 240 - 0x24, &name, story::TEXT);
                 draw_text(scr, f, col(11 + bytes(&name)), 240 - 0x24, &format!("Lv {}", g.lv), story::TEXT);
-                let who = self.names.get(self.units[g.u].person).cloned().unwrap_or_default();
+                let who = self.unit_display_name(self.units[g.u].person);
                 draw_text(scr, f, col(9), 240 - 0xC, &who, 0x3A);
                 draw_text(scr, f, col(10 + bytes(&who)), 240 - 0xC, "장비중", story::TEXT);
                 let label = if g.slot == 1 { "방어력" } else if crate::officer::item_stat(&self.items, g.id) == Some(2) { "정신력" } else { "공격력" };
                 draw_text(scr, f, col(6), 240 + 0x14, label, story::TEXT);
                 let p = |lv: u8| crate::officer::item_power(&self.items, g.id, lv);
                 draw_text(scr, f, col(14), 240 + 0x14, &format!("+{} ->", p(g.lv.saturating_sub(1))), story::TEXT);
-                draw_text(scr, f, col(21), 240 + 0x14, &format!("+{}", p(g.lv)), 0x2A);
+                draw_text(scr, f, col(22), 240 + 0x14, &format!("+{}", p(g.lv)), 0x2A);
             }
         }
         if let Some(w) = self.dmg_win.clone() {
@@ -4853,7 +5005,7 @@ impl Battle {
         for side in [Side::Player, Side::Ally, Side::Enemy] {
             for i in self.alive(side) {
                 let u = &self.units[i];
-                let name = self.names.get(u.person).cloned().unwrap_or_default();
+                let name = self.unit_display_name(u.person);
                 let job = self.job_names.get(u.job as usize).cloned().unwrap_or_default();
                 let tag = match side {
                     Side::Player => if u.acted { "아군 ·" } else { "아군" },
@@ -4930,8 +5082,13 @@ impl Battle {
         Phase::Sys { kind: 4, list: Box::new(l), units: Vec::new() }
     }
 
-    /// 피해·회복 창 (원작 FUN_00452964: 우군·적 4×2칸 — 이름 색 0xAD/0xAC, HP·MP /
-    /// FUN_00452016: 조조군 4×3칸 — 이름 0x2A, HP·MP·경험치 + 무기·방어구 경험치). 부대 오른쪽 옆
+    /// 원작 FUN_00407b47: 부대 표시에 쓸 이름 (뒤에 붙은 번호 0..9 제거, 예: "황건적01" → "황건적")
+    fn unit_display_name(&self, person: usize) -> String {
+        self.names.get(person).map_or("", |s| s.as_str()).chars().filter(|c| !c.is_ascii_digit()).collect()
+    }
+
+    /// 피해·회복 창 (원작 FUN_00452964: 우군·적 4×2칸 — 이름 테두리 색 0xAD/0xAC, HP·MP /
+    /// FUN_00452016: 조조군 4×3칸 — 이름 테두리 0x2A, HP·MP·경험치 + 무기·방어구 경험치). 부대 오른쪽 옆
     fn draw_dmg_win(&self, scr: &mut Screen, f: &Font, w: &DmgWin) {
         let un = &self.units[w.u];
         let player = un.side == Side::Player;
@@ -4945,9 +5102,10 @@ impl Battle {
             Side::Ally => 0xAD,
             Side::Enemy => 0xAC,
         };
-        let name = self.names.get(un.person).cloned().unwrap_or_default();
-        draw_text(scr, f, wx + 8, wy + 8, &name, nc);
-        draw_text(scr, f, wx + 96, wy + 8, &format!("Lv{}", un.level), story::TEXT);
+        let name = self.unit_display_name(un.person);
+        story::draw_text_outlined(scr, f, wx + 8, wy + 8, &name, 0x12, nc);
+        // 원작 MoveToXY(local_18 + 9) = wx + 80, MoveToXY(local_18 + 14) = wx + 120 (Lv 두 자리와 병과 이름이 절대 안 겹침)
+        draw_text(scr, f, wx + 80, wy + 8, &format!("Lv{:2}", un.level), story::TEXT);
         let job = self.job_names.get(un.job as usize).cloned().unwrap_or_default();
         draw_text(scr, f, wx + 120, wy + 8, &job, story::TEXT);
         let hp = w.at(w.hp);
@@ -4960,29 +5118,49 @@ impl Battle {
         draw_text(scr, f, wx + 64, wy + 54, &format!("{mp:3}/{mp_max:3}"), story::TEXT);
         self.gauge(scr, wx + 40, wy + 72, 0x40, mp, mp_max);
         if player {
-            let ex = w.at(w.ex);
+            let ex_max = un.level >= 50 || un.off.exp == 0xFF;
+            let ex = if ex_max { 100 } else { w.at(w.ex) };
             self.mark_pic(scr, 0x600, 24, 24, wx + 8, wy + 80);
-            draw_text(scr, f, wx + 64, wy + 78, &format!("{ex:3}/100"), story::TEXT);
+            let ex_txt = if ex_max { "    MAX".to_string() } else { format!("{ex:3}/100") };
+            draw_text(scr, f, wx + 64, wy + 78, &ex_txt, story::TEXT);
             self.gauge(scr, wx + 40, wy + 96, 0x140, ex, 100);
             // 무기·방어구 경험치 (원작 아이콘 0x1A6C0 / 0x1A7C0, 16×16)
-            if let Some((_, lv)) = un.off.weapon {
+            if let Some((wid, lv)) = un.off.weapon {
                 self.mark_pic(scr, 0x1A6C0, 16, 16, wx + 16, wy + 112);
-                draw_text(scr, f, wx + 40, wy + 112, &format!("Lv{lv} {:2}", un.off.gear_exp[0]), story::TEXT);
+                let full = lv >= Officer::gear_max(&self.items, wid) || un.off.gear_exp[0] == 0xFF;
+                let gt = if full { format!("Lv{lv} MAX") } else { format!("Lv{lv} {:2}", w.at(w.wex)) };
+                draw_text(scr, f, wx + 36, wy + 112, &gt, story::TEXT);
             }
-            if let Some((_, lv)) = un.off.armor {
+            if let Some((aid, lv)) = un.off.armor {
                 self.mark_pic(scr, 0x1A7C0, 16, 16, wx + 104, wy + 112);
-                draw_text(scr, f, wx + 128, wy + 112, &format!("Lv{lv} {:2}", un.off.gear_exp[1]), story::TEXT);
+                let full = lv >= Officer::gear_max(&self.items, aid) || un.off.gear_exp[1] == 0xFF;
+                let gt = if full { format!("Lv{lv} MAX") } else { format!("Lv{lv} {:2}", w.at(w.aex)) };
+                draw_text(scr, f, wx + 124, wy + 112, &gt, story::TEXT);
             }
+        }
+        if let Some(note) = &w.note {
+            let tw = story::text_width(note);
+            let nx = (ux + 24 - tw / 2).clamp(4, 636 - tw);
+            let ny = (uy - 18).max(26);
+            story::draw_text_outlined(scr, f, nx, ny, note, 251, 0x18);
         }
     }
 
-    /// 부대 정보창 (원작 FUN_00452964 의 꾸밈: 하트 0x180·깃털 0x3C0 아이콘 + 게이지, 지형 그림)
+    /// 부대 정보창 (원작 FUN_0044261e / FUN_0044250b: 진영 색 테두리 이름 + 병과 + Lv, 하트·깃털 게이지, 지형 그림)
     fn draw_unit_box(&self, scr: &mut Screen, f: &Font, u: usize) {
         let un = &self.units[u];
         let (bx, by) = (0, 384);
         frame_box(scr, bx, by, 404, 96);
-        let name = self.names.get(un.person).cloned().unwrap_or_default();
-        draw_text(scr, f, bx + 12, by + 8, &format!("{name}  Lv{}", un.level), story::NAME);
+        let nc = match un.side {
+            Side::Player => 0x2A,
+            Side::Ally => 0xAD,
+            Side::Enemy => 0xAC,
+        };
+        let name = self.unit_display_name(un.person);
+        let job = self.job_names.get(un.job as usize).cloned().unwrap_or_default();
+        story::draw_text_outlined(scr, f, bx + 12, by + 8, &name, 0x12, nc);
+        draw_text(scr, f, bx + 92, by + 8, &job, story::TEXT);
+        draw_text(scr, f, bx + 168, by + 8, &format!("Lv{:2}", un.level), story::TEXT);
         self.mark_pic(scr, 0x180, 24, 24, bx + 8, by + 28);
         self.gauge(scr, bx + 40, by + 36, 0x80, un.hp, un.max_hp);
         draw_text(scr, f, bx + 176, by + 32, &format!("{:3}/{:3}", un.hp.max(0), un.max_hp), story::TEXT);
@@ -4991,8 +5169,12 @@ impl Battle {
         self.gauge(scr, bx + 40, by + 62, 0x40, un.mp, mp_max);
         draw_text(scr, f, bx + 176, by + 58, &format!("{:3}/{mp_max:3}", un.mp.max(0)), story::TEXT);
         // 경험치
-        self.gauge(scr, bx + 40, by + 84, 0x140, un.off.exp as i32, 100);
+        let ex_max = un.level >= 50 || un.off.exp == 0xFF;
+        let ex_val = if un.side != Side::Player { 0 } else if ex_max { 100 } else { un.off.exp as i32 };
+        self.gauge(scr, bx + 40, by + 84, 0x140, ex_val, 100);
         draw_text(scr, f, bx + 12, by + 78, "EXP", story::TEXT);
+        let ex_txt = if un.side != Side::Player { "   ---".to_string() } else if ex_max { "   MAX".to_string() } else { format!("{ex_val:3}/100") };
+        draw_text(scr, f, bx + 176, by + 78, &ex_txt, story::TEXT);
         // 지형 그림·효과
         let t = self.terr(un.x, un.y);
         if let Some(p) = self.icons.pic(super::icons::TERRAIN, t as usize, &scr.pal) {

@@ -133,7 +133,7 @@ impl<A: Assets> Engine<A> {
                 let strats = b.known_strategies(u).into_iter().filter_map(|sid| b.strategies.get(sid as usize).map(|s| (sid, s.name.clone(), b.strat_mp(u, sid)))).collect();
                 View {
                     person: un.person,
-                    name: self.persons.get(un.person).map(|p| p.name.clone()).unwrap_or_default(),
+                    name: self.persons.get(un.person).map_or("", |p| p.name.as_str()).chars().filter(|c| !c.is_ascii_digit()).collect(),
                     belong: match un.side {
                         Side::Player => "조조군",
                         Side::Ally => "우군",
@@ -316,11 +316,13 @@ impl<A: Assets> Engine<A> {
         }
         draw_text(scr, f, LEFT + 72, y0 + 34, &v.name, NAME);
         draw_text(scr, f, LEFT + 72, y0 + 56, v.belong, TEXT);
-        let bar = |scr: &mut super::screen::Screen, x: i32, y: i32, w: i32, cur: i32, max: i32, col: u8, label: &str| {
+        let bar = |scr: &mut super::screen::Screen, x: i32, y: i32, w: i32, right_x: i32, cur: i32, max: i32, col: u8, label: &str| {
             scr.fill(x, y, w, 12, gray);
             rect(scr, x - 1, y - 1, w + 2, 14, dark);
             scr.fill(x, y, (w * cur.clamp(0, max.max(1)) / max.max(1)).min(w), 12, col);
-            draw_text(scr, f, x + w - text_w(label) - 2, y - 2, label, TEXT);
+            if !label.is_empty() {
+                draw_text(scr, f, right_x - text_w(label), y - 2, label, TEXT);
+            }
         };
         // 부대 속성
         let by = y0 + 120;
@@ -329,18 +331,19 @@ impl<A: Assets> Engine<A> {
         draw_text(scr, f, LEFT + 10, by - 8, "부대 속성", TEXT);
         draw_text(scr, f, LEFT + 10, by + 12, &job_name, TEXT);
         draw_text(scr, f, LEFT + 10, by + 36, &format!("Lv{:2}", v.off.level), TEXT);
-        draw_text(scr, f, LEFT + 62, by + 36, "Exp", TEXT);
+        draw_text(scr, f, LEFT + 52, by + 36, "Exp", TEXT);
         let exp_max = v.off.level >= 50 || v.off.exp == 0xFF;
-        bar(scr, LEFT + 94, by + 38, 120, if exp_max { 100 } else { v.off.exp as i32 }, 100, purple, if exp_max { "MAX" } else { "" });
+        let exp_txt = if exp_max { "MAX".to_string() } else { format!("{}", v.off.exp) };
+        bar(scr, LEFT + 84, by + 38, 96, LEFT + 216, if exp_max { 100 } else { v.off.exp as i32 }, 100, purple, &exp_txt);
         // 상태
         let sy = by + 80;
         etched(scr, LEFT, sy, 226, 196, white, dark);
         scr.fill(LEFT + 8, sy - 8, 40, 16, gray);
         draw_text(scr, f, LEFT + 10, sy - 8, "상태", TEXT);
         draw_text(scr, f, LEFT + 10, sy + 12, "HP", TEXT);
-        bar(scr, LEFT + 40, sy + 14, 174, v.hp.0, v.hp.1, green, &format!("{}/{}", v.hp.0, v.hp.1));
+        bar(scr, LEFT + 36, sy + 14, 116, LEFT + 216, v.hp.0, v.hp.1, green, &format!("{}/{}", v.hp.0, v.hp.1));
         draw_text(scr, f, LEFT + 10, sy + 36, "MP", TEXT);
-        bar(scr, LEFT + 40, sy + 38, 174, v.mp.0, v.mp.1, yellow, &format!("{}/{}", v.mp.0, v.mp.1));
+        bar(scr, LEFT + 36, sy + 38, 116, LEFT + 216, v.mp.0, v.mp.1, yellow, &format!("{}/{}", v.mp.0, v.mp.1));
         let mut st: Vec<String> = [(status::POISON, "독"), (status::CONFUSE, "혼란"), (status::PARALYZE, "포박"), (status::SEAL, "봉책")]
             .iter()
             .filter(|(b, _)| v.status & b != 0)
@@ -385,10 +388,10 @@ impl<A: Assets> Engine<A> {
                         _ => "↑",
                     };
                     draw_text(scr, f, rx + 12, y, &format!("{label}{mark}"), TEXT);
-                    bar(scr, rx + 92, y + 2, 196, val, 400, purple, &format!("{val}"));
+                    bar(scr, rx + 84, y + 2, 164, rx + 288, val, 400, purple, &format!("{val}"));
                 }
                 let mark = match v.state[5] {
-                    0..=2 => " (−1)",
+                    0..=2 => " (-1)",
                     3 => "",
                     _ => " (+2)",
                 };
@@ -416,8 +419,9 @@ impl<A: Assets> Engine<A> {
                         let cap = Officer::gear_max(&items, id);
                         draw_text(scr, f, gx + 52, gy + 28, &format!("Lv {lv}"), TEXT);
                         draw_text(scr, f, gx + 52, gy + 48, "Exp", TEXT);
-                        let full = lv >= cap;
-                        bar(scr, gx + 88, gy + 50, 150, if full { 100 } else { v.off.gear_exp[s] as i32 }, 100, purple, if full { "MAX" } else { "" });
+                        let full = lv >= cap || v.off.gear_exp[s] == 0xFF;
+                        let gtxt = if full { "MAX".to_string() } else { format!("{}", v.off.gear_exp[s]) };
+                        bar(scr, gx + 84, gy + 50, 144, gx + 268, if full { 100 } else { v.off.gear_exp[s] as i32 }, 100, purple, &gtxt);
                         draw_text(scr, f, gx + 8, gy + 74, &effect_text(&items, id, lv), TEXT);
                     } else {
                         draw_text(scr, f, gx + 52, gy + 34, &effect_text(&items, id, lv), TEXT);

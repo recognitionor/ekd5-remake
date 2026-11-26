@@ -67,7 +67,7 @@
     const b = mem().subarray(p, p + n);
     const dv = new DataView(b.buffer, b.byteOffset, n);
     const k = canvas.width / 640;
-    const size = Math.round(16 * k);
+    const size = Math.round(14.5 * k);
     ctx.save();
     ctx.font = `600 ${size}px ${FONT_FAM}`;
     ctx.textBaseline = "middle"; ctx.textAlign = "center";
@@ -76,15 +76,23 @@
       const ch = String.fromCodePoint(dv.getUint32(o + 12, true));
       let m = widthCache.get(ch + size);
       if (m === undefined) { m = ctx.measureText(ch).width; widthCache.set(ch + size, m); }
-      const cellW = cw * k, cx = (x + cw / 2) * k, cy = (y + 7.5) * k;
-      const sx = m > cellW ? cellW / m : 1;
-      const put = (dx, col) => {
+      const cellW = cw * k, lim = cellW * 0.94, cx = (x + cw / 2) * k, cy = (y + 7.5) * k;
+      const sx = m > lim ? lim / m : 1;
+      const put = (dx, dy, col) => {
         ctx.fillStyle = col;
-        if (sx < 1) { ctx.setTransform(sx, 0, 0, 1, cx + dx, cy + dx); ctx.fillText(ch, 0, 0); ctx.setTransform(1, 0, 0, 1, 0, 0); }
-        else ctx.fillText(ch, cx + dx, cy + dx);
+        if (sx < 1) { ctx.setTransform(sx, 0, 0, 1, cx + dx, cy + dy); ctx.fillText(ch, 0, 0); ctx.setTransform(1, 0, 0, 1, 0, 0); }
+        else ctx.fillText(ch, cx + dx, cy + dy);
       };
-      if (b[o + 8]) put(Math.max(1, k * 0.6), `rgb(${b[o + 9]},${b[o + 10]},${b[o + 11]})`);
-      put(0, `rgb(${b[o + 5]},${b[o + 6]},${b[o + 7]})`);
+      const mode = b[o + 8];
+      if (mode === 1) {
+        const d = Math.max(1, k * 0.65);
+        put(d, d, `rgb(${b[o + 9]},${b[o + 10]},${b[o + 11]})`);
+      } else if (mode === 2) {
+        const d = Math.max(1, Math.round(k * 0.85));
+        const ecol = `rgb(${b[o + 9]},${b[o + 10]},${b[o + 11]})`;
+        for (const [ox, oy] of [[-d, 0], [d, 0], [0, -d], [0, d], [-d, -d], [d, -d], [-d, d], [d, d]]) put(ox, oy, ecol);
+      }
+      put(0, 0, `rgb(${b[o + 5]},${b[o + 6]},${b[o + 7]})`);
     }
     ctx.restore();
     if (widthCache.size > 4000) widthCache.clear();

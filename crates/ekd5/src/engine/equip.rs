@@ -26,7 +26,7 @@ const ROW_H: i32 = 22;
 const ROWS: usize = 16;
 const RX: i32 = 372;
 const COMBO: (i32, i32, i32, i32) = (RX, 30, 256, 24);
-const SLOTS: [(i32, i32, i32, i32); 3] = [(RX, 214, 256, 74), (RX, 292, 256, 74), (RX, 370, 256, 60)];
+const SLOTS: [(i32, i32, i32, i32); 3] = [(RX, 212, 256, 76), (RX, 291, 256, 76), (RX, 370, 256, 62)];
 const PREV_BTN: (i32, i32, i32, i32) = (RX, 444, 92, 26);
 const NEXT_BTN: (i32, i32, i32, i32) = (RX + 96, 444, 92, 26);
 const END_BTN: (i32, i32, i32, i32) = (RX + 192, 444, 64, 26);
@@ -1014,15 +1014,19 @@ impl<A: Assets> Engine<A> {
             if let Some((id, lv)) = it {
                 let tx = x + 46;
                 if s < 2 {
+                    let cap = Officer::gear_max(&items, id);
+                    let full = lv >= cap || o.gear_exp[s as usize] == 0xFF;
                     draw_text(scr, f, tx, y + 22, &format!("Lv{lv}"), TEXT);
                     draw_text(scr, f, tx + 40, y + 22, "Exp", TEXT);
-                    let (gx, gy, gw) = (tx + 70, y + 26, 100);
+                    let (gx, gy, gw) = (tx + 70, y + 26, 96);
                     scr.fill(gx, gy, gw, 8, gray);
                     rect(scr, gx - 1, gy - 1, gw + 2, 10, dark);
-                    let ex = o.gear_exp[s as usize].min(100) as i32;
+                    let ex = if full { 100 } else { o.gear_exp[s as usize].min(100) as i32 };
                     scr.fill(gx, gy, gw * ex / 100, 8, blue);
-                    draw_text(scr, f, tx, y + 38, &effect_text(&items, id, lv), TEXT);
-                    draw_text(scr, f, tx, y + 54, &extra_text(&items, id), TEXT);
+                    let gtxt = if full { "MAX".to_string() } else { format!("{}", o.gear_exp[s as usize]) };
+                    draw_text(scr, f, gx + gw + 6, y + 22, &gtxt, TEXT);
+                    draw_text(scr, f, tx, y + 39, &effect_text(&items, id, lv), TEXT);
+                    draw_text(scr, f, tx, y + 56, &extra_text(&items, id), TEXT);
                 } else {
                     draw_text(scr, f, tx, y + 30, &effect_text(&items, id, lv), TEXT);
                 }
@@ -1137,20 +1141,20 @@ fn render_info(scr: &mut Screen, f: &crate::font::Font, items: &[u8], jobs: &[u8
     }
     // 속성·가격 / 효과·추가 효과
     let by = y + 76;
-    etched(scr, x + 8, by, 132, 48, white, dark);
+    etched(scr, x + 8, by, 132, 50, white, dark);
     let tn = TYPE_NAMES[if t < 0x12 { t as usize >> 1 } else if t < 0x3F { 9 } else { 10 }];
-    draw_text(scr, f, x + 14, by + 6, &format!("속성: {tn}"), TEXT);
+    draw_text(scr, f, x + 14, by + 8, &format!("속성: {tn}"), TEXT);
     let price = if r(19) == 0xFF { "---".to_string() } else { format!("{}", r(19) as u32 * 100) };
-    draw_text(scr, f, x + 14, by + 26, &format!("가격: {price}"), TEXT);
-    etched(scr, x + 146, by, w - 154, 48, white, dark);
+    draw_text(scr, f, x + 14, by + 28, &format!("가격: {price}"), TEXT);
+    etched(scr, x + 146, by, w - 154, 50, white, dark);
     scr.fill(x + 154, by - 8, 36, 16, gray);
     draw_text(scr, f, x + 156, by - 8, "효과", TEXT);
-    draw_text(scr, f, x + 152, by + 8, &effect_text(items, id, lv), TEXT);
-    draw_text(scr, f, x + 152, by + 26, &extra_text(items, id), TEXT);
+    draw_text(scr, f, x + 152, by + 10, &effect_text(items, id, lv), TEXT);
+    draw_text(scr, f, x + 152, by + 28, &extra_text(items, id), TEXT);
     // 설명 (IMSG.E5 기록 = 아이템 번호)
-    let dy = by + 56;
-    scr.fill(x + 8, dy, w - 16, 108, white);
-    rect(scr, x + 8, dy, w - 16, 108, dark);
+    let dy = by + 58;
+    scr.fill(x + 8, dy, w - 16, 106, white);
+    rect(scr, x + 8, dy, w - 16, 106, dark);
     let mut line = String::new();
     let mut ly = dy + 6;
     for c in desc.chars() {

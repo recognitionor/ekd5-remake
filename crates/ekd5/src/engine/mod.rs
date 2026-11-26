@@ -1835,9 +1835,10 @@ impl<A: Assets> Engine<A> {
             }
             0x1A => {
                 let (t, _, _) = encoding_rs::EUC_KR.decode(args[0].bytes());
+                let clean = t.lines().map(str::trim).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
                 if let Some(b) = self.battle() {
-                    b.objective = t.to_string();
-                    b.message = Some((t.to_string(), 90));
+                    b.objective = clean.clone();
+                    b.message = Some((clean, 90));
                 }
             }
             0x58 => {
@@ -3320,6 +3321,7 @@ impl<A: Assets> Engine<A> {
                 if t + 1 == end && side != battle::Side::Ally {
                     b.start_side(side);
                     if b.next_status_fx() {
+                        b.banner = None;
                         b.phase = battle::Phase::TurnBanner { side, t: t + 1 };
                         self.wait = Wait::Fx;
                         return;
@@ -3327,6 +3329,9 @@ impl<A: Assets> Engine<A> {
                 }
                 if t >= end {
                     b.banner = None;
+                    if b.step_turn_events() {
+                        return;
+                    }
                     if side == battle::Side::Player {
                         for u in b.units.iter_mut().filter(|u| u.side == battle::Side::Player) {
                             // 혼란이면 행동 못함
@@ -3837,11 +3842,11 @@ impl<A: Assets> Engine<A> {
         if d.exp > 0 && d.f[1].side == 0 {
             if let Some(u) = b.unit_of(p) {
                 let un = &mut b.units[u];
-                let (ex, lv) = (un.off.exp as i32, un.off.level);
+                let (ex, lv) = (un.off.exp.min(100) as i32, un.off.level);
                 un.off.gain_exp(&jobs, d.exp as u32);
-                let to = if un.off.level > lv { 100 } else { un.off.exp as i32 };
+                let to = if un.off.level > lv || un.off.exp == 0xFF { 100 } else { un.off.exp as i32 };
                 let (hp, mp) = (un.hp, un.mp);
-                b.dmg_win = Some(battle::DmgWin { u, hp: (hp, hp), mp: (mp, mp), ex: (ex, to), t: 0 });
+                b.dmg_win = Some(b.make_dmg_win(u, (hp, hp), (mp, mp), (ex, to)));
                 if b.units[u].off.level as i32 > b.units[u].level {
                     let nl = b.units[u].off.level as i32;
                     b.levelups.push_back((u, nl));

@@ -51,7 +51,8 @@ struct TextChar {
     w: i32,
     ch: char,
     col: u8,
-    shadow: Option<u8>,
+    /// None = 효과 없음, Some((1, 색)) = 그림자, Some((2, 색)) = 외곽선
+    fx: Option<(u8, u8)>,
     /// (화소, 지금 있어야 할 색, 그리기 전 색)
     pix: Vec<(u32, u8, u8)>,
 }
@@ -65,6 +66,17 @@ impl Default for Screen {
 impl Screen {
     pub fn clear(&mut self, c: u8) {
         self.px.fill(c);
+        if self.hires {
+            self.tmark.fill(0);
+        }
+    }
+
+    pub fn clear_text_mark(&mut self, i: usize) {
+        if self.hires {
+            if let Some(m) = self.tmark.get_mut(i) {
+                *m = 0;
+            }
+        }
     }
 
     /// 그림 복사. key = 투명 색 번호
@@ -88,7 +100,11 @@ impl Screen {
                 if Some(c) == key {
                     continue;
                 }
-                self.px[ty as usize * W + tx as usize] = c;
+                let idx = ty as usize * W + tx as usize;
+                self.px[idx] = c;
+                if self.hires {
+                    self.tmark[idx] = 0;
+                }
             }
         }
     }
@@ -96,7 +112,11 @@ impl Screen {
     pub fn fill(&mut self, x: i32, y: i32, w: i32, h: i32, c: u8) {
         for ty in y.max(0)..(y + h).min(H as i32) {
             for tx in x.max(0)..(x + w).min(W as i32) {
-                self.px[ty as usize * W + tx as usize] = c;
+                let idx = ty as usize * W + tx as usize;
+                self.px[idx] = c;
+                if self.hires {
+                    self.tmark[idx] = 0;
+                }
             }
         }
     }
@@ -120,11 +140,11 @@ impl Screen {
     }
 
     /// 글자 하나 시작 (draw_text). 기록 번호
-    pub fn text_begin(&mut self, x: i32, y: i32, w: i32, ch: char, col: u8, shadow: Option<u8>) -> Option<usize> {
+    pub fn text_begin(&mut self, x: i32, y: i32, w: i32, ch: char, col: u8, fx: Option<(u8, u8)>) -> Option<usize> {
         if !self.hires {
             return None;
         }
-        self.chars.push(TextChar { x, y, w, ch, col, shadow, pix: Vec::new() });
+        self.chars.push(TextChar { x, y, w, ch, col, fx, pix: Vec::new() });
         Some(self.chars.len() - 1)
     }
 
@@ -215,8 +235,9 @@ impl Screen {
             o.extend_from_slice(&(tc.y as i16).to_le_bytes());
             o.push(tc.w as u8);
             o.extend_from_slice(&rgb(tc.col));
-            o.push(tc.shadow.is_some() as u8);
-            o.extend_from_slice(&rgb(tc.shadow.unwrap_or(0)));
+            let (mode, fcol) = tc.fx.unwrap_or((0, 0));
+            o.push(mode);
+            o.extend_from_slice(&rgb(fcol));
             o.extend_from_slice(&(tc.ch as u32).to_le_bytes());
         }
     }

@@ -7,7 +7,7 @@
 //! op62 승패 (FUN_0044b25a), op5f 끝 (FUN_0044ba60).
 
 use super::screen::{Pic, Screen};
-use super::story::{draw_text, frame_box};
+use super::story::{draw_text, draw_text_outlined, frame_box};
 use crate::font::Font;
 use crate::palette::{nearest, Palette};
 use std::collections::{HashMap, VecDeque};
@@ -1010,10 +1010,7 @@ impl Duel {
                     1 => 0xad,
                     _ => 0xac,
                 };
-                for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                    draw_text(scr, f, x + dx, y + dy, name, edge);
-                }
-                draw_text(scr, f, x, y, name, 0x12);
+                draw_text_outlined(scr, f, x, y, name, 0x12, edge);
             }
         }
         // 띠 (장수 그림)

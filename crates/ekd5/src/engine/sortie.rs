@@ -10,7 +10,7 @@
 
 use super::camp::SortieRule;
 use super::screen::{Pic, Screen};
-use super::story::{draw_text, frame_box};
+use super::story::{draw_text, draw_text_outlined, frame_box, text_width};
 use super::{key, Assets, Engine, Pending};
 use crate::palette::nearest;
 use std::collections::HashMap;
@@ -348,14 +348,14 @@ impl<A: Assets> Engine<A> {
                     }
                 }
             }
-            // 레벨 (테두리 색: 안 고름 0x3A, 반드시 0x28, 고름 0x1F) 과 이름 (가운데)
+            // 레벨 (테두리 색: 안 고름 0x3A, 반드시 0x28, 고름 0x1F) 과 이름 (48px 부대 그림 기준 가운데)
             let o = self.officers.get(&p).cloned();
             let lv = o.as_ref().map_or(1, |o| o.level);
             let edge = if !chosen { 0x3A } else if k < ui.forced { 0x28 } else { 0x1F };
-            outlined(scr, f, x, y + 30, &format!("{lv}"), 0x12, edge);
-            let name = self.persons.get(p).map(|x| x.name.clone()).unwrap_or_default();
-            let w = name.chars().count() as i32 * 16;
-            outlined(scr, f, x + (56 - w) / 2, y + 48, &name, 0x12, black);
+            draw_text_outlined(scr, f, x, y + 28, &format!("{lv}"), 0x12, edge);
+            let name: String = self.persons.get(p).map_or("", |x| x.name.as_str()).chars().filter(|c| !c.is_ascii_digit()).collect();
+            let w = text_width(&name);
+            draw_text_outlined(scr, f, x + (48 - w) / 2, y + 48, &name, 0x12, black);
         }
         // 정렬 단추
         let labels = ["부대속성순", "<레벨순>", "<공격력순>", "<정신력순>", "<방어력순>"];
@@ -365,6 +365,7 @@ impl<A: Assets> Engine<A> {
                 for xx in 0..88 {
                     let i = ((y + yy) as usize) * 640 + (x + xx) as usize;
                     scr.px[i] = darken[scr.px[i] as usize];
+                    scr.clear_text_mark(i);
                 }
             }
             let (label, mode) = if t == 0 { (labels[0], 1) } else { (labels[(ui.sort2 as usize).clamp(2, 5) - 1], ui.sort2) };
@@ -388,7 +389,7 @@ impl<A: Assets> Engine<A> {
         let n = ui.pids.len();
         if ui.cursor < n {
             let (x, y) = (LIST.0 + (ui.cursor % 7) as i32 * 56 + 8, LIST.1 + (ui.cursor / 7) as i32 * 72 + 8);
-            rect(scr, x - 2, y - 2, 56, 68, white);
+            rect(scr, x - 2, y - 2, 52, 68, white);
         }
         // 장수 정보
         let p = ui.pids.get(ui.info).copied().unwrap_or(0);
@@ -466,12 +467,4 @@ pub(super) fn rect(scr: &mut Screen, x: i32, y: i32, w: i32, h: i32, c: u8) {
 pub(super) fn etched(scr: &mut Screen, x: i32, y: i32, w: i32, h: i32, light: u8, dark: u8) {
     rect(scr, x + 1, y + 1, w - 1, h - 1, light);
     rect(scr, x, y, w - 1, h - 1, dark);
-}
-
-/// 테두리 글자 (원작 글꼴 테두리 색)
-fn outlined(scr: &mut Screen, f: &crate::font::Font, x: i32, y: i32, s: &str, col: u8, edge: u8) {
-    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-        draw_text(scr, f, x + dx, y + dy, s, edge);
-    }
-    draw_text(scr, f, x, y, s, col);
 }
