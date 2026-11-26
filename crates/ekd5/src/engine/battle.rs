@@ -262,6 +262,8 @@ pub struct Battle {
     /// 대사/해설 겹쳐 그리기용
     pub ui: story::Story,
     pub slots: Vec<(i32, i32)>,
+    /// 출진 칸이 실제 대본에서 지정되었는가 ((0, 0) 모서리 배치 S_13 10번 칸과 빈 뒤쪽 칸 구분)
+    pub slot_used: Vec<bool>,
     /// 출진 칸이 '나중에 등장' 인가 (원작 op4b 마지막 인자 1 → op4c 방식 1 출진 번호로 불러냄)
     pub slot_hidden: Vec<bool>,
     /// 출진 칸 방향 (원작 op4b 인자 3, 우리 방향 값으로)
@@ -540,6 +542,7 @@ impl Battle {
             cursor: (0, 0),
             ui: story::Story::default(),
             slots: vec![(0, 0); 16],
+            slot_used: vec![false; 16],
             slot_hidden: vec![false; 16],
             slot_dir: vec![0; 16],
             targets: Vec::new(),

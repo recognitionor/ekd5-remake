@@ -390,7 +390,7 @@ impl<A: Assets> Engine<A> {
             title_t: None,
             sortie_sort: (1, 2),
             sortie_rule: None,
-            sortie_max: 0,
+            sortie_max: 1,
             last_camp_rule: None,
             sortie_chosen: None,
             resume: None,
@@ -1381,10 +1381,14 @@ impl<A: Assets> Engine<A> {
         if !vm.running && self.error.is_none() && self.stage % 2 == 1 && self.wait == Wait::None {
             // 전투: 절 0(배치·도입) 끝 → 턴 시작. 절 1 사건 본문 끝 → 하던 단계로. 절 2(끝) → 다음 단계
             if vm.section == 0 {
-                let need_pick = self.battle().is_some_and(|b| !b.started && b.slots.get(1).is_some_and(|&s| s != (0, 0)));
+                let need_pick = self.battle().is_some_and(|b| !b.started && b.slot_used.get(1).copied().unwrap_or(false));
                 if need_pick && self.sortie_chosen.is_none() {
-                    // 원작은 본진 출진 단추나 op4a 에서 고름. 둘 다 안 거쳤으면 여기서
-                    let rule = self.sortie_rule.clone().or_else(|| self.last_camp_rule.clone()).unwrap_or(camp::SortieRule { max: 12, forced: vec![], excluded: vec![] });
+                    // 원작은 본진 출진 단추나 op4a 에서 고름. 둘 다 안 거쳤으면 (CLI 전투 단계 직행 등) 여기서
+                    let rule = self.sortie_rule.clone().or_else(|| self.last_camp_rule.clone()).unwrap_or_else(|| {
+                        let max = self.battle().map_or(12, |b| b.slot_used.iter().take(15).take_while(|&&u| u).count().max(1));
+                        let excluded = self.battle().map_or_else(Vec::new, |b| b.units.iter().map(|u| u.person).collect());
+                        camp::SortieRule { max, forced: vec![], excluded }
+                    });
                     match self.open_sortie(rule, None) {
                         Some(ch) => self.sortie_chosen = Some(ch),
                         None => {
@@ -1625,7 +1629,7 @@ impl<A: Assets> Engine<A> {
             0x12 => self.start_choice(&args),
             0x1C => {
                 // 전투 도입이 밝아질 때 출진 장수를 이미 맵 위에 (출진 화면을 아직 안 거쳤으면 절 0 끝에서)
-                let early = vm.section == 0 && self.battle().is_some_and(|b| !b.started && (b.slots.get(1).map_or(true, |&s| s == (0, 0))));
+                let early = vm.section == 0 && self.battle().is_some_and(|b| !b.started && !b.slot_used.get(1).copied().unwrap_or(false));
                 if early || (vm.section == 0 && self.sortie_chosen.is_some() && self.battle().is_some_and(|b| !b.started)) {
                     self.place_sortie();
                 }
@@ -1723,10 +1727,12 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x06 => {
-                // 본진: 1 = 열기, 0 = 닫기. 출진 규칙 (최대, 반드시 ×5, 불가 ×5) 은 어느 쪽이든 정함 (원작 FUN_00417f55)
+                // 본진: 1 = 열기, 0 = 닫기. 출진 직전 닫기 op06 [0, 0, ...] 가 앞에서 정한 최대 인원을 1 로 덮지 않게 함
                 let list: Vec<i32> = args[2..].iter().map(|x| x.i()).collect();
                 let rule = camp::SortieRule::from_args(a(1), &list);
-                self.sortie_max = rule.max;
+                if a(0) == 1 || a(1) > 0 {
+                    self.sortie_max = rule.max;
+                }
                 if a(0) == 1 {
                     self.camp_rule = Some(rule);
                     self.camp_pending = true;
@@ -2536,24 +2542,46 @@ impl<A: Assets> Engine<A> {
                 }
             }
             0x4B => {
-                // 출진 칸 (번호, x, y, ...)
+                // 출진 칸 (번호, x, y, 방향, 숨김 — 원작 FUN_00418241)
                 let i = a(0) as usize;
                 if i < b.slots.len() {
-                    b.slots[i] = (a(1), a(2));
+                    let (x, y) = (a(1), a(2));
+                    let dir = battle::orig_dir(a(3)).unwrap_or(0);
+                    let hidden = a(4) == 1;
+                    b.slots[i] = (x, y);
+                    if let Some(u) = b.slot_used.get_mut(i) {
+                        *u = i == 0 || (x, y, a(3), a(4)) != (0, 0, 0, 0);
+                    }
                     // 방향 (원작 인자 3: 0 위·1 오른쪽·2 아래·3 왼쪽)
                     if let Some(d) = b.slot_dir.get_mut(i) {
-                        *d = battle::orig_dir(a(3)).unwrap_or(0);
+                        *d = dir;
                     }
                     // 마지막 인자 1 = 처음엔 없고 op4c 방식 1 (출진 번호) 로 나중에 등장
                     if let Some(h) = b.slot_hidden.get_mut(i) {
-                        *h = a(4) == 1;
+                        *h = hidden;
+                    }
+                    // 도입(op1c) 뒤 선택지 갈래에서 op4b 를 다시 실행해 복병 자리·방향을 바꾸는 전투 (S_20 창정 십면매복) 반영
+                    if !b.started {
+                        if let Some(u) = b.sortie.get(i).and_then(|&pid| b.unit_of(pid)) {
+                            b.units[u].dir = dir;
+                            if hidden {
+                                b.units[u].visible = false;
+                                b.units[u].x = x;
+                                b.units[u].y = y;
+                                b.units[u].px = (x * battle::CELL) as f32;
+                                b.units[u].py = (y * battle::CELL) as f32;
+                            } else {
+                                b.units[u].visible = true;
+                                b.place_at(u, x, y);
+                            }
+                        }
                     }
                 }
             }
             0x4C => {
                 // 등장: 0 = 인물 하나, 1 = 조조군 장수들을 출진 칸에
                 if a(0) == 1 {
-                    // 방식 1 = 출진 번호 k 의 장수를 그 출진 칸에 (원작 FUN_00417359: 아직 맵에 없을 때만, SE15 + 4단위)
+                    // 방식 1 = 출진 번호 k 의 장수를 그 출진 칸에 (원작 FUN_00417359: k < 15, 아직 맵에 없을 때만, SE15 + 4단위)
                     let list: Vec<usize> = match &sortie_chosen {
                         Some(c) if !c.is_empty() => c.clone(),
                         _ => roster.clone(),
@@ -2562,26 +2590,30 @@ impl<A: Assets> Engine<A> {
                         b.sortie = list.iter().copied().take(b.slots.len()).collect();
                     }
                     let k = a(2) as usize;
-                    let (x, y) = b.slots.get(k).copied().unwrap_or((0, 0));
-                    if let Some(&pid) = b.sortie.get(k).filter(|_| k == 0 || (x, y) != (0, 0)) {
-                        let u = match b.unit_of(pid) {
-                            Some(u) => Some(u),
-                            None => offs.get(&pid).map(|o| {
-                                let mut nu = b.make_unit(o.clone(), battle::Side::Player, x, y);
-                                nu.visible = false;
-                                nu.dir = b.slot_dir.get(k).copied().unwrap_or(0);
-                                b.units.push(nu);
-                                b.units.len() - 1
-                            }),
-                        };
-                        if let Some(u) = u.filter(|&u| !b.units[u].visible && !b.units[u].gone && b.units[u].hp > 0) {
-                            b.place_at(u, x, y);
-                            b.units[u].visible = true;
-                            b.units[u].fade = 16;
-                            b.ai_dirty = true;
-                            b.focus(x, y);
-                            self.sounds.push(Sound::Effect("SE15.WAV".into()));
-                            self.wait = Wait::Ticks(6);
+                    if k < 15 {
+                        let (x, y) = b.slots.get(k).copied().unwrap_or((0, 0));
+                        let dir = b.slot_dir.get(k).copied().unwrap_or(0);
+                        if let Some(&pid) = b.sortie.get(k) {
+                            let u = match b.unit_of(pid) {
+                                Some(u) => Some(u),
+                                None => offs.get(&pid).map(|o| {
+                                    let mut nu = b.make_unit(o.clone(), battle::Side::Player, x, y);
+                                    nu.visible = false;
+                                    nu.dir = dir;
+                                    b.units.push(nu);
+                                    b.units.len() - 1
+                                }),
+                            };
+                            if let Some(u) = u.filter(|&u| !b.units[u].visible && !b.units[u].gone && b.units[u].hp > 0) {
+                                b.units[u].dir = dir;
+                                b.place_at(u, x, y);
+                                b.units[u].visible = true;
+                                b.units[u].fade = 16;
+                                b.ai_dirty = true;
+                                b.focus(x, y);
+                                self.sounds.push(Sound::Effect("SE15.WAV".into()));
+                                self.wait = Wait::Ticks(6);
+                            }
                         }
                     }
                 } else if let Some(u) = b.unit_of(a(1) as usize) {
@@ -2837,23 +2869,29 @@ impl<A: Assets> Engine<A> {
     /// 출진 장수를 출진 칸에 놓음 (원작: 본진에서 고른 출진 장수가 전투 대본의 op4b 칸에 — 도입 대화 (op1c 밝아짐) 때 이미 맵 위에 있음.
     /// 예: 사수관 도입에서 하후돈이 조조를 돌아봄 op4f [1, 0]). 이미 있는 장수는 건너뜀
     fn place_sortie(&mut self) {
-        let roster = match &self.sortie_chosen {
+        let picked = self.sortie_chosen.is_some();
+        let raw = match &self.sortie_chosen {
             Some(c) => c.clone(),
             None if self.roster.is_empty() => vec![0],
             None => self.roster.clone(),
+        };
+        let roster: Vec<usize> = if picked {
+            raw
+        } else {
+            self.battle().map_or(raw.clone(), |b| raw.into_iter().filter(|&p| b.unit_of(p).is_none()).collect())
         };
         let offs: Vec<crate::officer::Officer> = roster.iter().map(|&p| self.officer(p)).collect();
         let Some(b) = self.battle() else { return };
         if b.started {
             return;
         }
-        // 출진 (원작은 출진 화면에서 고름): 출진 칸이 둘 이상 정해져 있으면 합류 순서대로 자동 배치
-        if b.slots.get(1).is_some_and(|&s| s != (0, 0)) {
-            for (k, &pid) in roster.iter().enumerate() {
-                let Some(&(x, y)) = b.slots.get(k) else { break };
-                if k > 0 && (x, y) == (0, 0) {
+        // 원작 FUN_00414600 / FUN_00418241: 출진 화면에서 고른 장수는 (0, 0) 모서리 칸(S_13 10번 칸)까지 모두 배치
+        if picked || b.slot_used.first().copied().unwrap_or(false) {
+            for (k, &pid) in roster.iter().take(15).enumerate() {
+                if !picked && !b.slot_used.get(k).copied().unwrap_or(false) {
                     break;
                 }
+                let Some(&(x, y)) = b.slots.get(k) else { break };
                 if !b.sortie.contains(&pid) {
                     b.sortie.push(pid);
                 }
@@ -3311,7 +3349,8 @@ impl<A: Assets> Engine<A> {
                             }
                         }
                         let Some(b) = self.battle() else { return };
-                        if let Some(u) = b.unit_of(0).filter(|&u| b.units[u].visible) {
+                        let lead = b.alive(battle::Side::Player).next();
+                        if let Some(u) = lead {
                             let (x, y) = (b.units[u].x, b.units[u].y);
                             b.cursor = (x, y);
                             b.focus(x, y);
@@ -3691,7 +3730,7 @@ impl<A: Assets> Engine<A> {
             let v: Vec<&str> = s.split('/').collect();
             Some(camp::SortieRule { max: v.first()?.parse().ok()?, forced: ids(v.get(1)?), excluded: ids(v.get(2)?) })
         });
-        self.sortie_max = f.get(13).and_then(|g| g.parse().ok()).unwrap_or(0);
+        self.sortie_max = f.get(13).and_then(|g| g.parse().ok()).unwrap_or(1);
         self.carry = f.get(14) == Some(&"1");
         self.hard = f.get(15) == Some(&"1");
         true
@@ -3876,10 +3915,10 @@ fn battle_won(b: &battle::Battle) -> bool {
     !b.units.iter().any(|u| u.side == battle::Side::Enemy && u.visible && u.hp > 0)
 }
 
-/// 원작 FUN_0044e7a4: 패배 목표 장수(아군)가 물러났거나 아군이 모두 물러남 (아직 안 나온 부대 = 상태 1 은 남은 것으로 셈)
+/// 원작 FUN_0044e7a4: 패배 목표 장수(조조군·우군 0..0x24)가 물러났거나 조조군이 모두 물러남 (아직 안 나온 부대 = 상태 1 은 남은 것으로 셈)
 fn battle_lost(b: &battle::Battle) -> bool {
     if let Some(p) = b.lose_target {
-        if b.units.iter().any(|u| u.side == battle::Side::Player && u.person == p && fallen(u)) {
+        if b.units.iter().any(|u| u.side != battle::Side::Enemy && u.person == p && fallen(u)) {
             return true;
         }
     }
