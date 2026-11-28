@@ -246,11 +246,12 @@ pub struct DmgWin {
     pub t: u32,
     pub slow: bool,
     pub note: Option<String>,
+    pub after_bean: Option<(usize, i32, i32)>,
 }
 
 impl DmgWin {
     pub fn new(u: usize, hp: (i32, i32), mp: (i32, i32), ex: (i32, i32)) -> Self {
-        Self { u, hp, mp, ex, wex: (0, 0), aex: (0, 0), t: 0, slow: false, note: None }
+        Self { u, hp, mp, ex, wex: (0, 0), aex: (0, 0), t: 0, slow: false, note: None, after_bean: None }
     }
 
     /// 지금 보이는 값 (원작: 2틱마다 1/5씩, 턴 시작 회복은 천천히 채움)
@@ -318,6 +319,10 @@ pub struct Battle {
     killed_by: Option<usize>,
     /// 방천화극 이어 치기를 이번 공격에 했나 (원작 FUN_0043fbea: 한 번만)
     chained: bool,
+    /// 콩주머니 자동 사용 연출 대기열·진행 상태 (부대, 회복 전 HP, 회복 후 HP) 및 지연된 공격자 경험치 정산
+    bean_queue: VecDeque<(usize, i32, i32)>,
+    bean_anim: Option<(usize, i32, i32, u32)>,
+    pending_flush: Option<usize>,
     cast_fx: Vec<(i32, i32)>,
     /// 맵 물체 (op58): (x, y, 종류, 원래 지형). 종류 0 불, 1 짚더미, 2 타는 짚더미, 4.. 성문 등 (GATE.E5)
     pub objs: Vec<(i32, i32, u8, u8)>,
@@ -589,6 +594,9 @@ impl Battle {
             strike_t: 0,
             killed_by: None,
             chained: false,
+            bean_queue: VecDeque::new(),
+            bean_anim: None,
+            pending_flush: None,
             cast_fx: Vec::new(),
             objs: Vec::new(),
             overlay: Vec::new(),
@@ -1865,7 +1873,6 @@ impl Battle {
         };
         if dmg > 0 {
             self.units[t].hp -= dmg.min(self.units[t].hp.max(0));
-            self.auto_bean(t);
             if hostile {
                 // 맞은 쪽 방어구 경험치: 시전자 레벨이 낮으면 3, 아니면 4
                 let k = if self.units[u].level < self.units[t].level { 3 } else { 4 };
@@ -1967,13 +1974,22 @@ impl Battle {
                 self.cast_end = Some(t);
             }
         }
-        // 창이 다 보일 때까지 (여럿이면 차례로)
+        // 창이 다 보일 때까지 (여럿이면 차례로, 콩주머니 발동 시 피해 창 직후 콩 사용 연출·회복 창)
+        if self.step_bean_anim() {
+            return false;
+        }
         if self.dmg_win.is_none() && !self.dmg_queue.is_empty() {
             self.cast_nums.clear();
             self.dmg_win = self.dmg_queue.pop_front();
             return false;
         }
         if self.dmg_win.as_ref().is_some_and(|w| w.t < 40) {
+            return false;
+        }
+        if let Some(bean) = self.dmg_win.as_mut().and_then(|w| w.after_bean.take()) {
+            self.dmg_win = None;
+            self.bean_queue.push_back(bean);
+            let _ = self.step_bean_anim();
             return false;
         }
         if let Some(n) = self.dmg_queue.pop_front() {
@@ -2004,12 +2020,6 @@ impl Battle {
         // 시전자가 대상이면 (명상·자기 회복) MP 소모를 빼고 바뀐 값을 창으로
         let mut before = before;
         before[u].1 -= cost;
-        // 시전자(조조군) 경험치 창 (원작 FUN_004255a5 → FUN_00452964): 대상 창들 다음에
-        let caster_win = (self.units[u].side == Side::Player && (self.units[u].off.exp, self.units[u].off.level) != (ex0, lv0)).then(|| {
-            let un = &self.units[u];
-            let to = if un.off.level > lv0 { 100 } else { un.off.exp as i32 };
-            self.make_dmg_win(u, (un.hp, un.hp), (un.mp, un.mp), (ex0 as i32, to))
-        });
         // 맞는 순간 대상 칸에 양 (HP 변화, 없으면 MP 변화)
         self.cast_nums = (0..self.units.len())
             .filter_map(|i| {
@@ -2019,17 +2029,26 @@ impl Battle {
                 (v != 0).then_some((i, v.abs()))
             })
             .collect();
-        // 값이 바뀐 부대마다 창 (원작은 대상마다 차례로)
+        // 값이 바뀐 부대마다 창 (원작 FUN_00424b40: 대상마다 피해 창 → 콩주머니 자동 사용)
         // 시전자의 MP 소모는 창으로 안 띄움 (원작은 대상만)
         let changed: Vec<usize> = (0..self.units.len()).filter(|&i| before.get(i).is_some_and(|b| *b != (self.units[i].hp, self.units[i].mp))).collect();
+        for &i in &changed {
+            let hp_hit = self.units[i].hp.max(0);
+            let mp_hit = self.units[i].mp;
+            let ex = self.units[i].off.exp.min(100) as i32;
+            let bean = if self.units[i].hp < before[i].0 && self.units[i].hp > 0 { self.trigger_bean(i) } else { None };
+            let mut w = self.make_dmg_win(i, (before[i].0, hp_hit), (before[i].1, mp_hit), (ex, ex));
+            w.after_bean = bean;
+            self.dmg_queue.push_back(w);
+        }
+        // 시전자(조조군) 경험치 창 (원작 FUN_004255a5 → FUN_00452964): 대상 창들 다음에
+        let caster_win = (self.units[u].side == Side::Player && (self.units[u].off.exp, self.units[u].off.level) != (ex0, lv0)).then(|| {
+            let un = &self.units[u];
+            let to = if un.off.level > lv0 { 100 } else { un.off.exp as i32 };
+            self.make_dmg_win(u, (un.hp, un.hp), (un.mp, un.mp), (ex0 as i32, to))
+        });
         if !changed.is_empty() {
-            for i in changed {
-                let un = &self.units[i];
-                let ex = un.off.exp.min(100) as i32;
-                let w = self.make_dmg_win(i, (before[i].0, un.hp.max(0)), (before[i].1, un.mp), (ex, ex));
-                self.dmg_queue.push_back(w);
-            }
-            self.dmg_queue.extend(caster_win.clone());
+            self.dmg_queue.extend(caster_win);
             // 창은 연출이 끝난 뒤 (원작: 연출 → FUN_00452964)
             // 효과 없음·빗나감 같은 글은 그대로 띄움
             if let Some(((x, y), txt)) = res.iter().find(|(_, t)| !t.starts_with('-') && !t.chars().next().is_some_and(|c| c.is_ascii_digit())) {
@@ -2112,7 +2131,7 @@ impl Battle {
         let un = &self.units[u];
         let we = un.off.gear_exp[0].min(100) as i32;
         let ae = un.off.gear_exp[1].min(100) as i32;
-        DmgWin { u, hp, mp, ex, wex: (we, we), aex: (ae, ae), t: 0, slow: false, note: None }
+        DmgWin { u, hp, mp, ex, wex: (we, we), aex: (ae, ae), t: 0, slow: false, note: None, after_bean: None }
     }
 
     pub fn start_side(&mut self, side: Side) {
@@ -2325,6 +2344,7 @@ impl Battle {
                         t: 0,
                         slow: true,
                         note: Some(parts.join(" ")),
+                        after_bean: None,
                     });
                     self.turn_hold = if self.cheat { 6 } else if side == Side::Enemy { 36 } else { 54 };
                     return true;
@@ -2447,15 +2467,17 @@ impl Battle {
         self.last_actor = Some(a);
         self.strikes.clear();
         let mut hp: std::collections::HashMap<usize, i32> = self.units.iter().enumerate().map(|(i, u)| (i, u.hp)).collect();
-        let strike = |b: &mut Self, x: usize, y: usize, counter: bool, crit_ok: bool, second: bool, hp: &mut std::collections::HashMap<usize, i32>| {
+        let mut mp: std::collections::HashMap<usize, i32> = self.units.iter().enumerate().map(|(i, u)| (i, u.mp)).collect();
+        let mut beans_left = self.inventory.iter().filter(|it| it.0 == 87).count();
+        let strike = |b: &mut Self, x: usize, y: usize, counter: bool, crit_ok: bool, second: bool, hp: &mut std::collections::HashMap<usize, i32>, mp: &mut std::collections::HashMap<usize, i32>, beans_left: &mut usize| {
             let hit = (b.rand(100) as u32) < b.hit_rate(x, y) || b.cheat && b.units[x].side != Side::Enemy;
+            // 원작 FUN_00406163: 명중 여부와 무관하게 대상이 살아 있으면 회심 판정 먼저 수행 (옥새 ')' 는 빗나가도 100% 회심 기 모으기 연출·막기 소리 SE31)
+            let rate = if b.sp(x, 0x29).is_some() { 100 } else { Self::ratio_curve(b.val(x, 4), b.val(y, 4)) };
+            let crit = crit_ok && *hp.get(&y).unwrap_or(&0) > 0 && (b.rand(100) as u32) < rate;
             if !hit {
-                b.strikes.push_back((x, y, None, false));
+                b.strikes.push_back((x, y, None, crit));
                 return;
             }
-            // 옥새(')') 는 치명타 확실
-            let rate = if b.sp(x, 0x29).is_some() { 100 } else { Self::ratio_curve(b.val(x, 4), b.val(y, 4)) };
-            let crit = crit_ok && (b.rand(100) as u32) < rate;
             let mut dmg = b.damage(x, y, counter);
             if crit {
                 // 황금갑옷('9') 은 치명타를 막음
@@ -2465,17 +2487,32 @@ impl Battle {
             if second && b.sp(y, 0x3A).is_some() {
                 dmg = 0;
             }
+            // 용린갑옷('<') 은 MP 가 남아 있을 때 MP 로 받음 (원작 FUN_00406163: 남은 MP 만큼 상한)
+            let m = mp.get(&y).copied().unwrap_or(0);
+            if b.sp(y, 0x3C).is_some() && m > 0 {
+                let md = dmg.min(m).max(0);
+                mp.insert(y, m - md);
+                b.strikes.push_back((x, y, Some(md), crit));
+                return;
+            }
             let h = hp.entry(y).or_insert(0);
             let dmg = dmg.min(*h).max(0);
-            // 용린갑옷('<') 은 MP 로 받음 → 체력은 그대로
-            if !(b.sp(y, 0x3C).is_some() && b.units[y].mp > 0) {
-                *h -= dmg;
+            *h -= dmg;
+            // 콩주머니('>'): HP 피해를 받고 살아 있으면 다음 타격·반격 전에 회복의 콩(+30) 자동 반영 (원작 FUN_00406851 → FUN_00405be9)
+            if dmg > 0 && *h > 0 && b.sp(y, 0x3E).is_some() && *h < b.units[y].max_hp {
+                let free = b.units[y].side != Side::Player;
+                if free || *beans_left > 0 {
+                    if !free {
+                        *beans_left -= 1;
+                    }
+                    *h = (*h + 30).min(b.units[y].max_hp);
+                }
             }
             b.strikes.push_back((x, y, Some(dmg), crit));
         };
         // 원작 FUN_00406851: 공격마다 대상 목록 (주 대상 + 범위 무기의 둘레 적, FUN_0040655c → FUN_004386ce) 을 만들고,
         // 타격 (FUN_00406163) 마다 목록 전체를 침 — 연속 공격 두 번째도 둘레까지, 반격도 반격하는 쪽 무기 범위로. 회심은 주 대상만
-        let volley = |b: &mut Self, x: usize, y: usize, counter: bool, second: bool, hp: &mut std::collections::HashMap<usize, i32>| {
+        let volley = |b: &mut Self, x: usize, y: usize, counter: bool, second: bool, hp: &mut std::collections::HashMap<usize, i32>, mp: &mut std::collections::HashMap<usize, i32>, beans_left: &mut usize| {
             let (xx, xy, yx, yy) = (b.units[x].x, b.units[x].y, b.units[y].x, b.units[y].y);
             let kind = b.splash_kind(x);
             let side = b.units[x].side;
@@ -2488,12 +2525,12 @@ impl Battle {
                 }
             }
             for (k, t) in ts.into_iter().enumerate() {
-                strike(b, x, t, counter, k == 0, second, hp);
+                strike(b, x, t, counter, k == 0, second, hp, mp, beans_left);
             }
         };
-        volley(self, a, d, false, false, &mut hp);
+        volley(self, a, d, false, false, &mut hp, &mut mp, &mut beans_left);
         if hp[&d] > 0 && (self.rand(100) as u32) < Self::ratio_curve(self.val(a, 3), self.val(d, 3)) {
-            volley(self, a, d, false, true, &mut hp);
+            volley(self, a, d, false, true, &mut hp, &mut mp, &mut beans_left);
         }
         // 반격 (원작 FUN_004066fa): 맞은 쪽 x 가 친 쪽 y 에게 — 둘 다 살아 있고, x 가 혼란이 아니고, y 가 청룡언월도(',') 가 아니고, 사거리 안.
         // 반격 반격 (자웅일대검·쌍편 '('): 반격을 맞은 쪽이 그 무기를 들었으면 반격에 다시 반격 (원작은 반격 뒤 같은 함수를 한 번 더 —
@@ -2503,18 +2540,18 @@ impl Battle {
             hp[&x] > 0 && hp[&y] > 0 && b.units[x].status & status::CONFUSE == 0 && b.sp(y, 0x2C).is_none() && b.in_range(x, (xx, xy), (yx, yy))
         };
         if can_counter(self, d, a, (dx, dy), (ax, ay), &hp) {
-            volley(self, d, a, true, false, &mut hp);
+            volley(self, d, a, true, false, &mut hp, &mut mp, &mut beans_left);
             if self.sp(a, 0x28).is_some() && can_counter(self, a, d, (ax, ay), (dx, dy), &hp) {
-                volley(self, a, d, true, false, &mut hp);
+                volley(self, a, d, true, false, &mut hp, &mut mp, &mut beans_left);
             }
         }
     }
 
     /// 맞은 뒤 장비·직업 효과 (원작 FUN_00405be9): 유성추·금화관포·여포궁·이광궁 = 혼란·독·포박·봉책,
-    /// 직업 0x32/0x31/0x2A 는 60 % 로 혼란/독/포박. 콩주머니('>') 는 회복의 콩으로 30 회복
-    fn after_hit(&mut self, x: usize, y: usize, hp_hit: bool) {
+    /// 직업 0x32/0x31/0x2A 는 60 % 로 혼란/독/포박. 콩주머니('>') 는 회복의 콩으로 30 회복 예약 정보 반환
+    fn after_hit(&mut self, x: usize, y: usize, hp_hit: bool) -> Option<(usize, i32, i32)> {
         if self.units[y].hp <= 0 {
-            return;
+            return None;
         }
         for (code, bit) in [(0x23u8, status::CONFUSE), (0x24, status::POISON), (0x25, status::PARALYZE), (0x26, status::SEAL)] {
             if self.sp(x, code).is_some() {
@@ -2533,13 +2570,14 @@ impl Battle {
             }
         }
         if hp_hit {
-            self.auto_bean(y);
+            return self.trigger_bean(y);
         }
+        None
     }
 
-    /// 콩주머니 ('>', 원작 FUN_00405be9 물리 / FUN_00424b40 책략): HP 피해를 받고 살아 있으면 회복의 콩 (0x57, +30) 을 자동으로 —
-    /// 조조군은 창고에 있을 때만 하나 써서, 그 밖은 그냥
-    fn auto_bean(&mut self, y: usize) {
+    /// 콩주머니 ('>', 원작 FUN_00405be9 물리 / FUN_00424b40 책략 → FUN_004201f7 → FUN_0041f22f → FUN_0041ecb2):
+    /// HP 피해를 받고 살아 있으면 회복의 콩 (0x57=87, +30) 을 자동으로 사용 (조조군은 소지품에 있을 때만 1개 소모, 적·우군은 무제한)
+    fn trigger_bean(&mut self, y: usize) -> Option<(usize, i32, i32)> {
         if self.units[y].hp > 0 && self.sp(y, 0x3E).is_some() && self.units[y].hp < self.units[y].max_hp {
             let free = self.units[y].side != Side::Player;
             let have = self.inventory.iter().position(|it| it.0 == 87);
@@ -2547,10 +2585,61 @@ impl Battle {
                 if let (false, Some(k)) = (free, have) {
                     self.inventory.remove(k);
                 }
-                let un = &mut self.units[y];
-                un.hp = (un.hp + 30).min(un.max_hp);
+                let hp0 = self.units[y].hp;
+                let hp1 = (hp0 + 30).min(self.units[y].max_hp);
+                self.units[y].hp = hp1;
+                self.cast_log.push(format!("@콩주머니 {} {hp0}→{hp1}", self.units[y].person));
+                return Some((y, hp0, hp1));
             }
         }
+        None
+    }
+
+    /// 콩주머니 자동 사용 연출 진행 (원작 FUN_0041ecb2 아이템 들기·SE41·스며듦 + FUN_00452964 회복 창). 진행 중이면 true
+    fn step_bean_anim(&mut self) -> bool {
+        if self.bean_anim.is_none() {
+            let Some((u, hp0, hp1)) = self.bean_queue.pop_front() else { return false };
+            if !self.units.get(u).is_some_and(|un| un.visible && un.hp > 0) {
+                return !self.bean_queue.is_empty();
+            }
+            let (x, y) = (self.units[u].x, self.units[u].y);
+            self.cursor = (x, y);
+            if x * CELL < self.cam.0 + 48 || x * CELL > self.cam.0 + 544 || y * CELL < self.cam.1 + TOP_BAR + 24 || y * CELL > self.cam.1 + 384 {
+                self.focus(x, y);
+            }
+            if self.cheat {
+                return !self.bean_queue.is_empty();
+            }
+            self.units[u].dir = 0;
+            self.units[u].pose = Some(6);
+            self.bean_anim = Some((u, hp0, hp1, 0));
+        }
+        let (u, hp0, hp1, t) = self.bean_anim.unwrap();
+        if t == 8 {
+            self.sounds.push("SE41.WAV".into());
+            self.units[u].pose = None;
+            self.units[u].motion = Some((1, self.anim_tick));
+        }
+        if t == 23 {
+            self.units[u].motion = None;
+        }
+        if t == 47 {
+            let mp = self.units[u].mp;
+            let ex = self.units[u].off.exp.min(100) as i32;
+            let mut w = self.make_dmg_win(u, (hp0, hp1), (mp, mp), (ex, ex));
+            w.slow = true;
+            w.note = Some(format!("콩 HP+{}", hp1 - hp0));
+            self.dmg_win = Some(w);
+        }
+        if t >= 47 + 40 {
+            self.dmg_win = None;
+            self.units[u].pose = None;
+            self.units[u].motion = None;
+            self.bean_anim = None;
+            return !self.bean_queue.is_empty();
+        }
+        self.bean_anim = Some((u, hp0, hp1, t + 1));
+        true
     }
 
     /// 경험치 (원작 FUN_00403afb): 격파 32+8×레벨차(최대 200) / 아니면 8+2×레벨차(최대 100)
@@ -3358,14 +3447,21 @@ impl Battle {
             self.strike_t = 0;
             self.killed_by = None;
             self.chained = false;
+            self.pending_flush = None;
             self.atk_exp = (self.units[a].side == Side::Player).then(|| (a, self.units[a].off.exp, self.units[a].off.level));
         }
         if let Phase::Attack { t: tt, .. } = &mut self.phase {
             *tt += 1;
         }
-        if let Some(&(x, _, Some(dmg), true)) = self.strikes.front() {
-            // 회심 공격 외침 (원작 FUN_00405aa4 → FUN_0040c4b2): 타격 전에 25 % 로 대사
-            if self.strike_t == 0 && dmg >= 0 && !self.shout_checked {
+        if self.step_bean_anim() {
+            return false;
+        }
+        if let Some(fx_u) = self.pending_flush.take() {
+            self.flush_exp(fx_u);
+        }
+        if let Some(&(x, y, dmg, true)) = self.strikes.front() {
+            // 회심 공격 외침 (원작 FUN_00405aa4 → FUN_0040c4b2): 타격 전에 25 % 로 대사 (빗나가도 회심 판정이면 발동)
+            if self.strike_t == 0 && x != y && dmg != Some(-1) && !self.shout_checked {
                 self.shout_checked = true;
                 if self.rand(100) < 25 {
                     self.shout = Some(self.units[x].person);
@@ -3427,6 +3523,8 @@ impl Battle {
             if st == 20 {
                 let (vx, vy) = (self.units[y].x, self.units[y].y);
                 let before = (self.units[y].hp, self.units[y].mp, self.units[y].off.exp as i32);
+                let mut hp_after_hit = self.units[y].hp;
+                let mut bean_after = None;
                 // 장비 경험치: 공격자 무기 (공격 무기만, 빗나감 1 / 상대 레벨이 낮으면 2 / 3), 맞은 쪽 방어구 (빗나감 1 / 공격자 레벨이 낮으면 3 / 4)
                 let (lx, ly) = (self.units[x].level, self.units[y].level);
                 if self.weapon_stat(x) == Some(0) {
@@ -3445,20 +3543,25 @@ impl Battle {
                         // 용린갑옷: MP 로 받음
                         let m = v.min(self.units[y].mp);
                         self.units[y].mp -= m;
+                        hp_after_hit = self.units[y].hp;
                         self.units[y].pose = Some(9);
                         // 원작 FUN_00405be9: MP 로 받은 피해에도 상태이상 무기는 걸림 (콩주머니는 HP 피해일 때만)
                         if m > 0 {
-                            self.after_hit(x, y, false);
+                            let _ = self.after_hit(x, y, false);
                         }
                         format!("MP-{m}")
                     }
                     Some(v) => {
                         self.units[y].hp -= v;
+                        hp_after_hit = self.units[y].hp;
                         self.units[y].pose = Some(if v > 0 { 9 } else { 2 });
                         if v > 0 {
-                            self.after_hit(x, y, true);
+                            if let Some(bean) = self.after_hit(x, y, true) {
+                                hp_after_hit = bean.1;
+                                bean_after = Some(bean);
+                            }
                         }
-                        if self.units[y].hp <= 0 {
+                        if hp_after_hit <= 0 {
                             self.killed_by = Some(x);
                         }
                         if crit { format!("치명타 {v}") } else { format!("{v}") }
@@ -3467,7 +3570,7 @@ impl Battle {
                 // 경험치 (원작 FUN_00403afb, 빗나가도): 쓰러뜨렸으면 큰 값 (승리 목표 장수면 2배), × 장비 기본치/10.
                 // 공격자와 반격하는 쪽 모두 — 그 부대의 타격 중 가장 큰 값을 타격이 끝난 뒤 한 번에
                 if x != y && self.units[x].side == Side::Player {
-                    let killed = self.units[y].hp <= 0;
+                    let killed = hp_after_hit <= 0;
                     let mut e = Self::exp_for(self.units[x].level, self.units[y].level, killed);
                     if killed && self.win_target == Some(self.units[y].person) {
                         e *= 2;
@@ -3478,10 +3581,12 @@ impl Battle {
                         None => self.strike_exp.push((x, e)),
                     }
                 }
-                // 맞은 부대 창 (값이 줄어드는 게이지)
+                // 맞은 부대 창 (값이 줄어드는 게이지 — 콩주머니 발동 전 실제 피해 직후 HP 를 먼저 표시)
                 if dmg.is_some() {
                     let un = &self.units[y];
-                    self.dmg_win = Some(self.make_dmg_win(y, (before.0, un.hp.max(0)), (before.1, un.mp), (before.2.min(100), un.off.exp.min(100) as i32)));
+                    let mut w = self.make_dmg_win(y, (before.0, hp_after_hit.max(0)), (before.1, un.mp), (before.2.min(100), un.off.exp.min(100) as i32));
+                    w.after_bean = bean_after;
+                    self.dmg_win = Some(w);
                     let _ = text;
                 } else {
                     self.popup = Some((vx * CELL + 8 - self.cam.0, vy * CELL - 8 - self.cam.1, text, 24));
@@ -3504,6 +3609,7 @@ impl Battle {
                         self.units[u].pose = None;
                     }
                 }
+                let bean_after = self.dmg_win.as_mut().and_then(|w| w.after_bean.take());
                 self.dmg_num = None;
                 self.dmg_win = None;
                 self.units[x].pose = None;
@@ -3511,12 +3617,21 @@ impl Battle {
                 self.strikes.pop_front();
                 self.strike_t = 0;
                 self.shout_checked = false;
-                // 이 부대의 타격이 끝났으면 경험치와 경험치 창 (원작: 공격 → 공격자 창 → 반격 → 반격한 쪽 창)
-                if self.strikes.front().map(|s| s.0) != Some(x) {
-                    self.flush_exp(x);
-                }
                 if self.units[y].hp <= 0 {
                     self.strikes.retain(|s| s.0 != y && s.1 != y);
+                }
+                if let Some(bean) = bean_after {
+                    self.bean_queue.push_back(bean);
+                }
+                // 콩주머니가 발동했으면 피해 창 직후 먼저 콩 사용 연출·회복 창을 돌리고, 그 뒤에 경험치 창으로 (원작 FUN_00406851: FUN_00405be9 → FUN_00405fcc)
+                let need_flush = self.strikes.front().map(|s| s.0) != Some(x);
+                if !self.bean_queue.is_empty() {
+                    if need_flush {
+                        self.pending_flush = Some(x);
+                    }
+                    let _ = self.step_bean_anim();
+                } else if need_flush {
+                    self.flush_exp(x);
                 }
             }
             return false;
@@ -3525,10 +3640,14 @@ impl Battle {
         if self.run_levelup() {
             return false;
         }
-        // 방천화극('.'): 쓰러뜨리면 사거리 안 다른 적을 이어서 — 한 번만 (원작 FUN_0043cbeb / FUN_0043fbea)
-        if !self.chained && self.killed_by == Some(a) && self.units[a].hp > 0 && self.sp(a, 0x2E).is_some() {
+        // 방천화극('.'): 주 대상을 쓰러뜨리면 사거리 안 다른 적을 이어서 공격 — 한 번만 (원작 FUN_0043cbeb / FUN_0043fbea)
+        if !self.chained && self.units[d].hp <= 0 && self.units[a].hp > 0 && self.sp(a, 0x2E).is_some() {
             let from = (self.units[a].x, self.units[a].y);
             if let Some(n) = self.targets_from(a, from).into_iter().find(|&t| self.units[t].hp > 0) {
+                let (nx, ny) = (self.units[n].x, self.units[n].y);
+                if nx * CELL < self.cam.0 + 48 || nx * CELL > self.cam.0 + 544 || ny * CELL < self.cam.1 + TOP_BAR + 24 || ny * CELL > self.cam.1 + 384 {
+                    self.focus(nx, ny);
+                }
                 self.killed_by = None;
                 self.chained = true;
                 self.resolve(a, n);
@@ -3671,9 +3790,11 @@ impl Battle {
     /// 쓰러졌는데 스크립트가 따로 처리하지 않은 부대를 퇴각시킴 (원작: 사건 → 기본 퇴각 FUN_004438a5).
     /// 반환: 걸리는 틱 (0 = 없음)
     fn leave_busy(&self) -> bool {
-        // 공격·책략 연출이 끝나고 사건 검사까지 지난 뒤에만
+        // 공격·책략·콩주머니 연출이 끝나고 사건 검사까지 지난 뒤에만
         !self.strikes.is_empty()
             || self.dmg_win.is_some()
+            || self.bean_anim.is_some()
+            || !self.bean_queue.is_empty()
             || self.attack_target.is_some()
             || matches!(self.phase, Phase::Attack { .. } | Phase::Cast { .. } | Phase::Ai { stage: 2 | 3, .. })
     }
@@ -4554,8 +4675,8 @@ impl Battle {
             // 행동 끝 = 어둡게 (진영·차례 상관없이, 그 진영 차례가 다시 올 때까지), 독 = 4틱 중 2틱 초록빛 (원작 FUN_00440c8f)
             let lut_dark = u.acted && u.hp > 0;
             let lut_poison = u.status & status::POISON != 0 && (tick / 4) % 4 > 1;
-            // 공격 동작 (UNIT_ATK) · 맞음 (UNIT_SPC 3)
-            let striking = self.strikes.front().is_some_and(|s| s.0 == i);
+            // 공격 동작 (UNIT_ATK) · 맞음 (UNIT_SPC 3) — 콩주머니 사용 연출 중에는 정면 자세 유지
+            let striking = self.bean_anim.is_none() && self.strikes.front().is_some_and(|s| s.0 == i);
             if let (Some(6), true, Some(atk)) = (u.pose, striking, &u.atk) {
                 let base = match u.dir {
                     0 => 0,
@@ -4728,10 +4849,24 @@ impl Battle {
             let (sx, sy) = (self.units[u].px as i32 - self.cam.0 + 8, self.units[u].py as i32 - self.cam.1 + 7 - k);
             scr.blit(pic, sx, sy, Some(0));
         }
-        // 도구 쓰기: 아이템 그림 (들기: 부대 앞 / 머리 위 / 상대에게 스며듦 — 원작 FUN_0043230a 16단계)
+        // 도구 쓰기 / 콩주머니 자동 사용: 아이템 그림 (들기: 부대 앞 / 머리 위 / 상대에게 스며듦 — 원작 FUN_0043230a 16단계)
         if let (Phase::ToolUse { unit, target, t, .. }, Some(pic)) = (&self.phase, &self.tool_pic) {
             let (u, oy, fade) = if *t < 8 { (*unit, 16, 0) } else if *t < 23 { (*unit, 0, 0) } else { (*target, 0, ((*t - 23) * 16 / 24) as i32) };
             if *t < 47 {
+                let (sx, sy) = (self.units[u].px as i32 - self.cam.0 + 8, self.units[u].py as i32 - self.cam.1 + oy);
+                for yy in 0..pic.h as i32 {
+                    for xx in 0..pic.w as i32 {
+                        let c = pic.px[(yy as usize) * pic.w + xx as usize];
+                        if c != 0 && ((xx * 7 + yy * 13) % 16) >= fade {
+                            scr.fill(sx + xx, sy + yy, 1, 1, c);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((u, _, _, t)) = self.bean_anim.filter(|b| b.3 < 47) {
+            if let Some(pic) = self.icons.item_big(&self.items, 87, &scr.pal) {
+                let (oy, fade) = if t < 8 { (16, 0) } else if t < 23 { (0, 0) } else { (0, ((t - 23) * 16 / 24) as i32) };
                 let (sx, sy) = (self.units[u].px as i32 - self.cam.0 + 8, self.units[u].py as i32 - self.cam.1 + oy);
                 for yy in 0..pic.h as i32 {
                     for xx in 0..pic.w as i32 {
